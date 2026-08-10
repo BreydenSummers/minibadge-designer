@@ -1,0 +1,45 @@
+# Secrets — never commit credentials
+.env
+*.env
+!.env.example
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+.Python
+*.so
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local data and output — may contain sensitive findings
+data/
+output/
+results/
+*.sqlite
+*.sqlite3
+*.db
+*.log
+
+# Keep empty directory structure
+!**/.gitkeep
+
+# Docker
+*.pid

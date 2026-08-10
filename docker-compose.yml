@@ -1,0 +1,5 @@
+services:
+  badge-maker:
+    build: .
+    env_file: .env
+    restart: unless-stopped
