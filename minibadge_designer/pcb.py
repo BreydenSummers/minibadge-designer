@@ -1222,8 +1222,11 @@ class ArtLayer:
     side: str = "front"
     # For "bare" only: which soldermask(s) open over the window. "through"
     # opens both (classic light pipe); "front"/"back" open one face — the
-    # other face keeps its mask and looks like a glow window from there.
-    # The copper is cut from BOTH pours in every case (light must pass).
+    # other face is untouched and keeps its mask AND its copper.
+    # Copper only has to go where the mask opens: you see laminate through
+    # the opening either way, and leaving the far pour intact means a
+    # one-face window can sit over a part mounted on the other face. A glow
+    # window is different — light has to cross, so it always cuts both.
     window: str = "through"
 
 
@@ -1822,22 +1825,29 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
         elif not front and zone_net != "3V3":
             obstacles.append(LineString([at(*g["res_in"]), (vx, vy)]).buffer(track_r))
 
-    # Glow/bare art windows strip copper from both layers so light can pass
-    # through the laminate. Expanded 0.1 mm past the mask opening so the
-    # copper edge hides under the mask despite fab registration tolerance.
+    # Window art strips copper so the laminate shows through. A glow window
+    # must clear BOTH layers — light has to cross the board — but a bare
+    # window only needs the face whose mask it opens, so a one-face window
+    # leaves the other pour (and anything mounted on it) alone. Expanded
+    # 0.1 mm past the mask opening so the copper edge hides under the mask
+    # despite fab registration tolerance.
     # Windows never reach the outer 1.5 mm of the outline: the pours keep a
     # continuous perimeter ring, so a full-width window can't split a plane
     # into disconnected halves.
     interior = board.buffer(-1.5)
+    face = "front" if layer.startswith("F") else "back"
     for art in spec.art:
-        if art.material in ("glow", "bare"):
-            obstacles += [
-                box(rx - 0.1, ry - 0.1, rx + rw + 0.1, ry + rh + 0.1).intersection(interior)
-                for rx, ry, rw, rh in art.rects
-            ]
-            obstacles += [
-                g.buffer(0.1).intersection(interior) for g in _art_shapely(art.polys)
-            ]
+        if art.material not in ("glow", "bare"):
+            continue
+        if art.material == "bare" and art.window not in ("through", face):
+            continue  # window does not open on this face; its copper stays
+        obstacles += [
+            box(rx - 0.1, ry - 0.1, rx + rw + 0.1, ry + rh + 0.1).intersection(interior)
+            for rx, ry, rw, rh in art.rects
+        ]
+        obstacles += [
+            g.buffer(0.1).intersection(interior) for g in _art_shapely(art.polys)
+        ]
 
     filled = region.difference(unary_union(obstacles)) if obstacles else region
     # Morphological opening: drop slivers narrower than the zone min_thickness.
@@ -1887,13 +1897,16 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
     ]
 
 
-def _window_geometry(spec: BadgeSpec):
+def _window_geometry(spec: BadgeSpec, face: str | None = None):
     """The glow/bare light windows as shapely polygons (board mm), or None.
 
     Same shapes _fill_geometry cuts out of the pours: expanded 0.1 mm past
     the mask opening and held inside the perimeter ring. Copper artwork that
     sits *inside* a window (a skull's gold eyes in a bare face) is carved
     back out, so it keeps its copper.
+
+    With a face given, only windows that actually open there count — a bare
+    window on one side leaves the other side's copper alone.
     """
     from shapely.ops import unary_union
 
@@ -1904,6 +1917,9 @@ def _window_geometry(spec: BadgeSpec):
     wins = []
     for art in spec.art:
         if art.material not in ("glow", "bare"):
+            continue
+        if (face and art.material == "bare"
+                and art.window not in ("through", face)):
             continue
         wins += [box(rx - 0.1, ry - 0.1, rx + rw + 0.1, ry + rh + 0.1).intersection(interior)
                  for rx, ry, rw, rh in art.rects]
@@ -1936,7 +1952,15 @@ def _keepout_zones(spec: BadgeSpec) -> list[str]:
     turning every glow/bare window back into ordinary board. A keepout
     encodes the intent so the refill agrees with us.
     """
-    geom = _window_geometry(spec)
+    out = []
+    for face, layer in (("front", "F.Cu"), ("back", "B.Cu")):
+        out += _keepout_zones_for(spec, face, layer)
+    return out
+
+
+def _keepout_zones_for(spec: BadgeSpec, face: str, layer: str) -> list[str]:
+    """The keepout rule areas for one face (see _keepout_zones)."""
+    geom = _window_geometry(spec, face)
     if geom is None:
         return []
     polys = list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
@@ -1951,8 +1975,8 @@ def _keepout_zones(spec: BadgeSpec) -> list[str]:
         pts = " ".join(f"(xy {_n(ORIGIN + x)} {_n(ORIGIN + y)})"
                        for x, y in ring.coords[:-1])
         out.append(
-            f'  (zone (net 0) (net_name "") (layers "F.Cu" "B.Cu") '
-            f'(tstamp {_ts(f"keepout-{i}")}) (hatch edge 0.508)\n'
+            f'  (zone (net 0) (net_name "") (layer "{layer}") '
+            f'(tstamp {_ts(f"keepout-{face}-{i}")}) (hatch edge 0.508)\n'
             "    (connect_pads (clearance 0))\n"
             "    (min_thickness 0.25)\n"
             "    (keepout (tracks allowed) (vias allowed) (pads allowed) "

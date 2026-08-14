@@ -667,8 +667,17 @@ def test_light_windows_get_keepouts():
     for material in ("glow", "bare"):
         out = pcb.generate_pcb(pcb.BadgeSpec(art=[pcb.ArtLayer(material, [window])]))
         assert "(copperpour not_allowed)" in out, material
-        # keepouts cover both pours, since windows cut through the board
-        assert re.search(r'\(zone \(net 0\)[^\n]*\(layers "F\.Cu" "B\.Cu"\)', out), material
+        # a through window cuts the board, so both pours are barred
+        for layer in ("F.Cu", "B.Cu"):
+            assert re.search(rf'\(zone \(net 0\)[^\n]*\(layer "{layer}"\)', out), \
+                (material, layer)
+
+    # A bare window open on one face only bars that face: the other pour is
+    # untouched, which is what lets it sit under a part on the far side.
+    out = pcb.generate_pcb(pcb.BadgeSpec(
+        art=[pcb.ArtLayer("bare", [window], window="back")]))
+    assert re.search(r'\(zone \(net 0\)[^\n]*\(layer "B\.Cu"\)', out)
+    assert not re.search(r'\(zone \(net 0\)[^\n]*\(layer "F\.Cu"\)', out)
 
     # Silk and copper artwork keep their copper, so they get no keepout.
     for material in ("silk", "copper"):
@@ -998,3 +1007,33 @@ def test_half_populated_pair_still_gets_a_single_pin_header():
     assert "PinHeader_1x01" not in out
     off = re.search(r"\(offset \(xyz ([-\d.]+) ([-\d.]+) -1\.6\)\)", out)
     assert float(off.group(1)) == 16.51        # 17.78 midpoint - 1.27
+
+
+def test_one_face_bare_window_leaves_the_other_pour_alone():
+    from shapely.geometry import Point
+
+    # A part on the front and a bare window on the back, overlapping. The
+    # window only opens the back mask, so only the back pour is cut — the
+    # front keeps its copper and the part keeps working.
+    win = (5.0, 6.0, 11.0, 8.0)
+    led = pcb.Led(10.16, 10.16, "red", side="front", size="0805", layout="inline")
+    spec = pcb.BadgeSpec(leds=[led],
+                         art=[pcb.ArtLayer("bare", [win], side="back", window="back")])
+    # inside the window but clear of the unit's own copper, which cuts the
+    # front pour around itself no matter what the window does
+    at = Point(14.5, 12.5)
+    front = pcb._fill_geometry("3V3", "F.Cu", spec)
+    back = pcb._fill_geometry("GND", "B.Cu", spec)
+    assert any(p.contains(at) for p in front), "front pour should survive"
+    assert not any(p.contains(at) for p in back), "back pour should be cut"
+
+    # A glow window has to cut both — light crosses the board.
+    spec = pcb.BadgeSpec(leds=[led], art=[pcb.ArtLayer("glow", [win])])
+    assert not any(p.contains(at) for p in pcb._fill_geometry("3V3", "F.Cu", spec))
+    assert not any(p.contains(at) for p in pcb._fill_geometry("GND", "B.Cu", spec))
+
+    # ...and so does a bare window asked to open both faces.
+    spec = pcb.BadgeSpec(leds=[led],
+                         art=[pcb.ArtLayer("bare", [win], window="through")])
+    assert not any(p.contains(at) for p in pcb._fill_geometry("3V3", "F.Cu", spec))
+    assert not any(p.contains(at) for p in pcb._fill_geometry("GND", "B.Cu", spec))
