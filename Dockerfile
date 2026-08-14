@@ -32,6 +32,7 @@ RUN set -eux; \
       Resistor_SMD.3dshapes/R_0805_2012Metric \
       Resistor_SMD.3dshapes/R_1206_3216Metric \
       Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x02_P2.54mm_Vertical \
+      Connector_PinHeader_2.54mm.3dshapes/PinHeader_1x01_P2.54mm_Vertical \
     ; do \
       mkdir -p "/models/$(dirname "$f")"; \
       cp "$src/$f.step" "/models/$f.step"; \

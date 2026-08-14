@@ -1383,20 +1383,28 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
     # pins pointing away from the front face — how a minibadge actually
     # plugs into the badge's socket strip. Model x-rotation 180 flips it
     # under the board; the z-rotation lays the two pins along the pair.
-    header = model_path("Connector_PinHeader_2.54mm", "PinHeader_1x02_P2.54mm_Vertical")
-    # Only a fully populated pair gets a header body: with one pin dropped the
-    # pads are still right, there is just no two-pin part to show there.
+    # A pair with one pin dropped gets a single-pin header over the pad that
+    # is left, not nothing — the part really is there on the finished badge.
+    headers = {
+        2: model_path("Connector_PinHeader_2.54mm", "PinHeader_1x02_P2.54mm_Vertical"),
+        1: model_path("Connector_PinHeader_2.54mm", "PinHeader_1x01_P2.54mm_Vertical"),
+    }
     for i, key in enumerate(PAD_PAIRS):
-        pair = PAD_PAIRS[key]
-        if not all(q in pins for q in pair["pins"]):
+        kept = [q for q in PAD_PAIRS[key]["pins"] if q in pins]
+        if not kept:
             continue
-        px, py = pair["header"]
+        # Centre the body on the pins it actually covers: a 1x02 spans the
+        # pair's midpoint, a 1x01 sits on its own pad.
+        xs = [x for num, x, _y, _net, _row in CONNECTOR_PADS if num in kept]
+        px = sum(xs) / len(xs)
+        py = PAD_PAIRS[key]["header"][1]
         # offset z -1.6 (board thickness) + x-rot 180: body flush on the
         # BACK face, pins pointing away from the front — how a minibadge
         # plugs into the badge's socket strip.
         out.append(
-            f'    (model "{header}"\n'
-            f"      (offset (xyz {_n(px - 1.27)} {_n(-py)} -1.6)) (scale (xyz 1 1 1)) "
+            f'    (model "{headers[len(kept)]}"\n'
+            f"      (offset (xyz {_n(px - (1.27 if len(kept) == 2 else 0.0))} "
+            f"{_n(-py)} -1.6)) (scale (xyz 1 1 1)) "
             "(rotate (xyz 180 0 90))\n"
             "    )"
         )
