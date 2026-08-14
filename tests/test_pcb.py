@@ -130,20 +130,20 @@ def test_custom_outline_widens_the_safe_region():
 def test_units_fit_between_connector_pads():
     # The strip between a row's two pad pairs is usable board.
     led = pcb.Led(10.16, 4.7, "red")
-    assert not pcb.pad_conflict(led, ("top", "bottom"))
-    assert pcb.resolve_pad_overlap(led, ("top", "bottom")) == led
+    assert not pcb.pad_conflict(led, pcb.ALL_PINS)
+    assert pcb.resolve_pad_overlap(led, pcb.ALL_PINS) == led
 
 
 def test_pad_overlap_is_resolved():
     # Clamped into the top-left corner the unit covers the VBATT/GND pair;
     # the backstop slides it clear (into the gap between the pairs).
     led = pcb.Led(*pcb.clamp_led(0.0, 0.0, 0), color="red")
-    assert pcb.pad_conflict(led, ("top",))
-    moved = pcb.resolve_pad_overlap(led, ("top",))
-    assert not pcb.pad_conflict(moved, ("top",))
+    assert pcb.pad_conflict(led, ("1", "2", "7", "8"))
+    moved = pcb.resolve_pad_overlap(led, ("1", "2", "7", "8"))
+    assert not pcb.pad_conflict(moved, ("1", "2", "7", "8"))
     # A dropped row has no pads, so nothing to avoid.
-    assert not pcb.pad_conflict(led, ("bottom",))
-    assert pcb.resolve_pad_overlap(led, ("bottom",)) == led
+    assert not pcb.pad_conflict(led, ("9", "10", "15", "16"))
+    assert pcb.resolve_pad_overlap(led, ("9", "10", "15", "16")) == led
 
 
 def test_clamp_is_rotation_aware():
@@ -381,7 +381,7 @@ def test_zone_fills_have_no_holes():
 
 
 def test_row_selection_drops_pads():
-    out = pcb.generate_pcb(pcb.BadgeSpec(rows=("top",)))
+    out = pcb.generate_pcb(pcb.BadgeSpec(pins=("1", "2", "7", "8")))
     assert len(re.findall(r'\(pad "\d+" thru_hole', out)) == 4
     for num in ("1", "2", "7", "8"):
         assert re.search(rf'\(pad "{num}" thru_hole', out)
@@ -397,7 +397,7 @@ TAB_OUTLINE = [[  # standard square with a 8-mm-wide tab sticking 4 mm out the t
 
 
 def test_custom_outline_emitted_and_shapes_pour():
-    spec = pcb.BadgeSpec(rows=("top",), outline=TAB_OUTLINE)
+    spec = pcb.BadgeSpec(pins=("1", "2", "7", "8"), outline=TAB_OUTLINE)
     out = pcb.generate_pcb(spec)
     # Edge.Cuts is a polygon (with the tab vertex at page (106, 96)), not a rect.
     assert re.search(r'\(gr_poly \(pts [^\n]*\(xy 106 96\)[^\n]*\(layer "Edge\.Cuts"\)', out)
@@ -758,7 +758,7 @@ def test_novia_emits_no_via_and_lands_on_a_connector_pad():
         spec = pcb.BadgeSpec(leds=[led])
         out = pcb.generate_pcb(spec)
         assert "(via " not in out, side
-        route = pcb.novia_route(led, spec.rows, pcb.unit_safe(spec), [led])
+        route = pcb.novia_route(led, spec.pins, pcb.unit_safe(spec), [led])
         assert route["net"] == net
         pads = [(x, y) for _n, x, y, pnet, _row in pcb.CONNECTOR_PADS if pnet == net]
         assert route["pad"] in pads
@@ -776,7 +776,7 @@ def test_novia_front_through_hole_routes_nothing():
     for size in ("1.8mm", "3mm", "5x2mm"):
         led = pcb.Led(10.16, 10.16, "red", side="front", size=size, novia=True)
         spec = pcb.BadgeSpec(leds=[led])
-        route = pcb.novia_route(led, spec.rows, pcb.unit_safe(spec), [led])
+        route = pcb.novia_route(led, spec.pins, pcb.unit_safe(spec), [led])
         assert route["direct"] and len(route["pts"]) == 1, size
         assert "(via " not in pcb.generate_pcb(spec)
 
@@ -792,7 +792,7 @@ def test_novia_route_clears_the_units_own_copper_and_the_board_edge():
                                   layout=layout, rot=rot, novia=True)
                     spec = pcb.BadgeSpec(leds=[led])
                     safe = pcb.unit_safe(spec)
-                    r = pcb.novia_route(led, spec.rows, safe, [led])
+                    r = pcb.novia_route(led, spec.pins, safe, [led])
                     assert not r.get("tight"), (side, size, layout, rot)
                     run = LineString(r["pts"]).buffer(pcb.TRACK_W / 2)
                     for quad in pcb._unit_copper_quads(led, safe, skip_start=True):
@@ -821,11 +821,11 @@ def test_novia_art_keepout_follows_the_trace():
     led = pcb.Led(10.16, 10.16, "red", side="back", size="0805", novia=True)
     spec = pcb.BadgeSpec(leds=[led])
     safe = pcb.unit_safe(spec)
-    labels = {n for n, _q in pcb.unit_copper_pieces(led, safe, spec.rows, [led])}
+    labels = {n for n, _q in pcb.unit_copper_pieces(led, safe, spec.pins, [led])}
     assert "via" not in labels and "trace_stub" not in labels
     assert any(n.startswith("trace_pad") for n in labels)
-    poly = pcb.unit_copper_poly(led, safe, spec.rows, [led])
-    route = pcb.novia_route(led, spec.rows, safe, [led])
+    poly = pcb.unit_copper_poly(led, safe, spec.pins, [led])
+    route = pcb.novia_route(led, spec.pins, safe, [led])
     from shapely.geometry import Point
     for x, y in route["pts"]:
         assert poly.distance(Point(x, y)) < 1e-6
@@ -909,7 +909,7 @@ def test_manual_trace_bends_are_kept_and_corners_come_out_as_45s():
     led = pcb.Led(10.16, 13.0, "red", side="back", size="0805",
                   novia=True, nodes=nodes)
     spec = pcb.BadgeSpec(leds=[led])
-    r = pcb.novia_route(led, spec.rows, pcb.unit_safe(spec), [led])
+    r = pcb.novia_route(led, spec.pins, pcb.unit_safe(spec), [led])
     assert r["manual"] and not r.get("tight")
     # every bend the user placed still sits on the path, in order...
     assert _subsequence(nodes, r["pts"])
@@ -924,7 +924,7 @@ def test_auto_routes_come_out_as_45s_too():
                 led = pcb.Led(10.16, 10.16, "red", side=side, size=size,
                               layout=layout, novia=True)
                 spec = pcb.BadgeSpec(leds=[led])
-                r = pcb.novia_route(led, spec.rows, pcb.unit_safe(spec), [led])
+                r = pcb.novia_route(led, spec.pins, pcb.unit_safe(spec), [led])
                 if r.get("direct"):
                     continue
                 assert _all_45(r["pts"]), (side, size, layout, r["pts"])
@@ -932,5 +932,50 @@ def test_auto_routes_come_out_as_45s_too():
     bad = pcb.Led(10.16, 13.0, "red", side="back", size="0805",
                   novia=True, nodes=((3.81, 1.27),))
     spec = pcb.BadgeSpec(leds=[bad])
-    r = pcb.novia_route(bad, spec.rows, pcb.unit_safe(spec), [bad])
+    r = pcb.novia_route(bad, spec.pins, pcb.unit_safe(spec), [bad])
     assert r["tight"] and r["manual"]
+
+
+def test_pins_can_be_dropped_individually():
+    import re
+
+    # Keeping one corner leaves exactly its two pads, its tab and its header.
+    out = pcb.generate_pcb(pcb.BadgeSpec(leds=[], pins=("7", "8")))
+    assert re.findall(r'\(pad "(\d+)" thru_hole', out) == ["7", "8"]
+    assert out.count("PinHeader_1x02") == 1
+    # A half-populated pair keeps its pad but loses the two-pin header body.
+    out = pcb.generate_pcb(pcb.BadgeSpec(leds=[], pins=("7",)))
+    assert re.findall(r'\(pad "(\d+)" thru_hole', out) == ["7"]
+    assert "PinHeader_1x02" not in out
+    # ...and the caption names only the pin that is actually there.
+    assert pcb.pair_caption("tr", ("7",)) == "3V3"
+    assert pcb.pair_caption("tr", ("8",)) == "GND"
+    assert pcb.pair_caption("tr", ("7", "8")) == "3V3 GND"
+
+
+def test_dropped_corner_frees_its_keepout_and_tab():
+    # A unit may sit where a removed pair used to be, and a custom outline no
+    # longer grows a tab out to hold it.
+    led = pcb.Led(2.54, 1.6, "red", size="0603", layout="inline")
+    assert pcb.pad_conflict(led, pcb.ALL_PINS)
+    assert not pcb.pad_conflict(led, ("7", "8", "15", "16"))
+    assert pcb.active_pairs(("7", "8", "15", "16")) == ["tr", "br"]
+    assert len(pcb.caption_boxes(("7", "8", "15", "16"))) == 2
+
+
+def test_power_missing_names_the_rail_the_leds_lost():
+    assert pcb.power_missing(pcb.ALL_PINS) == []
+    assert pcb.power_missing(("7", "8")) == []          # one 3V3 + one GND
+    assert pcb.power_missing(("2", "8", "16")) == ["3V3"]
+    assert pcb.power_missing(("7", "15")) == ["GND"]
+    assert pcb.power_missing(("1", "9", "10")) == ["3V3", "GND"]  # signal pins only
+    assert pcb.power_missing(()) == ["3V3", "GND"]
+
+
+def test_row_names_passed_as_pins_raise_rather_than_silently_dropping_keepouts():
+    # The old API took row names. Handing those to a pin argument used to read
+    # as "no pads kept", quietly removing every keepout.
+    import pytest
+
+    with pytest.raises(ValueError):
+        pcb.active_pairs(("top", "bottom"))

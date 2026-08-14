@@ -20,9 +20,10 @@ The download is a zip with a complete KiCad 7+ project:
   silhouettes and basic shapes (circle, rectangle, triangle, hexagon, star), each
   adding board material or cutting a hole — scaling to roughly 120 × 124 mm (three
   badge-widths beyond the square in every direction; the editor zooms to fit), with
-  **adjustable edge smoothing** for raster images (0 = keep raw pixels). Keep both
-  connector rows or just one (each row carries
-  3V3 + GND); shapes that don't reach the connector strips are bridged automatically
+  **adjustable edge smoothing** for raster images (0 = keep raw pixels). Keep or
+  drop each connector pin individually — a whole corner, a row, or a single pad;
+  the app warns if the LEDs lose 3V3 or GND. Shapes that don't reach a kept
+  connector pad are bridged automatically
 - **Layered PCB art** from PNG/JPG/SVG — **SVG art is exact**: its vector paths land
   on the board (and can be traced into the board outline) with no pixelation at any
   size, while rasters use a 0.18 mm pixel grid. Flat-color images load in *By color*

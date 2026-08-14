@@ -43,20 +43,77 @@ CONNECTOR_PADS = [
 # Pin captions printed on BOTH silkscreens, one per pad pair, tucked inside
 # the pad keepout strip (y <= 2.5 / >= 17.82) where LED units can never sit —
 # so they can't collide with unit silk and never clip the board edge.
-PAD_LABELS = [
-    ("VBAT GND", 2.54, 2.62, "top"),
-    ("3V3 GND", 17.78, 2.62, "top"),
-    ("CLK NC", 2.54, 17.7, "bottom"),
-    ("3V3 GND", 17.78, 17.7, "bottom"),
-]
+# The pads come in four corner pairs. A design may keep or drop any single
+# pin — plenty of badges only populate the pair they actually use — so the
+# plate, keepout, caption and 3D header all follow the pair, and the caption
+# names only the pins that survived.
+PAD_PAIRS = {
+    "tl": {"pins": ("1", "2"), "row": "top", "at": (2.54, 2.62), "header": (2.54, 1.27),
+           "plate": (0.16, 0.16, 5.0, 3.4), "keepout": (0.04, 0.04, 5.04, 3.0)},
+    "tr": {"pins": ("7", "8"), "row": "top", "at": (17.78, 2.62), "header": (17.78, 1.27),
+           "plate": (15.32, 0.16, 20.16, 3.4), "keepout": (15.28, 0.04, 20.28, 3.0)},
+    "bl": {"pins": ("9", "10"), "row": "bottom", "at": (2.54, 17.7), "header": (2.54, 19.05),
+           "plate": (0.16, 16.92, 5.0, 20.16), "keepout": (0.04, 17.32, 5.04, 20.28)},
+    "br": {"pins": ("15", "16"), "row": "bottom", "at": (17.78, 17.7), "header": (17.78, 19.05),
+           "plate": (15.32, 16.92, 20.16, 20.16), "keepout": (15.28, 17.32, 20.28, 20.28)},
+}
+# Printed name of each pin, in board order within its pair.
+PIN_LABELS = {"1": "VBAT", "2": "GND", "7": "3V3", "8": "GND",
+              "9": "CLK", "10": "NC", "15": "3V3", "16": "GND"}
+ALL_PINS = ("1", "2", "7", "8", "9", "10", "15", "16")
+
+
+def pair_of(pin: str) -> str:
+    """Which corner pair a pin belongs to."""
+    for key, pair in PAD_PAIRS.items():
+        if pin in pair["pins"]:
+            return key
+    raise KeyError(pin)
+
+
+def active_pairs(pins) -> list[str]:
+    """Corner pairs with at least one pin kept, in board order.
+
+    Raises on a non-empty list holding no valid pin — that means a caller
+    handed over the old row names, which would otherwise silently read as
+    "no pads kept" and quietly drop every keepout.
+    """
+    keep = [k for k, v in PAD_PAIRS.items() if any(q in pins for q in v["pins"])]
+    if pins and not keep:
+        raise ValueError(f"no known connector pins in {tuple(pins)!r}")
+    return keep
+
+
+def pair_caption(key: str, pins) -> str:
+    """Caption for a pair, naming only the pins that are actually there."""
+    return " ".join(PIN_LABELS[q] for q in PAD_PAIRS[key]["pins"] if q in pins)
+
+
+def pair_caption_at(key: str, pins) -> tuple[float, float]:
+    """Where that caption sits — centred on the pins that survived.
+
+    With a pin dropped the pair's midpoint is no longer over any copper, so
+    the label would float a millimetre off the pad it names.
+    """
+    kept = [x for num, x, _y, _net, _row in CONNECTOR_PADS
+            if num in PAD_PAIRS[key]["pins"] and num in pins]
+    x, y = PAD_PAIRS[key]["at"]
+    return (sum(kept) / len(kept) if kept else x, y)
+
+
+def power_missing(pins) -> list[str]:
+    """Nets the LED circuits need but no kept pin supplies."""
+    have = {net for num, _x, _y, net, _row in CONNECTOR_PADS
+            if num in pins and net}
+    return [net for net in ("3V3", "GND") if net not in have]
 
 # Minimal board tabs that carry each connector pad *pair*. Custom outlines
 # union only these (never a full-width strip), so the image's own cuts win
 # everywhere except directly under the pads — the silhouette shapes the
 # whole edge, and pads always sit on solid material.
 PAD_PLATES = {
-    "top": ((0.16, 0.16, 5.0, 3.4), (15.32, 0.16, 20.16, 3.4)),
-    "bottom": ((0.16, 16.92, 5.0, 20.16), (15.32, 16.92, 20.16, 20.16)),
+    row: tuple(v["plate"] for v in PAD_PAIRS.values() if v["row"] == row)
+    for row in ("top", "bottom")
 }
 
 # Custom outlines may extend this far beyond the standard square — three
@@ -105,8 +162,8 @@ UNIT_SAFE = (0.7, 0.7, 19.62, 19.62)
 # The extra 0.5 mm beyond the pads covers the printed pin captions, so a
 # unit's silk can never collide with them.
 PAD_KEEPOUTS = {
-    "top": ((0.04, 0.04, 5.04, 3.0), (15.28, 0.04, 20.28, 3.0)),
-    "bottom": ((0.04, 17.32, 5.04, 20.28), (15.28, 17.32, 20.28, 20.28)),
+    row: tuple(v["keepout"] for v in PAD_PAIRS.values() if v["row"] == row)
+    for row in ("top", "bottom")
 }
 
 # Package parameters (the LED and its resistor share the size, except
@@ -169,12 +226,14 @@ def model_path(library: str, stem: str) -> str:
     return f"{MODEL_DIR}/{library}.3dshapes/{stem}{MODEL_EXT}"
 
 
-def caption_boxes(rows: tuple[str, ...]) -> list[tuple[float, float, float, float]]:
+def caption_boxes(pins) -> list[tuple[float, float, float, float]]:
     """Bounding boxes of the printed pin captions (art must stay clear)."""
     out = []
-    for label, x, y, row in PAD_LABELS:
-        if row not in rows:
+    for key in active_pairs(pins):
+        label = pair_caption(key, pins)
+        if not label:
             continue
+        x, y = pair_caption_at(key, pins)
         hw = len(label) * 0.6 / 2 + 0.3
         out.append((x - hw, y - 0.55, x + hw, y + 0.55))
     return out
@@ -400,7 +459,7 @@ def unit_poly(led: Led, safe: tuple[float, float, float, float] | None = None):
     return Polygon([(x + px, y + py) for px, py in pts])
 
 
-ROWS_ALL = ("top", "bottom")
+ROWS_ALL = ("top", "bottom")   # legacy alias; pin lists are the truth now
 
 
 NOVIA_CLEAR = 0.2      # trace edge to other-net copper (the netclass minimum)
@@ -570,7 +629,7 @@ def mitre45(pts, ok):
     return keep
 
 
-def novia_route(led: Led, rows: tuple[str, ...] = ROWS_ALL, safe=None, others=(),
+def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
                 outline=None):
     """Where a via-less unit runs its power trace, or None.
 
@@ -612,11 +671,11 @@ def novia_route(led: Led, rows: tuple[str, ...] = ROWS_ALL, safe=None, others=()
     if front and "drill" in PKG[g["pkg"]]:
         return {"pts": [start], "net": net, "pad": None, "direct": True}
     targets = sorted(
-        ((px, py) for _num, px, py, pnet, row in CONNECTOR_PADS
-         if pnet == net and row in rows),
+        ((px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
+         if pnet == net and num in pins),
         key=lambda t: (t[0] - start[0]) ** 2 + (t[1] - start[1]) ** 2)
     if not targets:
-        return None  # no row carries this net (the UI keeps one row on)
+        return None  # no kept pin carries this net; the caller warns
 
     # Everything the run has to stay clear of: this unit's own copper bar the
     # pad it leaves from, every other unit sharing this layer, and any
@@ -638,8 +697,8 @@ def novia_route(led: Led, rows: tuple[str, ...] = ROWS_ALL, safe=None, others=()
         if og["hole"]:
             ocx, ocy = clamp_led_obj(o, safe)
             hazards.append(_round_hazard(ocx, ocy, og["hole"] / 2 + NOVIA_CLEAR))
-    for _num, px, py, pnet, row in CONNECTOR_PADS:
-        if row not in rows or pnet == net:
+    for num, px, py, pnet, _row in CONNECTOR_PADS:
+        if num not in pins or pnet == net:
             continue
         hazards.append(_round_hazard(px, py, 0.875 + NOVIA_CLEAR))
 
@@ -667,8 +726,8 @@ def novia_route(led: Led, rows: tuple[str, ...] = ROWS_ALL, safe=None, others=()
     waypoints = list(_expanded_corners(led, safe, NOVIA_ESCAPE))
     for o in siblings:
         waypoints += _expanded_corners(o, safe, NOVIA_ESCAPE)
-    for _num, px, py, pnet, row in CONNECTOR_PADS:
-        if row not in rows or pnet == net:
+    for num, px, py, pnet, _row in CONNECTOR_PADS:
+        if num not in pins or pnet == net:
             continue
         r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE
         waypoints += [(px - r, py - r), (px + r, py - r),
@@ -753,8 +812,7 @@ def novia_route(led: Led, rows: tuple[str, ...] = ROWS_ALL, safe=None, others=()
     return {"pts": [start, targets[0]], "net": net, "pad": targets[0], "tight": True}
 
 
-def unit_copper_pieces(led: Led, safe=None,
-                       rows: tuple[str, ...] = ROWS_ALL,
+def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
                        others=(), outline=None) -> list[tuple[str, list]]:
     """Convex quads covering the unit's copper plus the margin art must clear.
 
@@ -805,7 +863,7 @@ def unit_copper_pieces(led: Led, safe=None,
         ("pad_res_out", quad_rect(*g["res_out"], rw, rh, rrot)),
         ("trace_a", quad_seg(g["res_out"], g["led_a"], 1.1)),
     ]
-    route = novia_route(led, rows, safe, others, outline=outline)
+    route = novia_route(led, pins, safe, others, outline=outline)
     if route:
         # No via to clear, but a long run to the connector pad that artwork
         # must keep off just the same — copper art touching it would short
@@ -834,14 +892,14 @@ def unit_copper_pieces(led: Led, safe=None,
     return pieces
 
 
-def unit_copper_poly(led: Led, safe=None, rows: tuple[str, ...] = ROWS_ALL, others=(),
+def unit_copper_poly(led: Led, safe=None, pins=ALL_PINS, others=(),
                      outline=None):
     """unit_copper_pieces as one shapely geometry (for art keepouts)."""
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
 
     return unary_union([Polygon(q) for _, q in
-                        unit_copper_pieces(led, safe, rows, others, outline)])
+                        unit_copper_pieces(led, safe, pins, others, outline)])
 
 
 def th_pad_circles(led: Led, safe=None) -> list[tuple[float, float, float]]:
@@ -975,7 +1033,7 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     for i, led in enumerate(leds):
         if not led.novia:
             continue
-        route = novia_route(led, spec.rows, safe, leds, outline=spec.outline)
+        route = novia_route(led, spec.pins, safe, leds, outline=spec.outline)
         if route is None or route.get("direct"):
             continue  # nothing routed, so nothing can cut the pour
         if route.get("tight"):
@@ -987,8 +1045,8 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
         cx, cy = clamp_led_obj(led, safe)
         ox, oy = _r(*(g["res_in"] if front else g["led_k"]), led.rot)
         must = [(cx + ox, cy + oy)] + [
-            (px, py) for _n, px, py, pnet, row in CONNECTOR_PADS
-            if pnet == pour and row in spec.rows]
+            (px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
+            if pnet == pour and num in spec.pins]
         polys = _fill_geometry(pour, layer, spec)
         if not any(all(poly.distance(Point(*m)) < 0.7 for m in must) for poly in polys):
             problems.append(i)
@@ -1012,7 +1070,7 @@ def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
         hw = 1.225  # pad copper 0.875 + 0.35 clearance
         pads.append([(px - hw, py - hw), (px + hw, py - hw),
                      (px + hw, py + hw), (px - hw, py + hw)])
-    all_pieces = [unit_copper_pieces(led, safe, spec.rows, spec.leds, spec.outline)
+    all_pieces = [unit_copper_pieces(led, safe, spec.pins, spec.leds, spec.outline)
                   for led in spec.leds]
     out: dict = {}
     for i, led in enumerate(spec.leds):
@@ -1074,22 +1132,22 @@ def resolve_overlap(
 
 
 def pad_conflict(
-    led: Led, rows: tuple[str, ...],
+    led: Led, pins=ALL_PINS,
     safe: tuple[float, float, float, float] | None = None,
 ) -> bool:
-    """True if the unit's rotated footprint overlaps a kept pad pair."""
+    """True if the unit's rotated footprint overlaps a kept pad pair.
+
+    Dropping every pin of a corner frees that corner for artwork or a unit.
+    """
     from shapely.geometry import box as sbox
 
     poly = unit_poly(led, safe)
-    return any(
-        poly.intersects(sbox(*k))
-        for row in rows
-        for k in PAD_KEEPOUTS.get(row, ())
-    )
+    return any(poly.intersects(sbox(*PAD_PAIRS[k]["keepout"]))
+               for k in active_pairs(pins))
 
 
 def resolve_pad_overlap(
-    led: Led, rows: tuple[str, ...],
+    led: Led, pins=ALL_PINS,
     safe: tuple[float, float, float, float] | None = None,
 ) -> Led:
     """Slide a unit off the connector pad keepouts (server-side backstop).
@@ -1105,8 +1163,8 @@ def resolve_pad_overlap(
         b = led_unit_bbox(led, safe)
         poly = unit_poly(led, safe)
         hit = next(
-            (k for row in rows for k in PAD_KEEPOUTS.get(row, ())
-             if poly.intersects(sbox(*k))),
+            (PAD_PAIRS[k]["keepout"] for k in active_pairs(pins)
+             if poly.intersects(sbox(*PAD_PAIRS[k]["keepout"]))),
             None,
         )
         if hit is None:
@@ -1179,11 +1237,18 @@ class BadgeSpec:
     # Surface finish: "enig" (gold) or "hasl" (silver). Board-wide fab
     # choice — it colors every exposed pad, via, and copper-art opening.
     finish: str = "enig"
-    # Connector rows kept on this badge; each row alone carries 3V3 + GND.
-    rows: tuple[str, ...] = ("top", "bottom")
+    # Connector pins kept on this badge, by pad number. Any combination is
+    # allowed; power_missing() reports when the LEDs are left without a rail.
+    pins: tuple[str, ...] = ALL_PINS
     # Custom board outline as rings of (x, y) board-mm points — first ring
     # is the exterior, the rest are holes. None = the standard 20x20 square.
     outline: list[list[tuple[float, float]]] | None = None
+
+    @property
+    def rows(self) -> tuple[str, ...]:
+        """Rows still carrying at least one pin (strip-level geometry)."""
+        live = {PAD_PAIRS[k]["row"] for k in active_pairs(self.pins)}
+        return tuple(r for r in ("top", "bottom") if r in live)
 
 
 def outline_polygon(spec: BadgeSpec):
@@ -1269,7 +1334,7 @@ def _nets(spec: BadgeSpec) -> tuple[list[str], dict[str, int]]:
     return lines, index
 
 
-def _connector_footprint(nets: dict[str, int], rows: tuple[str, ...]) -> str:
+def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
     out = [
         f'  (footprint "MiniBadge:MiniBadge_Simple" (layer "F.Cu") (tstamp {_ts("fp-conn")})',
         f"    (at {_n(ORIGIN)} {_n(ORIGIN)})",
@@ -1287,13 +1352,16 @@ def _connector_footprint(nets: dict[str, int], rows: tuple[str, ...]) -> str:
     # on both faces — the fab board should match; the Dwgs.User layer the
     # official footprint used never prints at all). Centered text mirrors
     # in place, so the back copy only needs the mirror flag.
-    for i, (label, x, y, row) in enumerate(PAD_LABELS):
-        if row not in rows:
+    for i, key in enumerate(active_pairs(pins)):
+        label = pair_caption(key, pins)
+        if not label:
             continue
-        # Each caption names a PAIR of pads, left word for the left pad. Seen
-        # from the back the pair is mirrored, so the words have to swap too —
+        x, y = pair_caption_at(key, pins)
+        # Each caption names the PAIR, left word for the left pad. Seen from
+        # the back the pair is mirrored, so the words have to swap too —
         # otherwise the back silk labels 3V3 as GND and vice versa, which is
-        # exactly the kind of thing someone hand-soldering trusts.
+        # exactly the kind of thing someone hand-soldering trusts. A pair with
+        # only one pin kept names just that pin, so nothing to swap.
         flipped = " ".join(reversed(label.split()))
         for layer, mirror, label in (("F.SilkS", "", label),
                                      ("B.SilkS", " (justify mirror)", flipped)):
@@ -1303,8 +1371,8 @@ def _connector_footprint(nets: dict[str, int], rows: tuple[str, ...]) -> str:
                 f"      (tstamp {_ts(f'fp-conn-label-{i}-{layer}')})",
                 "    )",
             ]
-    for num, x, y, net, row in CONNECTOR_PADS:
-        if row not in rows:
+    for num, x, y, net, _row in CONNECTOR_PADS:
+        if num not in pins:
             continue
         net_s = f' (net {nets[net]} "{net}")' if net else ""
         out.append(
@@ -1316,11 +1384,13 @@ def _connector_footprint(nets: dict[str, int], rows: tuple[str, ...]) -> str:
     # plugs into the badge's socket strip. Model x-rotation 180 flips it
     # under the board; the z-rotation lays the two pins along the pair.
     header = model_path("Connector_PinHeader_2.54mm", "PinHeader_1x02_P2.54mm_Vertical")
-    pairs = [(2.54, 1.27, "top"), (17.78, 1.27, "top"),
-             (2.54, 19.05, "bottom"), (17.78, 19.05, "bottom")]
-    for i, (px, py, row) in enumerate(pairs):
-        if row not in rows:
+    # Only a fully populated pair gets a header body: with one pin dropped the
+    # pads are still right, there is just no two-pin part to show there.
+    for i, key in enumerate(PAD_PAIRS):
+        pair = PAD_PAIRS[key]
+        if not all(q in pins for q in pair["pins"]):
             continue
+        px, py = pair["header"]
         # offset z -1.6 (board thickness) + x-rot 180: body flush on the
         # BACK face, pins pointing away from the front — how a minibadge
         # plugs into the badge's socket strip.
@@ -1524,7 +1594,7 @@ def _smd(
 def _led_unit(
     i: int, led: Led, nets: dict[str, int],
     safe: tuple[float, float, float, float] | None = None,
-    rows: tuple[str, ...] = ROWS_ALL,
+    pins=ALL_PINS,
     others: tuple = (),
     outline=None,
 ) -> str:
@@ -1593,7 +1663,7 @@ def _led_unit(
             f'(stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts") '
             f"(tstamp {_ts(f'hole-{i}')}))"
         )
-    route = novia_route(led, rows, safe, others, outline=outline)
+    route = novia_route(led, pins, safe, others, outline=outline)
     if route:
         # Via-less: a run across the unit's own layer to a connector pad,
         # whose plated barrel carries the net to the far pour. Electrically
@@ -1643,8 +1713,8 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
 
     obstacles = []
     anchors = []  # same-net copper; fill islands must touch one to survive
-    for _num, px, py, net, row in CONNECTOR_PADS:  # through-hole: both layers
-        if row not in spec.rows:
+    for num, px, py, net, _row in CONNECTOR_PADS:  # through-hole: both layers
+        if num not in spec.pins:
             continue
         pad = Point(px, py).buffer(0.875, quad_segs=16)
         if net != zone_net:
@@ -1693,7 +1763,7 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
 
         # The via barrel exists on both copper layers. A via-less unit has
         # none: its power run is a trace on its own layer, handled below.
-        route = novia_route(led, spec.rows, safe, spec.leds, outline=spec.outline)
+        route = novia_route(led, spec.pins, safe, spec.leds, outline=spec.outline)
         if route is None:
             if via_net != zone_net:
                 obstacles.append(
@@ -2086,12 +2156,12 @@ def generate_pcb(spec: BadgeSpec) -> str:
         LAYERS,
         stackup,
         *net_lines,
-        _connector_footprint(nets, spec.rows),
+        _connector_footprint(nets, spec.pins),
     ]
     safe = unit_safe(spec)
     bridges = unit_bridges(spec, safe)
     for i, led in enumerate(spec.leds):
-        body.append(_led_unit(i, led, nets, safe, spec.rows, spec.leds, spec.outline))
+        body.append(_led_unit(i, led, nets, safe, spec.pins, spec.leds, spec.outline))
         for layer, net in (("F.Cu", "3V3"), ("B.Cu", "GND")):
             seg = bridges.get(i, {}).get(layer)
             if seg is None:
