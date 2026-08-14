@@ -1374,9 +1374,8 @@ function noviaRouteRaw(L) {
   const sOff = front ? g.ledK : g.resIn;
   const start = unitPoint(L, sOff[0], sOff[1]);
   if (front && p.drill) return { pts: [start], net, pad: null, direct: true };
-  const rows = activePairs();
   const targets = PADS
-    .filter(q => padNetOf(q[2]) === net && rows.includes(q[3]))
+    .filter(q => padNetOf(q[2]) === net && pinOn(q[4]))
     .map(q => [q[0], q[1]])
     .sort((u, v) => ((u[0] - start[0]) ** 2 + (u[1] - start[1]) ** 2)
                   - ((v[0] - start[0]) ** 2 + (v[1] - start[1]) ** 2));
@@ -1397,7 +1396,7 @@ function noviaRouteRaw(L) {
     if (og.hole) hazards.push(roundHazard(o.x, o.y, og.hole / 2 + NOVIA_CLEAR));
   }
   for (const q of PADS) {
-    if (!rows.includes(q[3]) || padNetOf(q[2]) === net) continue;
+    if (!pinOn(q[4]) || padNetOf(q[2]) === net) continue;
     hazards.push(roundHazard(q[0], q[1], 0.875 + NOVIA_CLEAR));
   }
 
@@ -1417,7 +1416,7 @@ function noviaRouteRaw(L) {
   let waypoints = expandedCornersOf(L, NOVIA_ESCAPE);
   for (const o of siblings) waypoints.push(...expandedCornersOf(o, NOVIA_ESCAPE));
   for (const q of PADS) {
-    if (!rows.includes(q[3]) || padNetOf(q[2]) === net) continue;
+    if (!pinOn(q[4]) || padNetOf(q[2]) === net) continue;
     const r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE;
     waypoints.push([q[0] - r, q[1] - r], [q[0] + r, q[1] - r],
                    [q[0] + r, q[1] + r], [q[0] - r, q[1] + r]);

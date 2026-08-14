@@ -979,3 +979,22 @@ def test_row_names_passed_as_pins_raise_rather_than_silently_dropping_keepouts()
 
     with pytest.raises(ValueError):
         pcb.active_pairs(("top", "bottom"))
+
+
+def test_half_populated_pair_still_gets_a_single_pin_header():
+    import re
+
+    # A pair with one pin dropped has a real one-pin header on the finished
+    # badge, so the 3D model must show one — centred on the pad that is left,
+    # not on the pair midpoint a two-pin body would use.
+    out = pcb.generate_pcb(pcb.BadgeSpec(leds=[], pins=("7",)))
+    assert "PinHeader_1x01_P2.54mm_Vertical" in out
+    assert "PinHeader_1x02" not in out
+    off = re.search(r"\(offset \(xyz ([-\d.]+) ([-\d.]+) -1\.6\)\)", out)
+    assert float(off.group(1)) == 16.51        # over pad 7 itself
+    # A full pair keeps the two-pin body, spanning the pair's midpoint.
+    out = pcb.generate_pcb(pcb.BadgeSpec(leds=[], pins=("7", "8")))
+    assert "PinHeader_1x02_P2.54mm_Vertical" in out
+    assert "PinHeader_1x01" not in out
+    off = re.search(r"\(offset \(xyz ([-\d.]+) ([-\d.]+) -1\.6\)\)", out)
+    assert float(off.group(1)) == 16.51        # 17.78 midpoint - 1.27
