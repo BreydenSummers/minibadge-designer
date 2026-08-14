@@ -82,7 +82,14 @@ OUTLINE_EXTENT = (-49.84, -51.84, 70.16, 72.16)
 # 90-degree steps (Led.rot, clockwise from the front); every offset goes
 # through _r().
 TRACK_W = 0.3
-VIA_SIZE, VIA_DRILL = 0.8, 0.4
+# 0.7 mm pad on a 0.3 mm drill. The drill is what fabs charge for, and 0.3 mm
+# is standard everywhere badge people order: JLCPCB's small-hole upcharge
+# starts at 0.2 mm, PCBWay's below 0.2 mm, OSH Park's two-layer floor is
+# 0.254 mm. Keeping the pad at 0.7 leaves a 0.2 mm annular ring — same ring as
+# KiCad's 0.8/0.4 default, and clear of PCBWay's 0.15 mm minimum rather than
+# sitting exactly on it — while the smaller hole eats less copper out of the
+# pours and tents under soldermask more reliably.
+VIA_SIZE, VIA_DRILL = 0.7, 0.3
 
 # Region the (rotated) unit bbox must stay inside on the standard square:
 # 0.54 mm in from the board edge. Custom outlines widen this to their own
@@ -481,10 +488,8 @@ def _unit_copper_quads(led: Led, safe, skip_start: bool):
             pts.append(tb(off[0] + ox, off[1] + oy))
         out.append(pts)
     if g["hole"]:
-        r = g["hole"] / 2 + 0.2
         cxh, cyh = tb(0.0, 0.0)
-        out.append([(cxh - r, cyh - r), (cxh + r, cyh - r),
-                    (cxh + r, cyh + r), (cxh - r, cyh + r)])
+        out.append(_round_hazard(cxh, cyh, g["hole"] / 2 + 0.2))
     return out
 
 
@@ -502,6 +507,25 @@ def _expanded_corners(led: Led, safe, margin: float) -> list:
 
 
 NOVIA_EDGE = 0.2 + TRACK_W / 2   # trace centre to board edge
+
+
+# tan(pi/8), built from a square root so Python and the browser agree to the
+# last bit: IEEE-754 pins sqrt exactly, while cos/sin may differ by an ulp —
+# and a one-ulp disagreement is enough to send the two routers down different
+# paths on a borderline clearance test.
+_OCT_T = 2.0 ** 0.5 - 1.0
+
+
+def _round_hazard(cx: float, cy: float, r: float) -> list:
+    """Octagon just containing a circle of radius r (edges tangent to it).
+
+    Connector pads and via barrels are round; bounding them with a square
+    claims ~0.45 mm of clearance that isn't there, which needlessly rejects
+    45-degree corners near a pad and pushes routes wide.
+    """
+    t = r * _OCT_T
+    return [(cx + r, cy + t), (cx + t, cy + r), (cx - t, cy + r), (cx - r, cy + t),
+            (cx - r, cy - t), (cx - t, cy - r), (cx + t, cy - r), (cx + r, cy - t)]
 
 
 def _knees45(a, b):
@@ -610,20 +634,14 @@ def novia_route(led: Led, rows: tuple[str, ...] = ROWS_ALL, safe=None, others=()
         og = led_geometry(o)
         if "drill" in PKG[og["pkg"]]:
             for x, y, r in th_pad_circles(o, safe):
-                rr = r + NOVIA_CLEAR
-                hazards.append([(x - rr, y - rr), (x + rr, y - rr),
-                                (x + rr, y + rr), (x - rr, y + rr)])
+                hazards.append(_round_hazard(x, y, r + NOVIA_CLEAR))
         if og["hole"]:
             ocx, ocy = clamp_led_obj(o, safe)
-            rr = og["hole"] / 2 + NOVIA_CLEAR
-            hazards.append([(ocx - rr, ocy - rr), (ocx + rr, ocy - rr),
-                            (ocx + rr, ocy + rr), (ocx - rr, ocy + rr)])
+            hazards.append(_round_hazard(ocx, ocy, og["hole"] / 2 + NOVIA_CLEAR))
     for _num, px, py, pnet, row in CONNECTOR_PADS:
         if row not in rows or pnet == net:
             continue
-        r = 0.875 + NOVIA_CLEAR
-        hazards.append([(px - r, py - r), (px + r, py - r),
-                        (px + r, py + r), (px - r, py + r)])
+        hazards.append(_round_hazard(px, py, 0.875 + NOVIA_CLEAR))
 
     rings = outline if outline else [
         [(OUTLINE[0], OUTLINE[1]), (OUTLINE[2], OUTLINE[1]),
@@ -741,7 +759,7 @@ def unit_copper_pieces(led: Led, safe=None,
     """Convex quads covering the unit's copper plus the margin art must clear.
 
     Pads inflated 0.5 mm per side (solder-mask-bridge rule + hand-soldering
-    margin), the via as a 1.7 mm square (+0.45 around the barrel), traces as
+    margin), the via as a square 0.45 mm clear of its barrel, traces as
     1.1 mm-wide rects (track 0.3 + 0.4 each side), and the reverse hole
     (+0.5). Labeled (board mm, unit-rotated) — the web UI paints identical
     pieces, so art hugs units the same way in the preview and on the board.
@@ -798,7 +816,7 @@ def unit_copper_pieces(led: Led, safe=None,
                            _quad_seg(a, b, 1.1)))
     else:
         pieces += [
-            ("via", quad_rect(*vo, 1.7, 1.7)),
+            ("via", quad_rect(*vo, VIA_SIZE + 0.9, VIA_SIZE + 0.9)),
             ("trace_stub", quad_seg(g["led_k"] if front else g["res_in"], vo, 1.1)),
         ]
     if g["hole"]:
