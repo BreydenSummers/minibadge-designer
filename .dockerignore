@@ -9,3 +9,13 @@ __pycache__
 data/
 output/
 results/
+.pytest_cache
+.ruff_cache
+*.egg-info
+.claude
+helmet-drc.rpt
+
+# Fetched at build time by scripts/fetch_assets.py — never copy a host copy in
+minibadge_designer/fonts/*.ttf
+minibadge_designer/fonts/THIRD-PARTY-NOTICE.txt
+minibadge_designer/static/vendor/

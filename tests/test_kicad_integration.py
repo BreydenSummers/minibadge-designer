@@ -1,0 +1,321 @@
+"""End-to-end validation against a real KiCad installation (skipped if absent)."""
+
+import io
+import json
+import shutil
+import subprocess
+import zipfile
+
+import pytest
+
+from minibadge_designer import pcb
+
+KICAD_CLI = shutil.which("kicad-cli") or (
+    "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
+    if shutil.which("/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli")
+    else None
+)
+
+pytestmark = pytest.mark.skipif(KICAD_CLI is None, reason="kicad-cli not installed")
+
+
+SPECS = {
+    "front-back": pcb.BadgeSpec(
+        name="drc-check",
+        leds=[pcb.Led(6.5, 13.8, "red"), pcb.Led(14.5, 13.8, "blue", side="back")],
+        art=[pcb.ArtLayer("silk", [(8.0, 6.0, 4.0, 0.2), (8.0, 6.2, 3.0, 0.2)])],
+    ),
+    # PCB-art materials: exposed copper, a glow window with a back LED next
+    # to it, and a bare-laminate window.
+    "pcb-art": pcb.BadgeSpec(
+        name="drc-art",
+        leds=[pcb.Led(15.5, 10.0, "white", side="back", rot=90)],
+        art=[
+            pcb.ArtLayer("copper", [(4.0, 4.0, 5.0, 0.2), (4.0, 4.4, 4.0, 0.2)]),
+            pcb.ArtLayer("glow", [(4.0, 9.0, 6.0, 3.0)]),
+            pcb.ArtLayer("bare", [(4.0, 14.0, 5.0, 2.0)]),
+        ],
+    ),
+    "rotated": pcb.BadgeSpec(
+        name="drc-rot",
+        leds=[pcb.Led(6.0, 10.0, "red", rot=90), pcb.Led(14.5, 10.0, "green", side="back", rot=270)],
+    ),
+    # Units clamped hard into the corners of the safe region land on the
+    # connector pad pairs; the pad backstop (the same one the webapp runs)
+    # must slide them clear — into the strip between the pairs.
+    "extremes": pcb.BadgeSpec(
+        name="drc-extreme",
+        leds=[
+            pcb.resolve_pad_overlap(
+                pcb.Led(*pcb.clamp_led(0.0, 0.0, 0), color="red", rot=0),
+                ("top", "bottom")),
+            pcb.resolve_pad_overlap(
+                pcb.Led(*pcb.clamp_led(99.0, 99.0, 180), color="blue", rot=180),
+                ("top", "bottom")),
+        ],
+    ),
+    # Inline rows: a front one along the bottom, a rotated back one up the
+    # side (clear of the top-left pad pair — direct specs place responsibly).
+    "inline": pcb.BadgeSpec(
+        name="drc-inline",
+        leds=[
+            pcb.Led(12.0, 16.0, "red", layout="inline"),
+            pcb.Led(4.0, 9.3, "green", side="back", rot=90, layout="inline"),
+        ],
+    ),
+    # A glow band spanning the full interior: the perimeter copper ring must
+    # keep both pours in one piece (this once split the GND plane in half).
+    "band": pcb.BadgeSpec(
+        name="drc-band",
+        leds=[pcb.Led(10.0, 15.5, "red")],
+        art=[pcb.ArtLayer("glow", [(0.5, 8.0, 19.3, 4.0)])],
+    ),
+    # Custom outline: top-row-only badge with a tab sticking 4 mm out the
+    # top, art in the tab, and an LED — pours must follow the shape.
+    "tab": pcb.BadgeSpec(
+        name="drc-tab",
+        rows=("top",),
+        outline=[[
+            (0.16, 0.16), (6.0, 0.16), (6.0, -4.0), (14.0, -4.0), (14.0, 0.16),
+            (20.16, 0.16), (20.16, 20.16), (0.16, 20.16),
+        ]],
+        leds=[pcb.Led(10.0, 12.0, "red")],
+        art=[pcb.ArtLayer("silk", [(7.0, -3.0, 6.0, 0.2), (7.0, -2.6, 5.0, 0.2)])],
+    ),
+    # An oversized board well past the old 40 x 44 mm cap (85 x 95 mm),
+    # standard connector strips in the middle, art, windows, and LED units
+    # far outside the original square — plus a unit tucked into the top
+    # connector strip between the two pad pairs.
+    "big": pcb.BadgeSpec(
+        name="drc-big",
+        rows=("top", "bottom"),
+        outline=[[
+            (-30.0, -35.0), (55.0, -35.0), (55.0, 60.0), (-30.0, 60.0),
+        ]],
+        leds=[
+            pcb.Led(10.0, 12.0, "red"),
+            pcb.Led(-20.0, -25.0, "green"),
+            pcb.Led(45.0, 50.0, "blue", side="back"),
+            pcb.Led(10.16, 1.5, "yellow"),  # between the top mounting holes
+        ],
+        art=[
+            pcb.ArtLayer("silk", [(-7.0, -9.0, 10.0, 0.3), (-7.0, -8.4, 8.0, 0.3)]),
+            pcb.ArtLayer("glow", [(22.0, 24.0, 5.0, 4.0)]),
+        ],
+        texts=[pcb.Text(10.0, 28.0, "big badge", size=2.0)],
+    ),
+    # Every SMD package on one board. 1206 is what catches silk positioned
+    # from the pad centre rather than the pad edge: its hand-solder pads are
+    # the widest, so a fixed offset lands on the mask opening and gets clipped.
+    "smd-sizes": pcb.BadgeSpec(
+        name="drc-smd",
+        leds=[
+            pcb.Led(5.5, 7.0, "red", size="0603"),
+            pcb.Led(14.5, 7.0, "green", size="0805"),
+            pcb.Led(10.5, 14.5, "blue", size="1206", side="back", rot=90),
+            pcb.Led(5.0, 14.0, "white", size="1206"),
+        ],
+    ),
+    # Through-hole LEDs: all three TH packages (3 mm stacked front, 1.8 mm
+    # inline back at an odd angle, 5x2 mm bar) mixed with an SMD unit. TH
+    # pad barrels shape BOTH pours.
+    "through-hole": pcb.BadgeSpec(
+        name="drc-th",
+        leds=[
+            pcb.Led(6.5, 8.0, "red", size="3mm"),
+            pcb.Led(14.5, 13.5, "blue", size="1.8mm", side="back", rot=30,
+                    layout="inline"),
+            pcb.Led(11.5, 6.0, "white", size="5x2mm", rot=90),
+            pcb.Led(5.5, 15.0, "green", size="0805"),
+        ],
+        texts=[pcb.Text(10.0, 17.5, "TH", size=1.2, side="front")],
+    ),
+    # A crowd: five LEDs plus user text on both sides. The green unit sits
+    # in the top connector strip, between the two pad pairs.
+    "crowd": pcb.BadgeSpec(
+        name="drc-crowd",
+        leds=[
+            pcb.Led(4.5, 6.5, "red"),
+            pcb.Led(10.5, 4.5, "green"),
+            pcb.Led(16.5, 6.5, "blue"),
+            pcb.Led(6.0, 11.0, "yellow", side="back"),
+            pcb.Led(12.0, 14.0, "white", layout="inline"),
+        ],
+        texts=[
+            pcb.Text(10.16, 9.5, "hax", size=2.5, side="front"),
+            pcb.Text(13.0, 8.0, "back", size=1.0, side="back"),
+        ],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", SPECS)
+def test_generated_board_passes_kicad_drc(tmp_path, name):
+    spec = SPECS[name]
+    board = tmp_path / f"{name}.kicad_pcb"
+    board.write_text(pcb.generate_pcb(spec))
+    (tmp_path / f"{name}.kicad_pro").write_text(pcb.generate_project(name))
+
+    report = tmp_path / "drc.txt"
+    result = subprocess.run(
+        [
+            KICAD_CLI,
+            "pcb",
+            "drc",
+            "--severity-all",
+            "--exit-code-violations",
+            "-o",
+            str(report),
+            str(board),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,  # exit code asserted below with the report attached
+    )
+    assert result.returncode == 0, f"DRC violations:\n{report.read_text()}"
+
+
+def test_wand_fringe_design_passes_drc(tmp_path):
+    """Silk pixels adjacent to wand-assigned bare pixels once produced dozens
+    of silk-clipped-by-mask warnings; the carve margin must prevent that."""
+    from PIL import Image, ImageDraw
+
+    from minibadge_designer.webapp import app
+
+    img = Image.new("RGB", (240, 240), (250, 210, 40))
+    d = ImageDraw.Draw(img)
+    d.ellipse((40, 40, 200, 200), fill=(20, 20, 20))
+    d.ellipse((85, 90, 125, 125), fill=(250, 210, 40))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    params = {
+        "name": "fringe",
+        "shape": {"mode": "circle", "d": 18},
+        "art": [{
+            "mode": "palette", "cx": 10.16, "cy": 10.16, "w": 11,
+            "palette": [
+                {"rgb": [250, 210, 40], "material": "copper"},
+                {"rgb": [20, 20, 20], "material": "silk"},
+            ],
+            "overrides": [{"u": 0.437, "v": 0.447, "material": "bare"}],
+        }],
+        "leds": [{"x": 10, "y": 15.3, "color": "red"}],
+        "texts": [],
+    }
+    client = app.test_client()
+    resp = client.post("/generate", data={
+        "params": json.dumps(params),
+        "art0": (io.BytesIO(buf.getvalue()), "fringe.png"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    board = tmp_path / "fringe.kicad_pcb"
+    board.write_bytes(zf.read("fringe/fringe.kicad_pcb"))
+    (tmp_path / "fringe.kicad_pro").write_bytes(zf.read("fringe/fringe.kicad_pro"))
+    result = subprocess.run(
+        [KICAD_CLI, "pcb", "drc", "--severity-all", "--exit-code-violations",
+         "-o", str(tmp_path / "drc.txt"), str(board)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, f"DRC violations:\n{(tmp_path / 'drc.txt').read_text()}"
+
+
+def test_exact_svg_badge_passes_drc(tmp_path):
+    """A badge built entirely from SVG vectors — traced board outline plus
+    multi-material exact art with a glow window — must be DRC-clean."""
+    from minibadge_designer.webapp import app
+
+    shape_svg = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="110">'
+        b'<path d="M50 0 L100 40 L82 110 L18 110 L0 40 Z" fill="#000"/></svg>'
+    )
+    art_svg = (
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">'
+        b'<circle cx="50" cy="50" r="46" fill="#0000ff"/>'
+        b'<path d="M50 14 a36 36 0 1 0 0 72 a36 36 0 1 0 0 -72 '
+        b'M50 30 a20 20 0 1 1 0 40 a20 20 0 1 1 0 -40" fill="#ff0000"/>'
+        b'<rect x="44" y="44" width="12" height="12" fill="#00ff00"/></svg>'
+    )
+    params = {
+        "name": "vector",
+        "shape": {"mode": "image", "w": 34, "cx": 10.16, "cy": 8.0, "threshold": 128},
+        "art": [{
+            "mode": "palette", "cx": 10.16, "cy": 8.0, "w": 20,
+            "palette": [
+                {"rgb": [0, 0, 255], "material": "silk"},
+                {"rgb": [255, 0, 0], "material": "copper"},
+                {"rgb": [0, 255, 0], "material": "glow"},
+            ],
+        }],
+        "leds": [{"x": 10.16, "y": 22.0, "color": "red"},
+                 {"x": 10.16, "y": 4.5, "color": "white", "side": "back"}],
+        "texts": [{"x": 10.16, "y": 26.5, "text": "exact", "size": 1.5}],
+    }
+    client = app.test_client()
+    resp = client.post("/generate", data={
+        "params": json.dumps(params),
+        "shape": (io.BytesIO(shape_svg), "shield.svg"),
+        "art0": (io.BytesIO(art_svg), "rings.svg"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    board = tmp_path / "vector.kicad_pcb"
+    board.write_bytes(zf.read("vector/vector.kicad_pcb"))
+    (tmp_path / "vector.kicad_pro").write_bytes(zf.read("vector/vector.kicad_pro"))
+    text = board.read_text()
+    assert "gr_poly" in text
+    result = subprocess.run(
+        [KICAD_CLI, "pcb", "drc", "--severity-all", "--exit-code-violations",
+         "-o", str(tmp_path / "drc.txt"), str(board)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, f"DRC violations:\n{(tmp_path / 'drc.txt').read_text()}"
+
+
+def test_artwork_around_through_hole_led_passes_drc(tmp_path):
+    """A logo plus a through-hole LED is the most ordinary design there is,
+    and it used to ship silk-on-silk overlaps that KiCad flags."""
+    import io
+    import json
+
+    from PIL import Image, ImageDraw
+
+    from minibadge_designer.webapp import app
+
+    img = Image.new("RGB", (300, 300), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    d.ellipse((20, 20, 280, 280), fill=(20, 20, 20))
+    d.ellipse((110, 110, 190, 190), fill=(250, 210, 40))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+
+    for size in ("0805", "1.8mm", "3mm", "5x2mm"):
+        params = {
+            "name": "thart", "mask_color": "green", "finish": "enig",
+            "leds": [{"x": 10.16, "y": 10.16, "color": "red", "side": "front",
+                      "rot": 0, "layout": "stacked", "size": size}],
+            "texts": [{"x": 10.16, "y": 17.4, "text": "BADGE", "size": 1.4,
+                       "side": "front", "font": "kicad", "material": "silk"}],
+            "art": [{"mode": "palette", "cx": 10.16, "cy": 10.16, "w": 16,
+                     "rot": 0, "side": "front", "palette": [
+                         {"rgb": [20, 20, 20], "material": "silk"},
+                         {"rgb": [250, 210, 40], "material": "copper"},
+                         {"rgb": [255, 255, 255], "material": "ignore"}]}],
+        }
+        resp = app.test_client().post("/generate", data={
+            "params": json.dumps(params),
+            "art0": (io.BytesIO(buf.getvalue()), "logo.png"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 200, size
+        zf = zipfile.ZipFile(io.BytesIO(resp.data))
+        board = tmp_path / f"{size}.kicad_pcb"
+        board.write_text(zf.read(next(n for n in zf.namelist()
+                                      if n.endswith(".kicad_pcb"))).decode())
+        (tmp_path / f"{size}.kicad_pro").write_text(pcb.generate_project(size))
+        report = tmp_path / f"{size}-drc.txt"
+        r = subprocess.run(
+            [KICAD_CLI, "pcb", "drc", "--severity-all", "--exit-code-violations",
+             "-o", str(report), str(board)],
+            capture_output=True, text=True, timeout=120, check=False)
+        assert r.returncode == 0, f"{size} DRC:\n{report.read_text()}"

@@ -43,3 +43,24 @@ results/
 
 # Docker
 *.pid
+
+# AI assistant tooling — local to a developer, not part of the project
+.claude/
+.cursor/
+.aider*
+.continue/
+.github/copilot-instructions.md
+CLAUDE.md
+AGENTS.md
+GEMINI.md
+.mcp.json
+
+# Third-party assets, fetched by scripts/fetch_assets.py.
+# Other people's files under other people's licences: downloaded on setup,
+# never committed here. See that script for versions, checksums, and terms.
+minibadge_designer/fonts/*.ttf
+minibadge_designer/fonts/THIRD-PARTY-NOTICE.txt
+minibadge_designer/static/vendor/
+
+# Generated KiCad reports
+*.rpt
