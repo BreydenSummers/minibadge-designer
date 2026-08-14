@@ -364,7 +364,7 @@ def test_circle_shape_and_top_row_only(client):
         name="round",
         leds=[{"x": 10, "y": 10, "color": "red"}],
         art=[],
-        rows=["top"],
+        pins=["1", "2", "7", "8"],
         shape={"mode": "circle", "d": 18},
     )
     resp = client.post(
@@ -395,7 +395,7 @@ def test_image_shape_outline(client):
         name="tabbed",
         leds=[],
         art=[],
-        rows=["top", "bottom"],
+        pins=["1", "2", "7", "8", "9", "10", "15", "16"],
         shape={"mode": "image", "threshold": 128, "invert": False,
                "w": 19, "cx": 10.16, "cy": 8.0},
     )

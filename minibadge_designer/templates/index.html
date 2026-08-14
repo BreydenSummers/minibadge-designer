@@ -329,6 +329,18 @@
     font-size: 11.5px; letter-spacing: .06em; text-align: center;
   }
   #d3hidden.on { display: block; }
+  /* Connector pins, laid out like the board: two corners per row. */
+  #pingrid { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+  .pinrow { display: flex; justify-content: space-between; gap: 10px; }
+  .pinpair { display: flex; gap: 4px; }
+  .pinbox {
+    display: flex; align-items: center; gap: 4px; cursor: pointer;
+    border: 1px solid var(--edge); border-radius: 4px; padding: 3px 7px;
+    font: 600 10px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: .06em; color: var(--dim); background: var(--bg);
+  }
+  .pinbox.on { color: var(--text); border-color: var(--accent); }
+  .pinbox input { margin: 0; width: 11px; height: 11px; }
   /* Per-LED advanced group: the rarely-needed switches, folded away. */
   .advbox { margin-top: 10px; border-top: 1px solid var(--edge); padding-top: 6px; }
   .advbox > summary {
@@ -428,8 +440,9 @@
       </select>
       <input type="file" id="shapefile" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml,.svg">
       <div id="shapeopts"></div>
-      <div class="check"><input type="checkbox" id="rowtop" checked><label for="rowtop">Top connector row (VBATT · GND · 3V3 · GND)</label></div>
-      <div class="check"><input type="checkbox" id="rowbottom" checked><label for="rowbottom">Bottom connector row (CLK · NC · 3V3 · GND)</label></div>
+      <label class="field">Connector pins</label>
+      <div id="pingrid"></div>
+      <div class="sub" id="pinnote">Untick any pin your design doesn't need.</div>
     </div>
     <div class="panel" id="panel-art">
       <h3>Artwork layers <button class="qm" tabindex="-1" data-tip="art" title="How artwork works">?</button><button id="addart" class="add">+ Image</button><button id="addartshape" class="add" title="Add a basic shape layer (great for light windows)">+ Shape ▾</button></h3>
@@ -521,18 +534,40 @@ const VIA_SIZE = 0.7, VIA_DRILL = 0.3;
 // Silk this close to the board edge trips KiCad's silk_edge_clearance check;
 // matches min_copper_edge_clearance in generate_project().
 const SILK_EDGE_CLEAR = 0.2;
-const PADS = [ // x, y, label, row
-  [1.27,1.27,"VBATT","top"],[3.81,1.27,"GND","top"],[16.51,1.27,"3V3","top"],[19.05,1.27,"GND","top"],
-  [1.27,19.05,"CLK","bottom"],[3.81,19.05,"NC","bottom"],[16.51,19.05,"3V3","bottom"],[19.05,19.05,"GND","bottom"]];
-const activePads = () => PADS.filter(p => state.rows[p[3]]);
+const PADS = [ // x, y, label, row, pad number
+  [1.27,1.27,"VBAT","top","1"],[3.81,1.27,"GND","top","2"],
+  [16.51,1.27,"3V3","top","7"],[19.05,1.27,"GND","top","8"],
+  [1.27,19.05,"CLK","bottom","9"],[3.81,19.05,"NC","bottom","10"],
+  [16.51,19.05,"3V3","bottom","15"],[19.05,19.05,"GND","bottom","16"]];
+const ALL_PINS = PADS.map(p => p[4]);
+// Corner pairs, mirroring pcb.PAD_PAIRS: the plate, keepout, caption and 3D
+// header all follow the pair, and a pair keeps whichever of its pins survive.
+const PAD_PAIRS = {
+  tl: {pins:["1","2"],  row:"top",    at:[2.54, 2.8],   plate:[0.16,0.16,5.0,3.4],    keepout:[0.04,0.04,5.04,3.0]},
+  tr: {pins:["7","8"],  row:"top",    at:[17.78, 2.8],  plate:[15.32,0.16,20.16,3.4], keepout:[15.28,0.04,20.28,3.0]},
+  bl: {pins:["9","10"], row:"bottom", at:[2.54, 17.78], plate:[0.16,16.92,5.0,20.16], keepout:[0.04,17.32,5.04,20.28]},
+  br: {pins:["15","16"],row:"bottom", at:[17.78,17.78], plate:[15.32,16.92,20.16,20.16], keepout:[15.28,17.32,20.28,20.28]},
+};
+const pinOn = n => (state.pins || ALL_PINS).includes(n);
+const activePads = () => PADS.filter(p => pinOn(p[4]));
+const activePairs = () => Object.keys(PAD_PAIRS).filter(k => PAD_PAIRS[k].pins.some(pinOn));
+const pairCaption = k => PAD_PAIRS[k].pins.filter(pinOn)
+  .map(n => PADS.find(p => p[4] === n)[2]).join(" ");
+// Centred on the pins that survived: with one dropped, the pair's midpoint is
+// no longer over any copper and the label would float off the pad it names.
+const pairCaptionAt = k => {
+  const xs = PAD_PAIRS[k].pins.filter(pinOn).map(n => PADS.find(p => p[4] === n)[0]);
+  return [xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : PAD_PAIRS[k].at[0],
+          PAD_PAIRS[k].at[1]];
+};
+// Nets the LED circuits need that no kept pin supplies (mirrors power_missing).
+const powerMissing = () => ["3V3", "GND"].filter(
+  net => !activePads().some(p => p[2] === net));
 const PIXEL_MM = 0.18, MAX_COLS = 192, EDGE = 0.5;
 const UNIT_SAFE = [0.7, 0.7, 19.62, 19.62]; // standard square, inset from edge
 // Keepouts around each connector pad pair (pad copper + pour clearance).
 // Units may use the rest of the strip — including between the two pairs.
-const PAD_KEEPOUTS = {
-  top: [[0.04, 0.04, 5.04, 3.0], [15.28, 0.04, 20.28, 3.0]],
-  bottom: [[0.04, 17.32, 5.04, 20.28], [15.28, 17.32, 20.28, 20.28]],
-};
+
 const MAX_LEDS = 64, MAX_TEXTS = 24, MAX_ART = 8, MAX_PAL = 6;
 // Package parameters — mirrors pcb.PKG exactly. The through-hole entries
 // (2.54 mm pitch, round 1.8 mm pads, 0.9 mm drill) are the sizes badgelife
@@ -701,10 +736,7 @@ const mm2px = v => v * SCALE;
 const EXTENT = [-49.84, -51.84, 70.16, 72.16];  // where a custom outline may go (~120 x 124 mm)
 // Minimal board tabs per connector pad pair (mirror pcb.PAD_PLATES): the
 // silhouette's own cuts shape the outline everywhere except under the pads.
-const PAD_PLATES = {
-  top: [[0.16, 0.16, 5.0, 3.4], [15.32, 0.16, 20.16, 3.4]],
-  bottom: [[0.16, 16.92, 5.0, 20.16], [15.32, 16.92, 20.16, 20.16]],
-};
+
 function updateView() {
   if (drag) return; // frozen while dragging so objects track the cursor 1:1
   const ob = outlineBounds();
@@ -792,6 +824,7 @@ function undoDelete() {
   } else if (kind === "shapeel") {
     state.shape.elements.splice(Math.min(index, state.shape.elements.length), 0, item);
     renderShapeOpts();
+renderPinGrid();
     requestOutline(true);
   }
   setStatus("Restored.");
@@ -818,7 +851,7 @@ const state = {
   texts: [], // {x, y, text, size, side, rot}
   mask: "green",
   finish: "enig",  // surface finish: what color the exposed metal plates
-  rows: { top: true, bottom: true },
+  pins: [...ALL_PINS],
   shape: {
     mode: "square", smooth: 0.12,
     // Custom-outline parts, composed in order: adds union, then cuts punch
@@ -877,7 +910,7 @@ function requestOutline(immediate) {
     const fd = new FormData();
     appendShapeFiles(fd);
     fd.append("params", JSON.stringify({
-      rows: ["top", "bottom"].filter(r => state.rows[r]),
+      pins: ALL_PINS.filter(pinOn),
       shape: shapeParams(),
     }));
     try {
@@ -1044,7 +1077,7 @@ function outlineBounds() { // [x0, y0, x1, y1] board mm of the actual outline
           : [x0, y0, x1, y1];
   };
   for (const r of ["top", "bottom"]) {
-    if (state.rows[r]) for (const plate of PAD_PLATES[r]) add(...plate);
+    for (const k of activePairs()) add(...PAD_PAIRS[k].plate);
   }
   if (!customHasAdd()) add(0.16, 0.16, 20.16, 20.16); // cut-only: square base
   for (const el of s.elements) {
@@ -1064,9 +1097,9 @@ function artBoard() { // where artwork may live (board ∪ standard square)
 }
 function platesPath() {
   const p = new Path2D();
-  for (const r of ["top", "bottom"]) {
-    if (!state.rows[r]) continue;
-    for (const [x0, y0, x1, y1] of PAD_PLATES[r]) {
+  for (const k of activePairs()) {
+    {
+      const [x0, y0, x1, y1] = PAD_PAIRS[k].plate;
       p.rect(mm2px(x0), mm2px(y0), (x1 - x0) * SCALE, (y1 - y0) * SCALE);
     }
   }
@@ -1341,7 +1374,7 @@ function noviaRouteRaw(L) {
   const sOff = front ? g.ledK : g.resIn;
   const start = unitPoint(L, sOff[0], sOff[1]);
   if (front && p.drill) return { pts: [start], net, pad: null, direct: true };
-  const rows = ["top", "bottom"].filter(r => state.rows[r]);
+  const rows = activePairs();
   const targets = PADS
     .filter(q => padNetOf(q[2]) === net && rows.includes(q[3]))
     .map(q => [q[0], q[1]])
@@ -1452,7 +1485,7 @@ function noviaKey(L) {
           L.adv ? JSON.stringify(L.adv) : ""].join("|");
 }
 function noviaSig() {
-  return state.leds.map(noviaKey).join(";") + "|" + JSON.stringify(state.rows)
+  return state.leds.map(noviaKey).join(";") + "|" + JSON.stringify(state.pins)
     + "|" + (state.shape.ringsRev || 0);
 }
 function noviaRoute(L) {
@@ -1836,10 +1869,9 @@ function unitInsideBoard(L) {
 // copper on both layers) — but the strip between the pairs is fair game.
 function padConflict(L) {
   const poly = unitPoly(L);
-  for (const r of ["top", "bottom"]) {
-    if (!state.rows[r]) continue;
-    for (const k of PAD_KEEPOUTS[r]) {
-      if (!polysClear(poly, rectPoly(k), 0)) return true;
+  for (const key of activePairs()) {
+    {
+      if (!polysClear(poly, rectPoly(PAD_PAIRS[key].keepout), 0)) return true;
     }
   }
   return false;
@@ -2281,13 +2313,13 @@ function drawArtLayer(c, a, mat, viewSide) {
 // is carved around connector pads and front units; windows (glow/bare)
 // give the pads a wider berth and clear around EVERY unit.
 function captionBoxes() { // mirrors pcb.caption_boxes
-  const LABELS = [["VBAT GND", 2.54, 2.62, "top"], ["3V3 GND", 17.78, 2.62, "top"],
-                  ["CLK NC", 2.54, 17.7, "bottom"], ["3V3 GND", 17.78, 17.7, "bottom"]];
   const out = [];
-  for (const [label, x, y, row] of LABELS) {
-    if (!state.rows[row]) continue;
+  for (const key of activePairs()) {
+    const label = pairCaption(key);
+    if (!label) continue;
+    const [x, y] = pairCaptionAt(key);
     const hw = label.length * 0.6 / 2 + 0.3;
-    out.push([x - hw, y - 0.55, x + hw, y + 0.55]);
+    out.push([x - hw, y - 0.55 - 0.18, x + hw, y + 0.55 - 0.18]);
   }
   return out;
 }
@@ -2826,14 +2858,14 @@ function drawView(canvas, side) {
   c.fillStyle = state.mask === "white" ? "#555" : "rgba(255,255,255,.75)";
   c.font = `${0.75 * SCALE}px sans-serif`; c.textAlign = "center";
   // Pair captions, matching the silk actually printed on the fab board.
-  const CAPTIONS = { top: [["VBAT GND", 2.54, 2.8], ["3V3 GND", 17.78, 2.8]],
-                     bottom: [["CLK NC", 2.54, 17.78], ["3V3 GND", 17.78, 17.78]] };
   // Each caption names a pad PAIR, left word for the left pad — so in the
   // mirrored back view the words swap with the pads they describe.
   const capText = l => mirror ? l.split(" ").reverse().join(" ") : l;
-  for (const row of ["top", "bottom"]) {
-    if (!state.rows[row]) continue;
-    for (const [label, lx, ly] of CAPTIONS[row]) c.fillText(capText(label), tx(lx), mm2px(ly));
+  for (const key of activePairs()) {
+    const label = pairCaption(key);
+    if (!label) continue;
+    const [lx, ly] = pairCaptionAt(key);
+    c.fillText(capText(label), tx(lx), mm2px(ly));
   }
 
   c.font = `${0.62 * SCALE}px sans-serif`;
@@ -3689,13 +3721,13 @@ function renderArtList() {
 // the board, text over a pad, artwork that resolves to nothing). They live
 // in the work-area toast stack rather than inline in the editor cards, so
 // they stay visible whichever panel is open — and while the 3D view is up.
-const WARN_PANEL = { led: "leds", text: "text", art: "art", shapeel: "shape" };
-const WARN_LIST = { led: "ledlist", text: "textlist", art: "artlist", shapeel: "shapeopts" };
+const WARN_PANEL = { led: "leds", text: "text", art: "art", shapeel: "shape", pins: "shape" };
+const WARN_LIST = { led: "ledlist", text: "textlist", art: "artlist", shapeel: "shapeopts", pins: "pingrid" };
 // Clicking a warning takes you to the part it is about.
 function revealItem(kind, i) {
   // The whole-outline warning has no single part to blame (i = -1): it just
   // opens the shape panel.
-  if (kind === "shapeel" && i < 0) { showPanel("shape"); return; }
+  if ((kind === "shapeel" || kind === "pins") && i < 0) { showPanel("shape"); return; }
   const item = { led: state.leds, text: state.texts, art: state.art,
                  shapeel: state.shape.elements }[kind][i];
   if (!item) return;
@@ -3740,6 +3772,10 @@ function blockingProblems() {
     if (!unitInsideBoard(L)) out.push([`LED ${i + 1} has no solid board under it`, "led", i]);
     else if (padConflict(L)) out.push([`LED ${i + 1} sits on a connector pad pair`, "led", i]);
   });
+  const rails = powerMissing();
+  if (rails.length && state.leds.length) {
+    out.push([`the connector has no ${rails.join(" or ")} pin left`, "pins", -1]);
+  }
   state.leds.forEach((L, i) => {
     const r = L.novia ? noviaRoute(L) : null;
     if (r && r.tight) {
@@ -3806,6 +3842,15 @@ function refreshWarnings() {
   // Outline parts that draw nothing, and the outline as a whole coming out
   // empty. Without these the board simply vanishes from the preview and the
   // download quietly falls back to the standard square.
+  // Dropping connector pins is fine until a power rail goes with them: the
+  // LED circuits draw 3V3 and GND from those pads and nowhere else.
+  const rails = powerMissing();
+  if (rails.length && state.leds.length) {
+    want.push(["w:pins", "Connector", `no ${rails.join(" or ")} pin left, so the `
+      + `LED${state.leds.length > 1 ? "s have" : " has"} nothing to run on — `
+      + "put one back, or remove the LEDs. Downloads are blocked until then.",
+      "pins", -1]);
+  }
   if (customActive()) {
     state.shape.elements.forEach((el, i) => {
       if (el.kind === "image" && el.empty) {
@@ -4313,18 +4358,42 @@ $("shapefile").addEventListener("change", () => {
     }
   });
 });
-for (const row of ["top", "bottom"]) {
-  $(`row${row}`).addEventListener("change", e => {
-    const other = row === "top" ? "bottom" : "top";
-    if (!e.target.checked && !state.rows[other]) {
-      e.target.checked = true; // at least one row must stay
-      setStatus("At least one connector row is required.", true);
-      return;
-    }
-    state.rows[row] = e.target.checked;
-    relocateStrandedLeds(); // a re-enabled row's pads may sit under a unit
-    requestOutline(true);
-  });
+// The pin grid is laid out like the board itself — two corners across, top
+// row above bottom — so ticking a box maps to a place on the badge rather
+// than a pad number nobody memorises.
+function renderPinGrid() {
+  const wrap = $("pingrid");
+  if (!wrap) return;
+  wrap.innerHTML = ["top", "bottom"].map(row => `<div class="pinrow">`
+    + Object.entries(PAD_PAIRS).filter(([, v]) => v.row === row).map(([key, v]) =>
+      `<div class="pinpair">` + v.pins.map(n => {
+        const pad = PADS.find(q => q[4] === n);
+        return `<label class="pinbox${pinOn(n) ? " on" : ""}" title="pad ${n}">`
+          + `<input type="checkbox" data-pin="${n}"${pinOn(n) ? " checked" : ""}>`
+          + `<span>${pad[2]}</span></label>`;
+      }).join("") + `</div>`).join("")
+    + `</div>`).join("");
+  for (const box of wrap.querySelectorAll("input[data-pin]")) {
+    box.addEventListener("change", e => {
+      const n = e.target.dataset.pin;
+      const keep = new Set(state.pins || ALL_PINS);
+      if (e.target.checked) keep.add(n); else keep.delete(n);
+      state.pins = ALL_PINS.filter(q => keep.has(q));
+      renderPinGrid();
+      relocateStrandedLeds();  // a re-enabled pad may sit under a unit
+      refreshWarnings();
+      requestOutline(true);
+      m3dStale("connector pins changed");
+    });
+  }
+  const missing = powerMissing();
+  const note = $("pinnote");
+  if (note) {
+    note.textContent = missing.length
+      ? `No ${missing.join(" or ")} pin left — the LEDs have nothing to run on.`
+      : "Untick any pin your design doesn't need.";
+    note.style.color = missing.length ? "#e0a63f" : "";
+  }
 }
 $("addled").addEventListener("click", () => {
   if (state.leds.length >= MAX_LEDS) return;
@@ -4405,7 +4474,7 @@ function designFormData() { // the full design, as /generate and /render take it
     name: $("name").value || "minibadge",
     mask_color: state.mask,
     finish: state.finish,
-    rows: ["top", "bottom"].filter(r => state.rows[r]),
+    pins: ALL_PINS.filter(pinOn),
     shape: shapeParams(),
     art: state.art.map(a => ({
       kind: a.kind || "image", side: a.side || "front",
@@ -4885,7 +4954,7 @@ for (const el of document.querySelectorAll("#viewtabs div")) {
 function designJSON() {
   return {
     v: 1, name: $("name").value, mask: state.mask, finish: state.finish,
-    rows: { ...state.rows },
+    pins: [...(state.pins || ALL_PINS)],
     shape: {
       mode: state.shape.mode, smooth: state.shape.smooth,
       elements: state.shape.elements.map(el => ({
@@ -4976,9 +5045,12 @@ async function restoreDesign(d) {
   $("name").value = d.name || "my-minibadge";
   state.mask = d.mask || "green"; $("mask").value = state.mask;
   state.finish = d.finish || "enig"; $("finish").value = state.finish;
-  state.rows = { top: true, bottom: true, ...(d.rows || {}) };
-  $("rowtop").checked = !!state.rows.top;
-  $("rowbottom").checked = !!state.rows.bottom;
+  // Saved designs from before per-pin control stored rows; a row means both
+  // of its corner pairs, so they translate straight across.
+  state.pins = Array.isArray(d.pins) ? ALL_PINS.filter(n => d.pins.includes(n))
+    : d.rows ? ALL_PINS.filter(n => d.rows[PADS.find(p => p[4] === n)[3]])
+    : [...ALL_PINS];
+  renderPinGrid();
   state.leds = (d.leds || []).map(L => {
     const led = { ...L, adv: L.adv ? { ...L.adv } : null };
     if (led.layout === "reverse") { led.layout = "stacked"; led.reverse = true; }
@@ -5032,7 +5104,7 @@ async function restoreDesign(d) {
     rebuildArt(a);
     state.art.push(a);
   }
-  renderShapeOpts(); renderArtList(); renderLedList(); renderTextList(); renderLegend();
+  renderShapeOpts(); renderPinGrid(); renderArtList(); renderLedList(); renderTextList(); renderLegend();
   requestOutline(true);
   draw();
   setStatus("Design restored.");
@@ -5045,8 +5117,13 @@ async function restoreDesign(d) {
     // by an older build that stored the bare object.
     saved = raw && raw.design ? raw.design : raw;
   } catch (e) {}
+  // Dropped connector pins count as work worth offering back: without this a
+  // pins-only design looks "empty" and the choice is silently lost on refresh.
+  const droppedPins = saved && Array.isArray(saved.pins)
+    && saved.pins.length !== ALL_PINS.length;
   const meaningful = saved && ((saved.art || []).length || (saved.texts || []).length
-    || ((saved.shape || {}).elements || []).length || (saved.leds || []).length > 1);
+    || ((saved.shape || {}).elements || []).length || (saved.leds || []).length > 1
+    || droppedPins);
   if (!meaningful) return;
   const bar = $("restorebar");
   bar.style.display = "block";
@@ -5063,6 +5140,7 @@ try { savedTheme = localStorage.getItem("bm-theme") || "dark"; } catch (e) {}
 applyTheme(savedTheme);
 showPanel("shape");
 renderShapeOpts();
+renderPinGrid();
 renderArtList();
 renderLedList();
 renderTextList();

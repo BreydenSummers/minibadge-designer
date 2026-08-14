@@ -34,13 +34,30 @@ def _slug(name: str) -> str:
     return slug or "minibadge"
 
 
-def _led_keepout(led: pcb.Led, safe=None, rows=pcb.ROWS_ALL, others=(),
+def _parse_pins(params: dict) -> tuple[str, ...]:
+    """Connector pins the design keeps, from either the new or old payload.
+
+    Older saved designs (and the old UI) sent rows = ["top", "bottom"]; a
+    row means both of its corner pairs, so they map straight onto pin lists.
+    """
+    raw = params.get("pins")
+    if raw is not None:
+        return tuple(q for q in pcb.ALL_PINS if q in set(map(str, raw)))
+    raw_rows = params.get("rows")
+    if raw_rows is None:
+        raw_rows = ["top", "bottom"]
+    keep = {r for r in ("top", "bottom") if r in raw_rows}
+    return tuple(q for q in pcb.ALL_PINS
+                 if pcb.PAD_PAIRS[pcb.pair_of(q)]["row"] in keep)
+
+
+def _led_keepout(led: pcb.Led, safe=None, pins=pcb.ALL_PINS, others=(),
                  outline=None) -> "_GeomKeepout":
     # The unit's actual copper (pads/via/traces/hole) plus clearance margins
     # — not the old bounding rectangle — so art wraps snugly around units.
-    # rows/others matter for a via-less unit: its power trace runs to a
+    # pins/others matter for a via-less unit: its power trace runs to a
     # connector pad, and where it goes depends on both.
-    return _GeomKeepout(pcb.unit_copper_poly(led, safe, rows, others, outline))
+    return _GeomKeepout(pcb.unit_copper_poly(led, safe, pins, others, outline))
 
 
 def _reverse_hole_keepout(led: pcb.Led, safe=None) -> "CircleKeepout":
@@ -412,7 +429,7 @@ def _shape_geometry(shape_meta: dict, uploads: dict, rasters: dict):
     return None if shape.is_empty else shape
 
 
-def _compute_outline(shape_meta: dict, uploads: dict, rows: tuple[str, ...], rasters: dict):
+def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict):
     """Board outline rings from the shape params: (rings, bridged) or (None, False).
 
     The combined shape unions with a minimal board tab per kept connector
@@ -428,7 +445,8 @@ def _compute_outline(shape_meta: dict, uploads: dict, rows: tuple[str, ...], ras
     shape = _shape_geometry(shape_meta, uploads, rasters)
     if shape is None:
         return None, False
-    plates = [sbox(*p) for r in rows for p in pcb.PAD_PLATES[r]]
+    # Only corners that still carry a pin need a tab holding them.
+    plates = [sbox(*pcb.PAD_PAIRS[k]["plate"]) for k in pcb.active_pairs(pins)]
     main = shape if shape.geom_type == "Polygon" else max(shape.geoms, key=lambda g: g.area)
     bridges = []
     for plate in plates:
@@ -498,16 +516,11 @@ def outline_preview():
         params = json.loads(request.form.get("params", "{}"))
     except json.JSONDecodeError:
         return {"rings": None}
-    raw_rows = params.get("rows")
-    if raw_rows is None:
-        raw_rows = ["top", "bottom"]
-    rows = tuple(r for r in ("top", "bottom") if r in raw_rows)
-    if not rows:
-        return {"rings": None}
+    pins = _parse_pins(params)
     try:
         uploads, rasters = _shape_uploads()
         shape_meta = params.get("shape") or {}
-        rings, bridged = _compute_outline(shape_meta, uploads, rows, rasters)
+        rings, bridged = _compute_outline(shape_meta, uploads, pins, rasters)
     except (OSError, ValueError, TypeError, AttributeError, Image.DecompressionBombError):
         return {"rings": None, "bridged": False}
     return {"rings": rings, "bridged": bridged}
@@ -695,12 +708,7 @@ def _generate_impl(render: bool):
     if finish not in ("enig", "hasl"):
         finish = "enig"
 
-    raw_rows = params.get("rows")
-    if raw_rows is None:
-        raw_rows = ["top", "bottom"]
-    rows = tuple(r for r in ("top", "bottom") if r in raw_rows)
-    if not rows:
-        return {"error": "at least one connector row is required"}, 400
+    pins = _parse_pins(params)
 
     # Custom board outline (standard square when shape mode is "square").
     outline_rings = None
@@ -708,7 +716,7 @@ def _generate_impl(render: bool):
     try:
         shape_meta = params.get("shape") or {}
         uploads, rasters = _shape_uploads()
-        outline_rings, _bridged = _compute_outline(shape_meta, uploads, rows, rasters)
+        outline_rings, _bridged = _compute_outline(shape_meta, uploads, pins, rasters)
     except (OSError, ValueError, TypeError, AttributeError, Image.DecompressionBombError):
         return {"error": "could not process the board shape"}, 400
     if outline_rings:
@@ -718,7 +726,7 @@ def _generate_impl(render: bool):
 
     # LED units may go anywhere the board goes: the safe rect follows the
     # custom outline's bounds instead of the standard square.
-    spec_probe = pcb.BadgeSpec(rows=rows, outline=outline_rings)
+    spec_probe = pcb.BadgeSpec(pins=pins, outline=outline_rings)
     safe = pcb.unit_safe(spec_probe)
 
     leds = []
@@ -771,7 +779,7 @@ def _generate_impl(render: bool):
         return {"error": "invalid led parameters"}, 400
     # Backstop nudges: units clear the connector pad pairs and each other
     # (the UI prevents both during drag; hand-crafted requests may not).
-    leds = [pcb.resolve_pad_overlap(led, rows, safe) for led in leds]
+    leds = [pcb.resolve_pad_overlap(led, pins, safe) for led in leds]
     for i in range(1, len(leds)):
         for prev in leds[:i]:
             leds[i] = pcb.resolve_overlap(prev, leds[i], safe=safe)
@@ -812,7 +820,7 @@ def _generate_impl(render: bool):
                         cx, cy = pcb.clamp_led_obj(probe, safe)
                         probe = _replace(probe, x=cx, y=cy)
                         if (on_board(probe) and not overlaps_any(probe, i)
-                                and not pcb.pad_conflict(probe, rows, safe)):
+                                and not pcb.pad_conflict(probe, pins, safe)):
                             found = probe
                             break
                         x += 1.1
@@ -886,22 +894,23 @@ def _generate_impl(render: bool):
     # text carve them. Glow/bare windows cut copper from BOTH pours, so they
     # must stay clear of every unit (either side) and give the connector
     # pads a wider berth to keep them solidly attached to the pours.
-    kept_pads = [(x, y) for _, x, y, _, row in pcb.CONNECTOR_PADS if row in rows]
+    kept_pads = [(x, y) for num, x, y, _net, _row in pcb.CONNECTOR_PADS
+                 if num in pins]
     # Per-face decor keepouts (pads + that face's LED units); vector text can
     # sit on either face, while image art stays front-only.
     # The printed pin captions live on both silks — art keeps clear of them
     # exactly like it keeps clear of the pads.
-    captions = [RectKeepout(*b) for b in pcb.caption_boxes(rows)]
+    captions = [RectKeepout(*b) for b in pcb.caption_boxes(pins)]
     decor_base = {
         side: [CircleKeepout(x, y, 1.65) for x, y in kept_pads]
         + captions
-        + [_led_keepout(led, safe, rows, leds, outline_rings) for led in leds
+        + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
            if led.side == side]
         + [_reverse_hole_keepout(led, safe) for led in leds
            if led.side != side and led.reverse]
         # "LED on the other side" puts that half of the unit on the far face,
         # with a via in each of its pads: art on this face has to clear it too.
-        + [_led_keepout(led, safe, rows, leds, outline_rings) for led in leds
+        + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
            if led.side != side and led.farled]
         # Through-hole LED pads penetrate both faces: far-side decor keeps
         # clear of the pad annuli (server parity with eraseArtKeepouts).
@@ -911,12 +920,12 @@ def _generate_impl(render: bool):
         for side in ("front", "back")
     }
     bridges = pcb.unit_bridges(
-        pcb.BadgeSpec(rows=rows, outline=outline_rings, leds=leds), safe
+        pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds), safe
     )
     window_keepouts: list = (
         [CircleKeepout(x, y, 2.0) for x, y in kept_pads]
         + captions
-        + [_led_keepout(led, safe, rows, leds, outline_rings) for led in leds]
+        + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds]
         + [_window_corridor(led, safe) for i, led in enumerate(leds)
            if None in bridges[i].values()]
     )
@@ -1154,12 +1163,25 @@ def _generate_impl(render: bool):
 
     spec = pcb.BadgeSpec(
         name=name, leds=leds, texts=texts, art=art_layers, mask_color=mask_color,
-        finish=finish, rows=rows, outline=outline_rings,
+        finish=finish, pins=pins, outline=outline_rings,
     )
     # Via-less units pick their connector pad against the real copper fill so
     # the run cannot fence the pour's own pad onto an island. Refuse rather
     # than ship a board whose LED never lights.
     from dataclasses import replace as _dc_replace
+
+    # Dropping a connector pin is allowed — plenty of badges only populate the
+    # pair they use — but the LED circuits draw 3V3 and GND from those pads.
+    # With a rail gone there is nothing to light the LEDs, so say so instead
+    # of shipping a board that can never work.
+    missing = pcb.power_missing(pins)
+    if missing and leds:
+        rail = " and ".join(missing)
+        return {
+            "error": f"No {rail} pin left on the connector, so the LEDs have "
+                     "nothing to run on — keep at least one "
+                     + " and one ".join(missing) + " pin, or remove the LEDs"
+        }, 400
 
     resolved, unroutable = pcb.resolve_novia(spec, safe)
     if unroutable:

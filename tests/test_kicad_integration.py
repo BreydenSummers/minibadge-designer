@@ -48,10 +48,10 @@ SPECS = {
         leds=[
             pcb.resolve_pad_overlap(
                 pcb.Led(*pcb.clamp_led(0.0, 0.0, 0), color="red", rot=0),
-                ("top", "bottom")),
+                pcb.ALL_PINS),
             pcb.resolve_pad_overlap(
                 pcb.Led(*pcb.clamp_led(99.0, 99.0, 180), color="blue", rot=180),
-                ("top", "bottom")),
+                pcb.ALL_PINS),
         ],
     ),
     # Inline rows: a front one along the bottom, a rotated back one up the
@@ -74,7 +74,7 @@ SPECS = {
     # top, art in the tab, and an LED — pours must follow the shape.
     "tab": pcb.BadgeSpec(
         name="drc-tab",
-        rows=("top",),
+        pins=("1", "2", "7", "8"),
         outline=[[
             (0.16, 0.16), (6.0, 0.16), (6.0, -4.0), (14.0, -4.0), (14.0, 0.16),
             (20.16, 0.16), (20.16, 20.16), (0.16, 20.16),
@@ -88,7 +88,7 @@ SPECS = {
     # connector strip between the two pad pairs.
     "big": pcb.BadgeSpec(
         name="drc-big",
-        rows=("top", "bottom"),
+        pins=pcb.ALL_PINS,
         outline=[[
             (-30.0, -35.0), (55.0, -35.0), (55.0, 60.0), (-30.0, 60.0),
         ]],
