@@ -514,6 +514,10 @@
 "use strict";
 // ---- board constants (must match minibadge_designer/pcb.py + logo.py) ----
 const OUT = [0.16, 0.16, 20.16, 20.16];
+// Mirrors pcb.VIA_SIZE / pcb.VIA_DRILL — 0.7 mm pad on a 0.3 mm drill: the
+// no-surcharge drill everywhere badge people order, with a 0.2 mm annular
+// ring to spare.
+const VIA_SIZE = 0.7, VIA_DRILL = 0.3;
 // Silk this close to the board edge trips KiCad's silk_edge_clearance check;
 // matches min_copper_edge_clearance in generate_project().
 const SILK_EDGE_CLEAR = 0.2;
@@ -1209,7 +1213,10 @@ function polysClear(A, B, gap) {
     for (let i = 0; i < P.length; i++) {
       const [x0, y0] = P[i], [x1, y1] = P[(i + 1) % P.length];
       let nx = y1 - y0, ny = x0 - x1;
-      const len = Math.hypot(nx, ny) || 1;
+      // sqrt of the sum of squares, exactly as pcb._quads_overlap computes it:
+      // Math.hypot uses a different algorithm and can land an ulp away, which
+      // flips borderline clearance tests between the preview and the board.
+      const len = Math.sqrt(nx * nx + ny * ny) || 1;
       nx /= len; ny /= len;
       let minA = 1 / 0, maxA = -1 / 0, minB = 1 / 0, maxB = -1 / 0;
       for (const [x, y] of A) { const d = x * nx + y * ny; if (d < minA) minA = d; if (d > maxA) maxA = d; }
@@ -1229,7 +1236,7 @@ const NOVIA_CLEAR = 0.2, NOVIA_ESCAPE = 0.5, NOVIA_EDGE = 0.2 + 0.3 / 2;
 const padNetOf = label => (label === "GND" || label === "3V3") ? label : null;
 function quadSegPts(a, b, w) {
   let nx = -(b[1] - a[1]), ny = b[0] - a[0];
-  const ln = Math.hypot(nx, ny) || 1;
+  const ln = Math.sqrt(nx * nx + ny * ny) || 1;
   nx = nx / ln * w / 2; ny = ny / ln * w / 2;
   return [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny],
           [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]];
@@ -1253,8 +1260,8 @@ function unitCopperQuads(L, skipStart) {
     out.push(q);
   }
   if (g.hole) {
-    const r = g.hole / 2 + 0.2, [hx, hy] = tb(0, 0);
-    out.push([[hx - r, hy - r], [hx + r, hy - r], [hx + r, hy + r], [hx - r, hy + r]]);
+    const [hx, hy] = tb(0, 0);
+    out.push(roundHazard(hx, hy, g.hole / 2 + 0.2));
   }
   return out;
 }
@@ -1273,7 +1280,8 @@ function noviaSegDist(a, b, c, d) {
   const ptSeg = (pp, ss, ee) => {
     const dx = ee[0] - ss[0], dy = ee[1] - ss[1], L2 = dx * dx + dy * dy;
     const t = L2 === 0 ? 0 : Math.max(0, Math.min(1, ((pp[0] - ss[0]) * dx + (pp[1] - ss[1]) * dy) / L2));
-    return Math.hypot(pp[0] - (ss[0] + t * dx), pp[1] - (ss[1] + t * dy));
+    const ex = pp[0] - (ss[0] + t * dx), ey = pp[1] - (ss[1] + t * dy);
+    return Math.sqrt(ex * ex + ey * ey);
   };
   return Math.min(ptSeg(a, c, d), ptSeg(b, c, d), ptSeg(c, a, b), ptSeg(d, a, b));
 }
@@ -1281,6 +1289,16 @@ function noviaSegDist(a, b, c, d) {
 // pass that applies them. Mirrors pcb._knees45 / pcb.mitre45 — board houses
 // and KiCad's router both avoid square corners, so a trace only reads as
 // hand-routed if every turn is two 45s.
+// Octagon just containing a circle of radius r — mirrors pcb._round_hazard.
+// Round pads bounded by a square claim clearance that isn't there. Built from
+// a square root, not trig: IEEE-754 pins sqrt exactly while cos/sin can differ
+// by an ulp between here and Python, which is enough to route differently.
+const OCT_T = Math.sqrt(2) - 1;
+function roundHazard(cx, cy, r) {
+  const t = r * OCT_T;
+  return [[cx + r, cy + t], [cx + t, cy + r], [cx - t, cy + r], [cx - r, cy + t],
+          [cx - r, cy - t], [cx - t, cy - r], [cx + t, cy - r], [cx + r, cy - t]];
+}
 function knees45(a, b) {
   const dx = b[0] - a[0], dy = b[1] - a[1];
   if (Math.abs(dx) < 1e-9 || Math.abs(dy) < 1e-9
@@ -1339,21 +1357,15 @@ function noviaRouteRaw(L) {
     const og = geomOf(o), op = PKG[og.pkg];
     if (op.drill) {
       for (const off of [og.ledK, og.ledA]) {
-        const [x, y] = unitPoint(o, off[0], off[1]), rr = op.pw / 2 + NOVIA_CLEAR;
-        hazards.push([[x - rr, y - rr], [x + rr, y - rr], [x + rr, y + rr], [x - rr, y + rr]]);
+        const [x, y] = unitPoint(o, off[0], off[1]);
+        hazards.push(roundHazard(x, y, op.pw / 2 + NOVIA_CLEAR));
       }
     }
-    if (og.hole) {
-      const rr = og.hole / 2 + NOVIA_CLEAR;
-      hazards.push([[o.x - rr, o.y - rr], [o.x + rr, o.y - rr],
-                    [o.x + rr, o.y + rr], [o.x - rr, o.y + rr]]);
-    }
+    if (og.hole) hazards.push(roundHazard(o.x, o.y, og.hole / 2 + NOVIA_CLEAR));
   }
   for (const q of PADS) {
     if (!rows.includes(q[3]) || padNetOf(q[2]) === net) continue;
-    const r = 0.875 + NOVIA_CLEAR;
-    hazards.push([[q[0] - r, q[1] - r], [q[0] + r, q[1] - r],
-                  [q[0] + r, q[1] + r], [q[0] - r, q[1] + r]]);
+    hazards.push(roundHazard(q[0], q[1], 0.875 + NOVIA_CLEAR));
   }
 
   const rings = boardRings();
@@ -1415,7 +1427,8 @@ function noviaRouteRaw(L) {
       seen[u] = true;
       for (let v = 0; v < n; v++) {
         if (seen[v] || v === u || !clear(nodes[u], nodes[v])) continue;
-        const nd = dist[u] + Math.hypot(nodes[v][0] - nodes[u][0], nodes[v][1] - nodes[u][1]);
+        const ddx = nodes[v][0] - nodes[u][0], ddy = nodes[v][1] - nodes[u][1];
+        const nd = dist[u] + Math.sqrt(ddx * ddx + ddy * ddy);
         if (nd < dist[v]) { dist[v] = nd; prev[v] = u; }
       }
     }
@@ -1549,7 +1562,7 @@ function advConflict(L) {
       touches: ["res_out", "led_a"] },
   ];
   if (!L.novia) {
-    items.push({ n: "via", net: viaNet, q: quad(g.viaF[0], g.viaF[1], 0.8, 0.8, 0) });
+    items.push({ n: "via", net: viaNet, q: quad(g.viaF[0], g.viaF[1], VIA_SIZE, VIA_SIZE, 0) });
     items.push({ n: "trace_stub", net: viaNet, q: seg(front ? g.ledK : g.resIn, g.viaF, 0.3),
                  touches: [front ? "led_k" : "res_in", "via"] });
   }
@@ -1607,7 +1620,7 @@ function unitCopperPieces(L) {
                 quadSegPts(nvr.pts[i], nvr.pts[i + 1], 1.1)]);
     }
   } else {
-    out.push(["via", quadRect(vo[0], vo[1], 1.7, 1.7)]);
+    out.push(["via", quadRect(vo[0], vo[1], VIA_SIZE + 0.9, VIA_SIZE + 0.9)]);
     out.push(["trace_stub", quadSeg(front ? g.ledK : g.resIn, vo, 1.1)]);
   }
   if (g.hole) out.push(["hole", quadRect(0, 0, g.hole + 1.0, g.hole + 1.0)]);
@@ -2513,7 +2526,7 @@ function drawUnitGeometry(c, led, parts = "all") {
     } else {
       trace(front ? g.ledK : g.resIn, vo);
       const [hvx, hvy] = P(...viaOffset(led));
-      c.beginPath(); c.arc(hvx, hvy, 0.75 * SCALE, 0, 7);
+      c.beginPath(); c.arc(hvx, hvy, (VIA_SIZE / 2 + 0.35) * SCALE, 0, 7);
       c.fillStyle = halo; c.fill();
     }
   }
@@ -2534,7 +2547,7 @@ function drawUnitGeometry(c, led, parts = "all") {
     } else {
       trace(front ? g.ledK : g.resIn, vo);
       const [vx, vy] = P(...vo);
-      c.beginPath(); c.arc(vx, vy, 0.4 * SCALE, 0, 7);
+      c.beginPath(); c.arc(vx, vy, VIA_SIZE / 2 * SCALE, 0, 7);
       c.fillStyle = padCol(); c.fill();
     }
   }
@@ -2576,12 +2589,12 @@ function drawUnitGeometry(c, led, parts = "all") {
     // The LED crossed to the far face; what shows here is the via sunk into
     // each of its pads.
     for (const off of [g.ledK, g.ledA]) {
-      circleAt(off[0], off[1], 0.4, padCol());
-      circleAt(off[0], off[1], 0.2, "#05080d");
+      circleAt(off[0], off[1], VIA_SIZE / 2, padCol());
+      circleAt(off[0], off[1], VIA_DRILL / 2, "#05080d");
     }
   }
   if (parts === "led") {
-    for (const off of [g.ledK, g.ledA]) circleAt(off[0], off[1], 0.4, padCol());
+    for (const off of [g.ledK, g.ledA]) circleAt(off[0], off[1], VIA_SIZE / 2, padCol());
   }
   if (parts === "res") { /* LED body lives on the other face */ } else if (th) {
     // Round TH pads with their drilled holes — visible on both faces.
@@ -2632,13 +2645,13 @@ function drawUnitGeometry(c, led, parts = "all") {
   }
   if (parts === "led") {
     // Each pad has a via sunk into it, so the drill shows through the pad.
-    for (const off of [g.ledK, g.ledA]) circleAt(off[0], off[1], 0.2, "#05080d");
+    for (const off of [g.ledK, g.ledA]) circleAt(off[0], off[1], VIA_DRILL / 2, "#05080d");
   }
 }
 
 function drawGhostUnit(c, led) {
   const [bx, by] = unitPoint(led, ...viaOffset(led));
-  c.beginPath(); c.arc(mm2px(bx), mm2px(by), 0.4 * SCALE, 0, 7);
+  c.beginPath(); c.arc(mm2px(bx), mm2px(by), VIA_SIZE / 2 * SCALE, 0, 7);
   c.fillStyle = padCol(); c.fill();
   const g = geomOf(led);
   const pk = PKG[g.pkg];
@@ -2876,6 +2889,11 @@ function traceNodeHint(mx, my) {
     if (!L.adv || !L.novia) continue;
     const r = noviaRoute(L);
     if (!r || r.direct || r.pts.length < 2) continue;
+    // An existing handle wins over the "+": mitring makes segments short
+    // enough that a midpoint can land under a handle, and offering to insert
+    // there would fight dragging or removing the bend that is already there.
+    if ((L.nodes || []).some(([nx, ny]) =>
+        Math.sqrt((mx - nx) ** 2 + (my - ny) ** 2) < 0.9)) continue;
     for (let k = 0; k + 1 < r.pts.length; k++) {
       const a = r.pts[k], b = r.pts[k + 1];
       const cx = (a[0] + b[0]) / 2, cy = (a[1] + b[1]) / 2;
@@ -3141,9 +3159,11 @@ function attachPointer(cv, side) {
       draw();
       return;
     }
-    const plus = nodeHint && nodeHint.side === (mirror ? "back" : "front")
-      ? nodeHint : (nodeHint && traceNodeHint(mx, my));
-    if (plus && Math.hypot(mx - plus.x, my - plus.y) < NODE_HINT_R) {
+    const onHandle = hitAt(mx, my);
+    const plus = onHandle && onHandle.kind === "lednode" ? null
+      : (nodeHint && nodeHint.side === (mirror ? "back" : "front")
+         ? nodeHint : (nodeHint && traceNodeHint(mx, my)));
+    if (plus && Math.sqrt((mx - plus.x) ** 2 + (my - plus.y) ** 2) < NODE_HINT_R) {
       const L = state.leds[plus.index];
       L.nodes = [...(L.nodes || [])];
       L.nodes.splice(plus.leg, 0, [plus.x, plus.y]);
