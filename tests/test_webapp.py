@@ -638,7 +638,8 @@ def test_surface_finish_in_readme(client):
 
 def test_shape_art_layer_and_one_sided_bare(client):
     # A basic-shape art layer needs no upload; a bare layer with
-    # bare_side=back opens ONLY the back mask but still cuts both pours.
+    # bare_side=back opens ONLY the back mask and only cuts the back pour —
+    # the front keeps its copper, so the window may sit over a front-side part.
     params = _params(
         name="winback",
         leds=[],
@@ -663,19 +664,23 @@ def test_shape_art_layer_and_one_sided_bare(client):
 
     assert polys_on("B.Mask") >= 1          # the back-only window opens B.Mask
     assert polys_on("F.Mask") == 1          # only the copper rect opens the front
-    # the bare circle voids copper on BOTH pours even though only B.Mask opens
+    # the bare circle voids copper on the BACK pour only; the front pour, and
+    # anything mounted on the front, is untouched
     from shapely.geometry import Point, Polygon
 
-    for net in ("3V3", "GND"):
+    def pour_covers(net, layer):
         zone = board[board.index(f'(net_name "{net}")'):]
         zone = zone[:zone.index("\n  )")]
-        over = False
-        for fp in re.finditer(r"\(filled_polygon \(layer \"[FB]\.Cu\"\) \(pts (.*?)\)\)", zone):
+        for fp in re.finditer(
+                rf"\(filled_polygon \(layer \"{layer}\"\) \(pts (.*?)\)\)", zone):
             pts = [(float(a) - 100, float(b) - 100)
                    for a, b in re.findall(r"\(xy ([\d.-]+) ([\d.-]+)\)", fp.group(1))]
             if len(pts) >= 3 and Polygon(pts).buffer(0).contains(Point(10.16, 10.16)):
-                over = True
-        assert not over, f"{net} pour still covers the window"
+                return True
+        return False
+
+    assert not pour_covers("GND", "B.Cu"), "back pour should be cut by a back window"
+    assert pour_covers("3V3", "F.Cu"), "front pour should survive a back-only window"
 
 
 def test_back_side_art_mirrors_and_lands_on_back_layers(client):

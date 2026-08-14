@@ -699,8 +699,8 @@ const usesBare = a => isShapeArt(a) ? a.material === "bare"
 function promoteToThrough(a, hadBare) {
   if (!hadBare && usesBare(a) && (a.side || "front") === "front") a.side = "through";
 }
-// Is this layer's bare window open on the given face? Closed faces keep the
-// mask and look like a glow window from that side.
+// A closed face is untouched: it keeps its mask AND its copper, which is why
+// a one-face bare window can sit over a part mounted on the other side.
 // Draw a layer's material, mirroring back-side layers about their center
 // (their board geometry is mirrored so they read correctly from the back).
 function drawArtSided(oc, a, mat, viewSide) {
@@ -720,6 +720,15 @@ const bareOpenOn = (a, viewSide) => {
 };
 // The face a layer's ink (silk/copper) lives on ("through" prints front).
 const inkSide = a => (a.side === "back" ? "back" : "front");
+// Which faces a window layer actually opens. A glow window always cuts both
+// (light has to cross); a bare window cuts only where its mask opens, so a
+// one-face window leaves the other side's copper — and anything mounted on
+// it — completely alone. Mirrors pcb._window_geometry / _fill_geometry.
+function windowFaces(a, mat) {
+  if (mat === "glow") return ["front", "back"];
+  return a.side === "through" || a.side === undefined
+    ? ["front", "back"] : [a.side === "back" ? "back" : "front"];
+}
 const textFontCSS = t => t.font && t.font !== "kicad" ? `"bm-${t.font}", monospace` : "monospace";
 // The KiCad stroke font's approximate coverage; anything outside prints as
 // a box, so the PREVIEW shows the box too instead of a pretty browser glyph.
@@ -2322,7 +2331,7 @@ function captionBoxes() { // mirrors pcb.caption_boxes
   }
   return out;
 }
-function eraseArtKeepouts(oc, forWindows, unitSide) {
+function eraseArtKeepouts(oc, forWindows, unitSide, windowCutsFar) {
   oc.save();
   oc.globalCompositeOperation = "destination-out";
   oc.fillStyle = "#000";
@@ -2336,7 +2345,11 @@ function eraseArtKeepouts(oc, forWindows, unitSide) {
     oc.fillRect(mm2px(x0), mm2px(y0), (x1 - x0) * SCALE, (y1 - y0) * SCALE);
   }
   for (const L of state.leds) {
-    if (!forWindows && L.side !== (unitSide || "front")) {
+    // A window that only opens this face leaves the far face's copper alone,
+    // so it need only dodge what actually crosses the board there.
+    const farOnly = L.side !== (unitSide || "front")
+      && (!forWindows || windowCutsFar === false);
+    if (farOnly) {
       // A reverse unit's routed hole penetrates both faces — keep this
       // side's decor clear of the hole and its light spot (server parity).
       const g = geomOf(L);
@@ -2475,10 +2488,15 @@ function corridorRect(L) {
 function drawWindowLayers(c, mirror, mats, eraseText) {
   const [off, oc] = newLayer(c.canvas);
   const viewSide = mirror ? "back" : "front";
-  let any = false;
+  let any = false, cutsFar = false;
   for (const mat of mats) {
     for (const a of state.art) {
-      if (layerHasMat(a, mat)) { drawArtSided(oc, a, mat, viewSide); any = true; }
+      if (!layerHasMat(a, mat)) continue;
+      const faces = windowFaces(a, mat);
+      if (!faces.includes(viewSide)) continue;  // does not open on this face
+      if (faces.length > 1) cutsFar = true;     // through window: cuts both
+      drawArtSided(oc, a, mat, viewSide);
+      any = true;
     }
   }
   if (!any) return;
@@ -2490,7 +2508,8 @@ function drawWindowLayers(c, mirror, mats, eraseText) {
   oc.fillRect(mm2px(ob[0] + 1.16), mm2px(ob[1] + 1.16),
               (ob[2] - ob[0] - 2.32) * SCALE, (ob[3] - ob[1] - 2.32) * SCALE);
   clipToBoard(oc);
-  eraseArtKeepouts(oc, true);
+  // Only a window that cuts the far side has to dodge parts mounted there.
+  eraseArtKeepouts(oc, true, viewSide, cutsFar);
   state.leds.forEach((L, i) => { // corridor fallback: only unroutable units
     const br = allBridges()[i];
     if (br.F && br.B) return;
@@ -3507,7 +3526,7 @@ function renderArtList() {
     if (!usesBare(a) && a.side === "through") a.side = "front";
     const through = usesBare(a)
       ? opt("through", "Through", a.side || "front") : "";
-    return `<select class="aside" title="Which face this layer lives on${usesBare(a) ? " — Through opens the bare window on both faces" : ""}">
+    return `<select class="aside" title="Which face this layer lives on${usesBare(a) ? " — Through opens the bare window on both faces and cuts copper from both; one face leaves the other side untouched" : ""}">
       ${opt("front", "Front", a.side || "front")}${opt("back", "Back", a.side || "front")}${through}</select>`;
   };
   state.art.forEach((a, i) => {

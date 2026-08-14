@@ -922,13 +922,45 @@ def _generate_impl(render: bool):
     bridges = pcb.unit_bridges(
         pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds), safe
     )
+    # A window has to keep clear of anything whose copper it would cut. A glow
+    # window cuts both faces, so it avoids every unit. A bare window that opens
+    # one face only cuts that face, so it need only avoid units mounted there —
+    # plus whatever crosses the board regardless (plated pads, routed holes, a
+    # LED sitting on the far side). That is what lets a back-only window run
+    # right under a part mounted on the front.
+    _window_base = ([CircleKeepout(x, y, 2.0) for x, y in kept_pads] + captions)
+
+    def _crossers(face: str) -> list:
+        out: list = []
+        for led in leds:
+            if led.side == face:
+                continue
+            g = pcb.led_geometry(led)
+            if led.farled and not g["hole"] and "drill" not in pcb.PKG[g["pkg"]]:
+                out.append(_led_keepout(led, safe, pins, leds, outline_rings))
+                continue
+            if led.reverse:
+                out.append(_reverse_hole_keepout(led, safe))
+            out += [CircleKeepout(x, y, r + 0.5)
+                    for x, y, r in pcb.th_pad_circles(led, safe)]
+        return out
+
+    def _face_keepouts(face: str) -> list:
+        return (_window_base
+                + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
+                   if led.side == face]
+                + _crossers(face)
+                + [_window_corridor(led, safe) for i, led in enumerate(leds)
+                   if led.side == face and None in bridges[i].values()])
+
+    # glow, and a bare window open on both faces
     window_keepouts: list = (
-        [CircleKeepout(x, y, 2.0) for x, y in kept_pads]
-        + captions
+        _window_base
         + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds]
         + [_window_corridor(led, safe) for i, led in enumerate(leds)
            if None in bridges[i].values()]
     )
+    bare_keepouts = {face: _face_keepouts(face) for face in ("front", "back")}
     # Windows stay 1.6 mm off the board edge so the copper pours keep a
     # continuous perimeter ring (pcb._fill_geometry enforces this too).
     window_board = (1.26, 1.26, 19.06, 19.06)
@@ -1127,7 +1159,10 @@ def _generate_impl(render: bool):
         for i, ci, window, art_side in classified:
             for material in ("copper", "glow", "bare"):
                 if material in ("glow", "bare"):
-                    keepouts = window_keepouts + (text_keepouts if material == "bare" else [])
+                    base = (bare_keepouts[window]
+                            if material == "bare" and window in ("front", "back")
+                            else window_keepouts)
+                    keepouts = base + (text_keepouts if material == "bare" else [])
                     made = emit(i, ci, material, keepouts, window_board, window=window)
                 else:
                     made = emit(i, ci, material, decor_of[art_side], art_board, side=art_side)
