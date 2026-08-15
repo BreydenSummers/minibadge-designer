@@ -1577,15 +1577,14 @@ def test_art_is_kept_off_the_pin_captions_the_same_way_in_both(ui):
 # ===========================================================================
 @pytest.mark.kicad
 @pytest.mark.needs("kicad")
-def test_fab_download_carries_the_authors_warning(ui):
-    """The Gerbers button hands over the fab package with the author's caveat
-    standing beside it until the user dismisses it by hand.
+def test_fab_download_waits_for_the_authors_warning_to_be_acknowledged(ui):
+    """The Gerbers button opens the author's caveat as a gate: declining it
+    downloads nothing, and only "I understand" releases the fab package.
 
     That zip goes straight to a board house, so this is the one moment the
     app can say "give it a once-over in KiCad first" before real money is
-    spent.  A transient status line fades on its own and a standing design
-    warning is cleared by the next draw; the caveat must be neither — it has
-    to sit there until acknowledged.
+    spent.  A notice that appears next to an already-started download warns
+    nobody; the acknowledgement has to come first.
     """
     page = ui.page
     ui.show_panel("leds")
@@ -1597,8 +1596,50 @@ def test_fab_download_carries_the_authors_warning(ui):
     ui.wait_state(f"state.leds[{idx}].side === 'back'")
     assert ui.blocking() == [], ui.toast_texts()
 
+    # Every download this page ever starts lands here; the declined path
+    # below asserts against the whole list, not a race-prone instant.
+    # The download event only fires once the server has finished plotting
+    # (~2 s), so "no download yet" right after a decline proves nothing — a
+    # wrongly-started export would still be in flight.  The request log is
+    # the honest oracle: the POST is issued in the same task chain as the
+    # acknowledgement, so on a decline it must never appear at all.
+    downloads = []
+    page.on("download", lambda d: downloads.append(d))
+    gerber_posts = []
+    page.on("request", lambda r: gerber_posts.append(r.url)
+            if r.url.endswith("/gerbers") else None)
+    dialog_open = "document.getElementById('fabwarn').classList.contains('open')"
+
+    def expect_dialog(should_be_open, why):
+        # Give the UI its beat, then assert, so a missing (or lingering)
+        # dialog reads as an assertion naming the defect, not a raw timeout.
+        want = dialog_open if should_be_open else f"!{dialog_open}"
+        try:
+            page.wait_for_function(f"() => {want}", timeout=ELEMENT_TIMEOUT)
+        except PWTimeout:
+            pass
+        assert ui.js(f"() => {dialog_open}") is should_be_open, why
+
+    # --- declining the warning downloads nothing -------------------------
+    page.click("#gerberbtn", timeout=ELEMENT_TIMEOUT)
+    expect_dialog(True, "the Gerbers button skipped the author's warning")
+    assert downloads == [], (
+        "the fab zip started downloading before the warning was answered")
+    page.click("#fabcancel", timeout=ELEMENT_TIMEOUT)
+    expect_dialog(False, "declining the warning left the dialog up")
+    # Half a second is generous: a wrongly-released export issues its POST
+    # in the same microtask chain as the dialog resolving.
+    page.wait_for_timeout(500)
+    assert gerber_posts == [] and downloads == [], (
+        "declining the author's warning still started the fab export — the "
+        "gate is decoration")
+
+    # --- acknowledging it releases the fab package ------------------------
+    page.click("#gerberbtn", timeout=ELEMENT_TIMEOUT)
+    expect_dialog(True, "the warning must gate every fab download, not one")
     with page.expect_download(timeout=GENERATE_TIMEOUT) as dl:
-        page.click("#gerberbtn", timeout=ELEMENT_TIMEOUT)
+        page.click("#fabok", timeout=ELEMENT_TIMEOUT)
+    expect_dialog(False, "acknowledging the warning left the dialog up")
     assert dl.value.suggested_filename.endswith("-gerbers.zip"), (
         dl.value.suggested_filename)
     path = ui.downloads_dir / "fab.zip"
@@ -1608,21 +1649,7 @@ def test_fab_download_carries_the_authors_warning(ui):
     # The full board-house contract lives in test_webapp.py; here it is
     # enough that the browser received the fab package, not the project zip.
     assert {"gtl", "gbl", "drl"} <= exts, exts
-
-    # The toast lands just after the download starts; allow it that beat,
-    # then assert, so a missing warning reads as an assertion, not a timeout.
-    warn_count = "document.querySelectorAll('#toasts .toast.warn').length"
-    try:
-        page.wait_for_function(f"() => {warn_count} >= 1",
-                               timeout=ELEMENT_TIMEOUT)
-    except PWTimeout:
-        pass
-    assert ui.js(f"() => {warn_count}") >= 1, (
-        "the fab zip downloaded without the author's warning — the user "
-        "heads to the board house with no reason to double-check: "
-        + str(ui.toast_texts()))
-    # No standing design warnings exist (blocking() was empty), so the warn
-    # toast is the caveat; it clears by click, like every dismissable toast.
-    page.click("#toasts .toast.warn", timeout=ELEMENT_TIMEOUT)
-    ui.wait_state(f"{warn_count} === 0")
-    ui.assert_clean("fab gerber download flow")
+    assert len(gerber_posts) == 1, (
+        f"one acknowledgement must release exactly one export, saw "
+        f"{len(gerber_posts)} POSTs to /gerbers")
+    ui.assert_clean("fab gerber gate flow")
