@@ -69,6 +69,12 @@ VBATT, CLK, and NC pins are left unconnected per the standard.
    slits the file format forces (a fill is stored as one hole-free outline)
    with proper holes. Light windows carry keepout areas so the refill leaves
    them clear — the 3D view shows the board in this refilled state.
+4. Or skip KiCad: the **⬇ Gerbers for fab** button has the server refill the
+   zones and plot the fab package itself (`kicad-cli` required) — a flat zip
+   of RS-274X Gerbers with Protel extensions plus a merged Excellon drill
+   file, ready to upload as-is to JLCPCB or PCBWay. OSH Park users should
+   upload the `.kicad_pcb` from the project zip instead, which OSH Park
+   accepts natively.
 
 ## Architecture
 

@@ -1570,3 +1570,59 @@ def test_art_is_kept_off_the_pin_captions_the_same_way_in_both(ui):
         "art is carved away from the pin captions differently in the preview "
         "than on the board; captionBoxes() and pcb.caption_boxes have "
         "drifted:\n" + "\n".join(off_by[:8]))
+
+
+# ===========================================================================
+# The fab Gerber download (the ⬇ Gerbers button)
+# ===========================================================================
+@pytest.mark.kicad
+@pytest.mark.needs("kicad")
+def test_fab_download_carries_the_authors_warning(ui):
+    """The Gerbers button hands over the fab package with the author's caveat
+    standing beside it until the user dismisses it by hand.
+
+    That zip goes straight to a board house, so this is the one moment the
+    app can say "give it a once-over in KiCad first" before real money is
+    spent.  A transient status line fades on its own and a standing design
+    warning is cleared by the next draw; the caveat must be neither — it has
+    to sit there until acknowledged.
+    """
+    page = ui.page
+    ui.show_panel("leds")
+    assert ui.add_led() is True
+    idx = len(ui.leds()) - 1
+    # Off the defaults the plot path reads: the new unit mounts on the back.
+    ui.card("ledlist", idx).locator("select.s").select_option(
+        "back", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state(f"state.leds[{idx}].side === 'back'")
+    assert ui.blocking() == [], ui.toast_texts()
+
+    with page.expect_download(timeout=GENERATE_TIMEOUT) as dl:
+        page.click("#gerberbtn", timeout=ELEMENT_TIMEOUT)
+    assert dl.value.suggested_filename.endswith("-gerbers.zip"), (
+        dl.value.suggested_filename)
+    path = ui.downloads_dir / "fab.zip"
+    dl.value.save_as(path)
+    with zipfile.ZipFile(path) as zf:
+        exts = {n.rsplit(".", 1)[-1].lower() for n in zf.namelist()}
+    # The full board-house contract lives in test_webapp.py; here it is
+    # enough that the browser received the fab package, not the project zip.
+    assert {"gtl", "gbl", "drl"} <= exts, exts
+
+    # The toast lands just after the download starts; allow it that beat,
+    # then assert, so a missing warning reads as an assertion, not a timeout.
+    warn_count = "document.querySelectorAll('#toasts .toast.warn').length"
+    try:
+        page.wait_for_function(f"() => {warn_count} >= 1",
+                               timeout=ELEMENT_TIMEOUT)
+    except PWTimeout:
+        pass
+    assert ui.js(f"() => {warn_count}") >= 1, (
+        "the fab zip downloaded without the author's warning — the user "
+        "heads to the board house with no reason to double-check: "
+        + str(ui.toast_texts()))
+    # No standing design warnings exist (blocking() was empty), so the warn
+    # toast is the caveat; it clears by click, like every dismissable toast.
+    page.click("#toasts .toast.warn", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state(f"{warn_count} === 0")
+    ui.assert_clean("fab gerber download flow")

@@ -211,12 +211,18 @@
     width: auto; padding: 0 2px; font-size: 11px; border-radius: 4px;
     background: var(--bg); color: var(--text); border: 1px solid var(--edge);
   }
-  button#download {
+  button#download, button#gerberbtn {
     border: 0; border-radius: 4px; padding: 9px 18px; white-space: nowrap;
     background: var(--hot); color: var(--hot-ink); font-size: 13px; font-weight: 800;
     cursor: pointer; letter-spacing: .02em;
   }
-  button#download:disabled { opacity: .5; cursor: default; }
+  /* The fab package is the secondary action: same shape, quiet outline. */
+  button#gerberbtn {
+    background: none; color: var(--text); border: 1px solid var(--edge);
+    padding: 8px 14px; font-weight: 700;
+  }
+  button#gerberbtn:hover { color: var(--accent); border-color: var(--accent); }
+  button#download:disabled, button#gerberbtn:disabled { opacity: .5; cursor: default; }
   /* Message dock at the foot of the rail: transient status messages and the
      standing warnings about problems with the design (a part off the board,
      text over a pad, ...). It is IN FLOW, not floating over the work area:
@@ -373,7 +379,7 @@
   @media (max-width: 1120px) {
     #shell { grid-template-columns: 54px 280px 1fr; }
     #topbar input#name { width: 120px; }
-    #download .dlx { display: none; }
+    #download .dlx, #gerberbtn .dlx { display: none; }
     #topbar { gap: 8px; }
   }
   /* The floating legend only works while the gap beside the centred view
@@ -420,6 +426,7 @@
   <div id="revchip" class="mono">SHEET 1/1 · 20.32 × 20.32 MM</div>
   <button class="qm" tabindex="-1" data-tip="basics" title="Getting around">?</button>
   <button id="themebtn" title="Toggle light/dark">◐</button>
+  <button id="gerberbtn" title="Plot the Gerber fab package — a zip you upload straight to JLCPCB or PCBWay">⬇ Gerbers<span class="dlx"> for fab</span></button>
   <button id="download">⬇ Download<span class="dlx"> KiCad project</span></button>
   <button class="qm" tabindex="-1" data-tip="download" title="What you get">?</button>
 </div>
@@ -4719,49 +4726,83 @@ function designFormData() { // the full design, as /generate and /render take it
   }));
   return fd;
 }
+// Both download buttons share the same guards and failure handling; only the
+// endpoint and what happens on success differ.
+function reportBlocked() { // true (and says why) when the design can't build
+  const blocked = blockingProblems();
+  if (!blocked.length) return false;
+  const [what, kind, i] = blocked[0];
+  const more = blocked.length - 1;
+  setStatus(`Can't build this board: ${what}`
+    + (more ? ` (and ${more} other problem${more > 1 ? "s" : ""})` : "")
+    + " — fix it and download again.", true);
+  revealItem(kind, i);
+  return true;
+}
+async function fetchDesignZip(endpoint, fallbackName) {
+  const resp = await fetch(endpoint, { method: "POST", body: designFormData() });
+  if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
+  const blob = await resp.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = (resp.headers.get("Content-Disposition") || "").match(/filename=(.+)/)?.[1] || fallbackName;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+function revealCulprit(err) {
+  // The server names the culprit ("LED 2 ...") — take the user to it.
+  const m = /LED (\d+)/.exec(err.message);
+  const i = m ? parseInt(m[1], 10) - 1 : -1;
+  if (i >= 0 && state.leds[i]) {
+    setSelection("led", i, state.leds[i].side);
+    showPanel("leds");
+    renderLedList();
+    const card = document.querySelectorAll("#ledlist .item")[i];
+    if (card) card.scrollIntoView({ block: "nearest" });
+    draw();
+  }
+}
 $("download").addEventListener("click", async () => {
   const btn = $("download");
-  if (btn.disabled) return;
-  const blocked = blockingProblems();
-  if (blocked.length) {
-    const [what, kind, i] = blocked[0];
-    const more = blocked.length - 1;
-    setStatus(`Can't build this board: ${what}`
-      + (more ? ` (and ${more} other problem${more > 1 ? "s" : ""})` : "")
-      + " — fix it and download again.", true);
-    revealItem(kind, i);
-    return;
-  }
+  if (btn.disabled || reportBlocked()) return;
   btn.disabled = true;
   // Generation can finish in well under a second, so re-enabling immediately
   // turns an impatient double-click into two identical zips.
   const settle = () => setTimeout(() => { btn.disabled = false; }, 700);
   setStatus("Generating…");
   try {
-    const fd = designFormData();
-    const resp = await fetch("/generate", { method: "POST", body: fd });
-    if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
-    const blob = await resp.blob();
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = (resp.headers.get("Content-Disposition") || "").match(/filename=(.+)/)?.[1] || "minibadge.zip";
-    a.click();
-    URL.revokeObjectURL(a.href);
+    await fetchDesignZip("/generate", "minibadge.zip");
     setStatus("Done — open the .kicad_pro in KiCad, press B to fill zones, export Gerbers.");
     dirty = false; // the design is saved in the zip
   } catch (err) {
     setStatus("Download failed: " + err.message, true);
-    // The server names the culprit ("LED 2 ...") — take the user to it.
-    const m = /LED (\d+)/.exec(err.message);
-    const i = m ? parseInt(m[1], 10) - 1 : -1;
-    if (i >= 0 && state.leds[i]) {
-      setSelection("led", i, state.leds[i].side);
-      showPanel("leds");
-      renderLedList();
-      const card = document.querySelectorAll("#ledlist .item")[i];
-      if (card) card.scrollIntoView({ block: "nearest" });
-      draw();
-    }
+    revealCulprit(err);
+  } finally {
+    settle();
+  }
+});
+// The fab package arrives with a health warning from the author. It blocks
+// nothing — "I'll just roll the dice" — but it stays on screen until
+// dismissed, so nobody uploads to a board house unwarned.
+$("gerberbtn").addEventListener("click", async () => {
+  const btn = $("gerberbtn");
+  if (btn.disabled || reportBlocked()) return;
+  btn.disabled = true;
+  const settle = () => setTimeout(() => { btn.disabled = false; }, 700);
+  setStatus("Plotting Gerbers…");
+  try {
+    await fetchDesignZip("/gerbers", "minibadge-gerbers.zip");
+    setStatus("Done — upload the zip as-is to JLCPCB or PCBWay and order 1.6 mm, "
+      + "2 layers, your mask color and finish. (OSH Park instead takes the "
+      + ".kicad_pcb from the KiCad project zip directly.)");
+    putToast("halfwarn", "This project was mostly made at 2 am late nights "
+      + "powered by caffeine. There are bound to be a few bugs. If you would "
+      + "like to avoid the chance of wasting time and money please pull it up "
+      + "in your own KiCad and give it a once over. As for me I'll just roll "
+      + "the dice. -half", "warn");
+  } catch (err) {
+    setStatus("Gerber export failed: " + err.message, true);
+    revealCulprit(err);
   } finally {
     settle();
   }
@@ -5085,6 +5126,7 @@ const TIPS = {
   download: { title: "Step 6 — the finished board", img: "final.png", html: `<ul>
     <li>The actual KiCad renders, front and back: clean crown (bottom row only), visor dark until its LED lights it, and the maker's mark on the back. The zip holds the board, project file, BOM, and a README with ordering notes (including your soldermask color).</li>
     <li>Open the <b>.kicad_pro</b>, press <b>B</b> to refill zones (the hairline slits in copper areas vanish), then export Gerbers.</li>
+    <li>Or skip KiCad entirely: <b>⬇ Gerbers for fab</b> plots that exact package on the server — a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the .kicad_pcb itself). Order 1.6 mm, 2 layers, your mask color and finish.</li>
     <li>Silk is carved around pads, parts, text, and mask openings automatically — the project arrives DRC-clean.</li>
   </ul>` },
 };

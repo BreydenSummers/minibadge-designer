@@ -785,9 +785,12 @@ def _refill_zones(board_path: str) -> bool:
 
     Pressing B in KiCad replaces them with properly fractured fills; this
     does the same thing for the preview so it shows the board the way it will
-    actually be plotted. Needs KiCad's `pcbnew` module, which ships with the
-    Docker image but not with a bare pip install — without it the preview
-    just keeps the slits, so this is best-effort by design.
+    actually be plotted. Needs KiCad's `pcbnew` module: the server's own
+    interpreter has it in the Docker image, and a macOS KiCad install carries
+    a bundled Python that has it even when the venv does not — both are
+    tried. Without either the preview just keeps the slits, so this stays
+    best-effort; the Gerber export, which cannot ship the slits, checks the
+    returned bool and refuses instead.
     """
     import subprocess
     import sys
@@ -798,12 +801,31 @@ def _refill_zones(board_path: str) -> bool:
         "pcbnew.ZONE_FILLER(b).Fill(b.Zones())\n"
         "b.Save(sys.argv[1])\n"
     )
-    try:
-        run = subprocess.run([sys.executable, "-c", script, board_path],
-                             capture_output=True, timeout=120)
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return run.returncode == 0
+    candidates = [sys.executable]
+    cli = _kicad_cli()
+    mac_suffix = "/Contents/MacOS/kicad-cli"
+    if cli and cli.endswith(mac_suffix):
+        candidates.append(
+            cli[: -len(mac_suffix)]
+            + "/Contents/Frameworks/Python.framework/Versions/Current/bin/python3"
+        )
+    # Remember which interpreter worked so later requests skip the ones that
+    # can only fail (each miss costs a full interpreter start).
+    if _refill_zones.exe is not None:
+        candidates = [_refill_zones.exe]
+    for exe in candidates:
+        try:
+            run = subprocess.run([exe, "-c", script, board_path],
+                                 capture_output=True, timeout=120)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if run.returncode == 0:
+            _refill_zones.exe = exe
+            return True
+    return False
+
+
+_refill_zones.exe = None
 
 
 def _glb_meshes(data: bytes) -> int:
@@ -879,6 +901,102 @@ def _model_glb(spec: "pcb.BadgeSpec", slug: str):
             "model may be missing from the 3D view. The downloaded KiCad "
             "project is unaffected.")
     return resp
+
+
+# ---- Gerber fab package ----------------------------------------------------
+# POST /gerbers returns a zip that uploads straight to a board house. One
+# universal package covers the popular fabs: Protel filename extensions
+# (kicad-cli's default, and what JLCPCB/PCBWay's CAM auto-detects), plain
+# RS-274X — PCBWay documents that its CAM mishandles X2 attributes, and
+# everyone else merely tolerates them — and a single merged Excellon drill
+# file in exactly the dialect the JLCPCB/PCBWay/OSH Park KiCad guides ask
+# for (mm, decimal zeros, absolute origin, alternate oval mode). OSH Park
+# users are better served by the .kicad_pcb in the project zip, which OSH
+# Park accepts natively.
+
+
+@app.post("/gerbers")
+def gerbers():
+    return _generate_impl(render="gerbers")
+
+
+_FAB_LAYERS = "F.Cu,B.Cu,F.Paste,B.Paste,F.SilkS,B.SilkS,F.Mask,B.Mask,Edge.Cuts"
+
+# One file per plotted layer plus the drill file. Presence is judged by
+# extension, not by name: kicad-cli renders "F.SilkS" as "-F_Silkscreen.gto"
+# and may change such spellings again, but the Protel extensions are the
+# contract the board houses parse.
+_FAB_EXTENSIONS = {"gtl", "gbl", "gtp", "gbp", "gto", "gbo", "gts", "gbs",
+                   "gm1", "drl"}
+
+
+def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
+    import pathlib
+    import subprocess
+    import tempfile
+
+    cli = _kicad_cli()
+    if cli is None:
+        return {"error": "Gerber export needs KiCad (kicad-cli) installed on "
+                         "the server — download the KiCad project instead and "
+                         "plot there (the README in the zip walks through "
+                         "it)."}, 501
+    with tempfile.TemporaryDirectory() as td:
+        board = f"{td}/{slug}.kicad_pcb"
+        with open(board, "w") as f:
+            f.write(pcb.generate_pcb(spec))
+        # The 3D preview may shrug off unfilled zones; a fab package must
+        # not. Plotting the shipped slit-open fills would put hairline gaps
+        # across both power planes on the physical board.
+        if not _refill_zones(board):
+            return {"error": "the server could not refill the copper zones "
+                             "(KiCad's pcbnew Python module is missing), and "
+                             "Gerbers plotted without a refill carry hairline "
+                             "gaps across the power planes. Download the "
+                             "KiCad project instead: open it, press B, then "
+                             "plot."}, 501
+        out = f"{td}/fab"
+        try:
+            plot = subprocess.run(
+                [cli, "pcb", "export", "gerbers", "-o", out + "/",
+                 "--layers", _FAB_LAYERS, "--no-x2", "--no-netlist",
+                 "--subtract-soldermask", board],
+                capture_output=True, timeout=120,
+            )
+            drill = subprocess.run(
+                [cli, "pcb", "export", "drill", "-o", out + "/",
+                 "--format", "excellon", "--drill-origin", "absolute",
+                 "--excellon-zeros-format", "decimal",
+                 "--excellon-oval-format", "alternate",
+                 "--excellon-units", "mm", board],
+                capture_output=True, timeout=120,
+            )
+        except subprocess.TimeoutExpired:
+            return {"error": "the Gerber export timed out"}, 500
+        # Judge the artifacts, not the exit codes (same reasoning as the GLB
+        # export): the package is complete when every layer and the drill
+        # file exist, and anything short of that is a refusal — a zip with a
+        # missing mask or outline plots as a real, wrong board at the fab.
+        files = sorted(p for p in pathlib.Path(out).glob("*") if p.is_file())
+        missing = _FAB_EXTENSIONS - {p.suffix.lstrip(".").lower() for p in files}
+        if missing:
+            note = (plot.stderr + drill.stderr).decode("utf-8", "replace")
+            note = note.strip().splitlines()
+            return {"error": "KiCad could not plot this board"
+                             + (f" — {note[-1][:200]}" if note else "")}, 500
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in files:
+                # Flat, no folder: board-house upload forms expect the layers
+                # at the top of the archive.
+                zf.writestr(p.name, p.read_bytes())
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{slug}-gerbers.zip",
+    )
 
 
 def _generate_impl(render: bool):
@@ -1496,6 +1614,8 @@ def _generate_impl(render: bool):
 
     if render == "model":
         return _model_glb(spec, slug)
+    if render == "gerbers":
+        return _fab_gerbers(spec, slug)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
