@@ -946,6 +946,95 @@ def test_a_window_leaves_only_board_crossing_copper_on_a_units_far_face(client, 
         "face must keep the copper its pads connect through")
 
 
+def _window_board(client, tenting):
+    """A back inline unit under a full-coverage bare window, generated for
+    the mask-cover tests: its 3V3 bridge and its via both cross the opening."""
+    img = Image.new("L", (200, 200), 0)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    params = _params(
+        name="masked",
+        tenting=tenting,
+        leds=[{"x": 12, "y": 10, "color": "red", "side": "back",
+               "layout": "inline", "size": "1206"}],
+        art=[{"material": "bare", "threshold": 128,
+              "cx": 10.16, "cy": 10.16, "w": 18}],
+    )
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps(params),
+              "art0": (io.BytesIO(buf.getvalue()), "win.png")},
+        content_type="multipart/form-data",
+    )
+    text = zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "masked/masked.kicad_pcb").decode()
+    return text, invariants.assert_parses(text)
+
+
+def _mask_openings(board, layer):
+    """The mask-opening gr_polys on one face, as shapely polygons (board mm)."""
+    from shapely.geometry import Polygon
+
+    from minibadge_designer import pcb
+
+    out = []
+    for g in board.graphics(layer):
+        if g[0] != "gr_poly":
+            continue
+        pts = next(c for c in g[1:] if isinstance(c, list) and c[0] == "pts")
+        out.append(Polygon([(float(p[1]) - pcb.ORIGIN, float(p[2]) - pcb.ORIGIN)
+                            for p in pts[1:]]))
+    return out
+
+
+def test_a_bridge_crossing_a_window_stays_under_soldermask(client):
+    # The perimeter bridge is a hairline of copper across the window, and the
+    # mask used to open right over it — the trace shipped plated bare, a
+    # corrosion and short hazard no fab leaves on purpose, and the exposed
+    # gold streak the user reported in the 3D view. The window's mask opening
+    # now keeps a dam of mask over every bridge; the copper cut underneath is
+    # untouched, so the window still works.
+    from shapely.geometry import Point
+
+    _text, board = _window_board(client, tenting=True)
+    openings = _mask_openings(board, "F.Mask")
+    assert openings, "the bare window opened no front mask at all"
+    # The unit at (12, 10) bridges its via (3.7875, 10) left to the ring;
+    # probe the run's midpoint, and the same window 1.5 mm off the trace.
+    dam = Point(2.37, 10.0)
+    win = Point(2.37, 8.5)
+    assert any(p.contains(win) for p in openings), (
+        "the window fails to open the mask even beside the bridge — that is "
+        "a missing window, not a mask dam")
+    assert not any(p.contains(dam) for p in openings), (
+        "the mask opens right over the perimeter bridge — its copper ships "
+        "plated bare across the window")
+
+
+@pytest.mark.parametrize("tenting", [True, False])
+def test_the_via_keeps_its_mask_cap_only_while_the_board_is_tented(client, tenting):
+    # Tenting is a board-wide fab option (it lives with mask color and finish
+    # in the Shape panel): tented vias keep soldermask over their annulus —
+    # including a cap where a window crosses them — while exposed vias plate
+    # bare and say so in the file with KiCad 9's per-via `(tenting none)`.
+    from shapely.geometry import Point
+
+    text, board = _window_board(client, tenting=tenting)
+    openings = _mask_openings(board, "F.Mask")
+    assert openings, "the bare window opened no front mask at all"
+    # A point on the via annulus (via at (3.7875, 10), barrel r 0.35),
+    # far enough from the bridge dam's end cap not to be shadowed by it.
+    annulus = Point(3.7875, 10.3)
+    exposed = any(p.contains(annulus) for p in openings)
+    assert exposed == (not tenting), (
+        "a tented via must keep its mask cap inside a window"
+        if tenting else
+        "an exposed-vias board must open the window over the via annulus")
+    assert ("(tenting none)" in text) == (not tenting), (
+        "(tenting none) must be written exactly when the board opts out of "
+        "tenting — KiCad's default is tented, so silence means covered")
+
+
 def test_texts_pass_through_and_sanitize(client):
     texts = [
         {"x": 10, "y": 4, "text": "front text", "size": 2.0},

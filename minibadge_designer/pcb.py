@@ -1539,6 +1539,10 @@ class BadgeSpec:
     # Custom board outline as rings of (x, y) board-mm points — first ring
     # is the exterior, the rest are holes. None = the standard 20x20 square.
     outline: list[list[tuple[float, float]]] | None = None
+    # Via tenting: cover vias with soldermask (every fab's default). Off
+    # writes `(tenting none)` on each via so the annulus plates bare, and
+    # window mask openings stop keeping a cap of mask over vias they cross.
+    tenting: bool = True
 
     @property
     def rows(self) -> tuple[str, ...]:
@@ -1708,6 +1712,42 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
     return "\n".join(out)
 
 
+def _seg_outside_discs(a, b, discs, min_len: float = 0.15) -> list:
+    """The pieces of segment a->b that lie outside every disc (cx, cy, r).
+
+    Silkscreen must not print over an exposed via's mask aperture — the fab
+    clips it and DRC flags it — so when tenting is off, a unit's silk lines
+    are broken around the via the way TH dome silk is already broken around
+    its pads. Pieces shorter than min_len are dropped: a fleck of ink that
+    small prints as nothing.
+    """
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    l2 = dx * dx + dy * dy
+    if l2 < 1e-12:
+        return []
+    spans = [(0.0, 1.0)]
+    for cx, cy, r in discs:
+        fx, fy = ax - cx, ay - cy
+        bb = 2 * (fx * dx + fy * dy)
+        cc = fx * fx + fy * fy - r * r
+        det = bb * bb - 4 * l2 * cc
+        if det <= 0:
+            continue
+        s = det ** 0.5
+        t0 = max((-bb - s) / (2 * l2), 0.0)
+        t1 = min((-bb + s) / (2 * l2), 1.0)
+        if t0 >= t1:
+            continue
+        spans = [seg for lo, hi in spans
+                 for seg in ((lo, min(hi, t0)), (max(lo, t1), hi))
+                 if seg[0] < seg[1]]
+    ln = l2 ** 0.5
+    return [((ax + dx * lo, ay + dy * lo), (ax + dx * hi, ay + dy * hi))
+            for lo, hi in spans if (hi - lo) * ln >= min_len]
+
+
 def _smd(
     key: str,
     ref: str,
@@ -1722,6 +1762,7 @@ def _smd(
     flip: bool = False,
     pkg: str = "0805",
     model: str | None = None,
+    silk_avoid: tuple = (),
 ) -> str:
     """A minimal two-pad SMD footprint (0603/0805/1206) at page coords.
 
@@ -1745,12 +1786,16 @@ def _smd(
     mark = max(dx + 0.8, bw / 2 + 0.3, dx + pw / 2 + 0.2)
 
     def line(x0: float, y0: float, x1: float, y1: float, width: float, tag: str) -> str:
-        (ax, ay), (bx, by) = _r(f * x0, y0, ang), _r(f * x1, y1, ang)
-        return (
-            f"    (fp_line (start {_n(ax)} {_n(ay)}) (end {_n(bx)} {_n(by)}) "
+        a, b = _r(f * x0, y0, ang), _r(f * x1, y1, ang)
+        # silk_avoid discs (an exposed via's mask aperture) break the line —
+        # ink over open mask gets clipped by the fab and flagged by DRC.
+        pieces = (_seg_outside_discs(a, b, silk_avoid) if silk_avoid
+                  else [(a, b)])
+        return "\n".join(
+            f"    (fp_line (start {_n(pa[0])} {_n(pa[1])}) (end {_n(pb[0])} {_n(pb[1])}) "
             f'(stroke (width {_n(width)}) (type solid)) (layer "{p}.SilkS") '
-            f"(tstamp {_ts(f'fp-{key}-{tag}')}))"
-        )
+            f"(tstamp {_ts(f'fp-{key}-{tag}' if n == 0 else f'fp-{key}-{tag}-{n}')}))"
+            for n, (pa, pb) in enumerate(pieces))
 
     def rect(x0: float, y0: float, x1: float, y1: float, width: float, layer: str, tag: str) -> str:
         # A rotated rectangle: fp_rect is axis-aligned only, so emit a poly.
@@ -1901,6 +1946,7 @@ def _led_unit(
     pins=ALL_PINS,
     others: tuple = (),
     outline=None,
+    tenting: bool = True,
 ) -> str:
     """LED + resistor footprints, connecting traces, and the power via."""
     ang = led.rot
@@ -1911,6 +1957,8 @@ def _led_unit(
     cu = "F.Cu" if front else "B.Cu"
     gnd, v33 = (nets["GND"], "GND"), (nets["3V3"], "3V3")
     an = (nets[anode], anode)
+    # KiCad 9 tents vias by default; only "leave them bare" needs saying.
+    tent = "" if tenting else " (tenting none)"
 
     def at(dx: float, dy: float) -> tuple[float, float]:
         rx, ry = _r(dx, dy, ang)
@@ -1935,16 +1983,31 @@ def _led_unit(
     far = (bool(led.farled) and not g["hole"]
            and "drill" not in PKG[g["pkg"]])
     led_side = ("back" if led.side != "back" else "front") if far else led.side
+    route = novia_route(led, pins, safe, others, outline=outline)
+    avoid_led: tuple = ()
+    avoid_res: tuple = ()
+    if not tenting and route is None:
+        # An exposed via opens a mask aperture right beside the unit's silk
+        # (an inline resistor's bracket passes 0.19 mm from the barrel), and
+        # ink over open mask is clipped by the fab and flagged by DRC. Break
+        # the silk around the aperture instead — same treatment TH dome silk
+        # already gets around its pads. Discs are in each footprint's emitted
+        # frame: board-oriented mm, relative to its anchor.
+        vo = g["via_front"] if front else g["via_back"]
+        r_ap = VIA_SIZE / 2 + 0.15
+        avoid_led = ((*_r(vo[0], vo[1], ang), r_ap),)
+        avoid_res = ((*_r(vo[0] - g["res"][0], vo[1] - g["res"][1], ang), r_ap),)
     parts = [
         # LED: pad 1 = cathode, pad 2 = anode (facing the resistor's pad 2).
         _smd(f"led{i}", f"D{i + 1}", f"LED_{led.color.upper()}",
              *at(0, 0), gnd, an, True, led_side,
              (ang + g.get("led_rot", 0.0)) % 360, g["led_flip"], g["pkg"],
-             led_model),
+             led_model, silk_avoid=avoid_led),
         _smd(f"res{i}", f"R{i + 1}", f"{LED_COLORS.get(led.color, '220')}R",
              *at(*g["res"]), v33, an, False, led.side,
              (ang + g.get("res_rot", 0.0)) % 360, False, rpkg,
-             model_path("Resistor_SMD", f"R_{rpkg}_{PKG_METRIC[rpkg]}Metric")),
+             model_path("Resistor_SMD", f"R_{rpkg}_{PKG_METRIC[rpkg]}Metric"),
+             silk_avoid=avoid_res),
         # Resistor pad 2 to LED anode.
         seg(at(*g["res_out"]), at(*g["led_a"]), cu, nets[anode], f"seg-a{i}"),
     ]
@@ -1954,7 +2017,7 @@ def _led_unit(
             vx, vy = at(*off)
             parts.append(
                 f"  (via (at {_n(vx)} {_n(vy)}) (size {_n(VIA_SIZE)}) "
-                f'(drill {_n(VIA_DRILL)}) (layers "F.Cu" "B.Cu") (net {net}) '
+                f'(drill {_n(VIA_DRILL)}) (layers "F.Cu" "B.Cu"){tent} (net {net}) '
                 f"(tstamp {_ts(f'padvia-{i}-{tag}')}))"
             )
     if g["hole"]:
@@ -1967,7 +2030,6 @@ def _led_unit(
             f'(stroke (width 0.1) (type default)) (fill none) (layer "Edge.Cuts") '
             f"(tstamp {_ts(f'hole-{i}')}))"
         )
-    route = novia_route(led, pins, safe, others, outline=outline)
     if route:
         # Via-less: a run across the unit's own layer to a connector pad,
         # whose plated barrel carries the net to the far pour. Electrically
@@ -1982,7 +2044,7 @@ def _led_unit(
         parts += [
             seg(at(*g["led_k"]), via, "F.Cu", nets["GND"], f"seg-k{i}"),
             (f"  (via (at {_n(via[0])} {_n(via[1])}) (size {_n(VIA_SIZE)}) (drill {_n(VIA_DRILL)}) "
-            f'(layers "F.Cu" "B.Cu") (net {nets["GND"]}) (tstamp {_ts(f"via-{i}")}))'),
+            f'(layers "F.Cu" "B.Cu"){tent} (net {nets["GND"]}) (tstamp {_ts(f"via-{i}")}))'),
         ]
     else:
         # Back unit: cathode sits in the B.Cu GND pour; R pad 1 reaches the
@@ -1991,7 +2053,7 @@ def _led_unit(
         parts += [
             seg(at(*g["res_in"]), via, "B.Cu", nets["3V3"], f"seg-v{i}"),
             (f"  (via (at {_n(via[0])} {_n(via[1])}) (size {_n(VIA_SIZE)}) "
-            f'(drill {_n(VIA_DRILL)}) (layers "F.Cu" "B.Cu") (net {nets["3V3"]}) '
+            f'(drill {_n(VIA_DRILL)}) (layers "F.Cu" "B.Cu"){tent} (net {nets["3V3"]}) '
             f"(tstamp {_ts(f'via-{i}')}))"),
         ]
     return "\n".join(parts)
@@ -2479,6 +2541,72 @@ def _art_vector_items(
     return out
 
 
+def _window_mask_covers(spec: BadgeSpec, bridges: dict, safe) -> dict:
+    """Per mask layer, the soldermask kept over copper that crosses windows.
+
+    A bare window's mask opening used to expose whatever copper crossed it:
+    the hairline perimeter bridges plated bare — a trace with no mask is a
+    corrosion and short hazard, and no fab would leave it that way — and a
+    via lost the tenting the rest of the board gives it. Every bridge now
+    keeps a dam of mask over its track, and (while the board's tenting
+    option is on) every via keeps its cap. Returns {layer: geometry | None};
+    the copper cut is untouched — only the mask opening shrinks.
+    """
+    from shapely.geometry import LineString, Point
+    from shapely.ops import unary_union
+
+    covers: dict = {"F.Mask": [], "B.Mask": []}
+    for i, led in enumerate(spec.leds):
+        for layer, mask in (("F.Cu", "F.Mask"), ("B.Cu", "B.Mask")):
+            seg = bridges.get(i, {}).get(layer)
+            if seg:
+                covers[mask].append(
+                    LineString(seg).buffer(TRACK_W / 2 + 0.1, quad_segs=8))
+        if spec.tenting and not led.novia:
+            g = led_geometry(led)
+            x, y = clamp_led_obj(led, safe)
+            vo = g["via_front"] if led.side != "back" else g["via_back"]
+            rx, ry = _r(vo[0], vo[1], led.rot)
+            # The barrel crosses the whole board: cap it on both faces.
+            disc = Point(x + rx, y + ry).buffer(VIA_SIZE / 2 + 0.1, quad_segs=16)
+            covers["F.Mask"].append(disc)
+            covers["B.Mask"].append(disc)
+    return {k: (unary_union(v) if v else None) for k, v in covers.items()}
+
+
+def _art_mask_items(art: ArtLayer, layer: str, key: str, cover) -> list[str]:
+    """A bare window's mask opening, minus the mask kept over crossing copper.
+
+    Falls back to the plain emitters when the cover misses this layer's
+    shapes entirely, so untouched windows keep their rect-per-rect output.
+    """
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    geoms = [box(x, y, x + w, y + h) for x, y, w, h in art.rects]
+    geoms += _art_shapely(art.polys)
+    if not geoms:
+        return []
+    geom = unary_union(geoms)
+    if not geom.intersects(cover):
+        return (_art_polys(art.rects, layer, key)
+                + _art_vector_items(art.polys, layer, key))
+    geom = geom.difference(cover)
+    if geom.is_empty:
+        return []
+    out = []
+    for i, poly in enumerate(_slit_holes(geom, 0.01)):
+        pts = " ".join(
+            f"(xy {_n(ORIGIN + px)} {_n(ORIGIN + py)})" for px, py in poly.exterior.coords[:-1]
+        )
+        out.append(
+            f"  (gr_poly (pts {pts}) "
+            f'(stroke (width 0) (type solid)) (fill solid) (layer "{layer}") '
+            f"(tstamp {_ts(f'{key}-m{i}')}))"
+        )
+    return out
+
+
 # Which drawn layers an art material paints, per board face. Mask layers are
 # negatives: a polygon on F.Mask/B.Mask is an *opening* in the soldermask.
 # "glow" draws nothing — it only cuts the copper pours (see _fill_geometry).
@@ -2564,7 +2692,8 @@ def generate_pcb(spec: BadgeSpec) -> str:
     safe = unit_safe(spec)
     bridges = unit_bridges(spec, safe)
     for i, led in enumerate(spec.leds):
-        body.append(_led_unit(i, led, nets, safe, spec.pins, spec.leds, spec.outline))
+        body.append(_led_unit(i, led, nets, safe, spec.pins, spec.leds,
+                              spec.outline, spec.tenting))
         for layer, net in (("F.Cu", "3V3"), ("B.Cu", "GND")):
             seg = bridges.get(i, {}).get(layer)
             if seg is None:
@@ -2588,10 +2717,15 @@ def generate_pcb(spec: BadgeSpec) -> str:
             f"  (gr_rect (start {_n(x0)} {_n(y0)}) (end {_n(x1)} {_n(y1)}) "
             f'(stroke (width 0.12) (type solid)) (fill none) (layer "Edge.Cuts") (tstamp {_ts("edge")}))'
         )
+    covers = _window_mask_covers(spec, bridges, safe)
     for ai, art in enumerate(spec.art):
         for layer in _art_target_layers(art.material, art.side, art.window):
-            body.extend(_art_polys(art.rects, layer, f"art{ai}-{layer}"))
-            body.extend(_art_vector_items(art.polys, layer, f"art{ai}-{layer}"))
+            cover = covers.get(layer) if art.material == "bare" else None
+            if cover is not None:
+                body.extend(_art_mask_items(art, layer, f"art{ai}-{layer}", cover))
+            else:
+                body.extend(_art_polys(art.rects, layer, f"art{ai}-{layer}"))
+                body.extend(_art_vector_items(art.polys, layer, f"art{ai}-{layer}"))
     body.extend(_text_items(spec))
     body.extend(_keepout_zones(spec))
     body += [

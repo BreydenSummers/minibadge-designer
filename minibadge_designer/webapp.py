@@ -898,6 +898,9 @@ def _generate_impl(render: bool):
     finish = params.get("finish")
     if finish not in ("enig", "hasl"):
         finish = "enig"
+    # Via tenting is a board-wide fab choice like the finish: anything but an
+    # explicit opt-out means tented (every manufacturer's default).
+    tenting = params.get("tenting") is not False
 
     try:
         pins = _parse_pins(params)
@@ -1448,7 +1451,7 @@ def _generate_impl(render: bool):
 
     spec = pcb.BadgeSpec(
         name=name, leds=leds, texts=texts, art=art_layers, mask_color=mask_color,
-        finish=finish, pins=pins, outline=outline_rings,
+        finish=finish, pins=pins, outline=outline_rings, tenting=tenting,
     )
     # Via-less units pick their connector pad against the real copper fill so
     # the run cannot fence the pour's own pad onto an island. Refuse rather
