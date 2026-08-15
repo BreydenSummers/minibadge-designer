@@ -964,3 +964,527 @@ def test_the_previewed_bridge_lands_where_the_generated_one_does(page):
         f"from {s} the board runs its bridge to {tuple(round(v, 3) for v in b)} "
         f"but the canvas draws it to {tuple(round(v, 3) for v in d)} — {gap:.4f} mm out"
         for s, (b, d, gap) in off_by.items())
+
+
+# ---------------------------------------------------------------------------
+# Preview/generator parity: the other hand-maintained duplicates
+#
+# `bridgeRoute` above is not the only algorithm that exists twice.  These are
+# the rest of the pairs that decide what the user sees against what the fab
+# gets, exercised the same way: call the app's own function in the page, call
+# the generator's in-process, and compare.  Each test names the pair it guards
+# so a drift report says which copy to go and look at.
+#
+# The comparison runs at 1e-6 mm.  That is not a numerical-agreement fudge: the
+# board file itself is written to 4 decimal places (`pcb._n`), so 1e-6 mm is a
+# hundred times finer than anything that can reach KiCad, while still leaving
+# room for float re-association between the two languages.
+# ---------------------------------------------------------------------------
+_PARITY_TOL = 1e-6
+
+_SIZES = ("0603", "0805", "1206", "1.8mm", "3mm", "5x2mm")
+_LAYOUTS = ("stacked", "inline")
+#: 37 deg is deliberate: every multiple of 90 takes `rotOff`/`pcb._r`'s exact
+#: branch, so a matrix of right angles never reaches the trig one at all.
+_ROTS = (0, 90, 180, 270, 37)
+#: Advanced placement moves the resistor and via off the layout and spins each
+#: part on its own centre — the branch that builds `bbox` from real copper
+#: rather than the package table.  Leaving it out makes half of `geomOf` dead.
+_ADV = (None, {"rx": 2.0, "ry": -1.5, "rrot": 30, "lrot": 45, "vx": -2.2, "vy": 1.1})
+
+#: An outline with slanted edges and a hole, so containment and clamping are
+#: not decided by the standard square's axis-aligned arithmetic.
+_HEX = [[(3.0, 0.3), (17.3, 0.3), (20.0, 10.2), (17.3, 20.0), (3.0, 20.0),
+         (0.3, 10.2)]]
+#: The hole is small on purpose: at 6 mm the ring left between it and the board
+#: edge is narrower than a 1206 stacked unit, and most of the matrix then has
+#: nowhere legal to stand at all.
+_DONUT = [[(0.16, 0.16), (20.16, 0.16), (20.16, 20.16), (0.16, 20.16)],
+          [(8.5, 8.5), (11.5, 8.5), (11.5, 11.5), (8.5, 11.5)]]
+
+
+def _js_led(**kw):
+    """One entry of `state.leds`, as the editor stores it."""
+    led = {"x": 10.0, "y": 10.0, "color": "red", "side": "front", "rot": 0,
+           "layout": "stacked", "size": "0805", "reverse": False,
+           "novia": False, "nodes": [], "farled": False, "adv": None}
+    led.update(kw)
+    return led
+
+
+def _py_led(d):
+    """The same unit as `pcb.Led`, so one design drives both implementations."""
+    from minibadge_designer import pcb
+
+    return pcb.Led(x=d["x"], y=d["y"], color=d["color"], side=d["side"],
+                   rot=d["rot"], layout=d["layout"], size=d["size"],
+                   reverse=d["reverse"], novia=d["novia"],
+                   nodes=tuple(tuple(n) for n in d["nodes"]),
+                   farled=d["farled"], adv=d["adv"])
+
+
+def _unit_matrix(sides=("front",), rots=_ROTS, advs=_ADV):
+    """Every package crossed with every layout, mount, rotation and placement."""
+    import itertools
+
+    return [_js_led(layout=lay, size=size, reverse=rev, side=side, rot=rot,
+                    adv=adv)
+            for lay, size, rev, side, rot, adv
+            in itertools.product(_LAYOUTS, _SIZES, (False, True), sides, rots,
+                                 advs)]
+
+
+def _clamped(leds, safe=None):
+    """Pre-clamp the matrix so a parity test measures one algorithm at a time.
+
+    The generator clamps inside every entry point; the editor clamps on the
+    way in and stores the result.  Feeding both an already-clamped centre
+    keeps a clamping bug from showing up as a copper-geometry failure.
+    """
+    from minibadge_designer import pcb
+
+    out = []
+    for d in leds:
+        x, y = pcb.clamp_led_obj(_py_led(d), safe)
+        out.append(dict(d, x=x, y=y))
+    return out
+
+
+def _describe(d):
+    return (f"{d['layout']}/{d['size']}"
+            f"{'/reverse' if d['reverse'] else ''}/{d['side']}/rot{d['rot']}"
+            f"{'/adv' if d['adv'] else ''}")
+
+
+def _gap(a, b):
+    """Largest coordinate difference between two equal-shaped point lists."""
+    return max((abs(u - v) for pa, pb in zip(a, b) for u, v in zip(pa, pb)),
+               default=0.0)
+
+
+_SET_DESIGN = """([leds, pins, rings]) => {
+    state.leds = leds;
+    state.pins = pins ? pins : ALL_PINS.slice();
+    if (rings) {
+        state.shape.mode = 'custom';
+        state.shape.elements = [{kind: 'rect', op: 'add'}];
+        state.shape.rings = rings;
+        state.shape.ringsRev = (state.shape.ringsRev || 0) + 1;
+    } else {
+        state.shape.mode = 'square';
+        state.shape.elements = [];
+        state.shape.rings = null;
+    }
+}"""
+
+
+#: Slide each unit along each ray until the canvas stops calling the spot solid
+#: board, then bisect 50 times.  What comes back is the very last placement
+#: the editor would let a user drop a unit on — the only place the client's
+#: 0.555 mm and the generator's 0.55 mm can be told apart.
+_EDGE_OF_ACCEPTANCE = """([leds, seeds, dirs]) => leds.map(L => {
+    // A unit only has a boundary to find if some spot on the board suits it at
+    // all — a 5 mm bar does not fit beside this outline's cut-out in every
+    // orientation, and pushing off a spot it never occupied proves nothing.
+    const start = seeds.map(([x, y]) => ({...L, x, y})).find(unitInsideBoard);
+    if (!start) return [];
+    const out = [];
+    for (const [dx, dy] of dirs) {
+        const at = t => ({...start, x: start.x + dx * t, y: start.y + dy * t});
+        let lo = 0, hi = 0.25;
+        while (hi < 32 && unitInsideBoard(at(hi))) { lo = hi; hi *= 2; }
+        if (hi >= 32) continue;                 // this ray never leaves the board
+        for (let i = 0; i < 50; i++) {
+            const mid = (lo + hi) / 2;
+            if (unitInsideBoard(at(mid))) lo = mid; else hi = mid;
+        }
+        const p = at(lo);
+        out.push([p.x, p.y]);
+    }
+    return out;
+})"""
+
+
+def _set_design(ui, leds, pins=None, rings=None):
+    """Install a design in the page without driving the canvas.
+
+    These tests are about two implementations of one formula agreeing, so the
+    units are written straight into `state` — dragging them into place would
+    add flakiness without adding evidence, which is the same reason the bridge
+    test above reaches its function through an injected script.
+    """
+    ui.js(_SET_DESIGN, [leds, pins, [[list(p) for p in r] for r in rings]
+                        if rings else None])
+
+
+@pytest.mark.browser
+def test_the_previewed_unit_sits_where_the_generated_one_sits(ui):
+    """The canvas puts every pad, via and hole where the board file puts it.
+
+    `geomOf` in index.html and `pcb.led_geometry` are two copies of the unit
+    layout table.  Everything downstream reads from it — the drawn part, the
+    art keepouts, the bridge start, the via-less trace — so a drift here is
+    not a wrong number, it is a badge whose resistor, via or reverse-mount
+    hole is somewhere other than the picture the user approved.
+    """
+    from minibadge_designer import pcb
+
+    keys = {"res": "res", "ledK": "led_k", "ledA": "led_a", "resIn": "res_in",
+            "resOut": "res_out", "viaF": "via_front", "viaB": "via_back",
+            "bbox": "bbox"}
+    leds = _unit_matrix()
+    drawn = ui.js("(Ls) => Ls.map(geomOf)", leds)
+    off_by = []
+    for d, js in zip(leds, drawn):
+        board = pcb.led_geometry(_py_led(d))
+        if js["pkg"] != board["pkg"]:
+            off_by.append(f"{_describe(d)}: canvas builds a {js['pkg']} unit, "
+                          f"the board builds a {board['pkg']} one")
+            continue
+        if abs(js["hole"] - board["hole"]) > _PARITY_TOL:
+            off_by.append(f"{_describe(d)}: canvas routes a {js['hole']:.3f} mm "
+                          f"reverse hole, the board routes {board['hole']:.3f} mm")
+        for jk, pk in keys.items():
+            gap = _gap([js[jk]], [board[pk]])
+            if gap > _PARITY_TOL:
+                off_by.append(
+                    f"{_describe(d)}: {pk} is at "
+                    f"{tuple(round(v, 4) for v in board[pk])} on the board but "
+                    f"{tuple(round(v, 4) for v in js[jk])} on the canvas "
+                    f"— {gap:.4f} mm out")
+
+    assert not off_by, (
+        f"{len(off_by)} differences across {len(leds)} units between where "
+        "the canvas draws a unit and where the board builds it; geomOf() and "
+        "pcb.led_geometry have drifted:\n"
+        + "\n".join(off_by[:12]))
+    ui.assert_clean("unit geometry parity")
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("rings", [None, _HEX], ids=["square", "hex"])
+def test_a_dragged_unit_stops_where_the_board_would_stop_it(ui, rings):
+    """A unit dragged off the edge settles at the same centre in both.
+
+    `clampLedFor`/`unitSafe` and `pcb.clamp_led_obj`/`pcb.unit_safe` decide how
+    close to the board edge a unit may sit.  If they drift the user drags a
+    unit to the rim, sees it stop, and the generator quietly moves it somewhere
+    else — or lets it hang over the edge and DRC rejects the board.  Custom
+    outlines are the interesting half: there the safe rect follows the
+    outline's bounding box rather than the standard square.
+    """
+    from minibadge_designer import pcb
+
+    safe = pcb.unit_safe(pcb.BadgeSpec(outline=rings))
+    # Well outside, exactly on the rim, and comfortably inside: only the first
+    # two exercise the clamp at all, and the third proves it leaves a legal
+    # centre alone rather than snapping everything to one spot.
+    targets = [(-8.0, -8.0), (28.0, 28.0), (0.0, 10.0), (10.0, 0.0),
+               (19.9, 1.2), (1.2, 19.9), (10.0, 10.0), (6.5, 13.5)]
+    leds = [dict(d, x=x, y=y) for d in _unit_matrix(rots=(0, 90, 37))
+            for x, y in targets]
+    _set_design(ui, leds, rings=rings)
+    drawn = ui.js("(Ls) => Ls.map(L => clampLedFor(L, L.x, L.y))", leds)
+
+    off_by = []
+    for d, js in zip(leds, drawn):
+        board = pcb.clamp_led_obj(_py_led(d), safe)
+        gap = _gap([js], [board])
+        if gap > _PARITY_TOL:
+            off_by.append(
+                f"{_describe(d)} dragged to ({d['x']}, {d['y']}): the canvas "
+                f"parks it at {tuple(round(v, 4) for v in js)}, the board at "
+                f"{tuple(round(v, 4) for v in board)} — {gap:.4f} mm out")
+
+    assert not off_by, (
+        f"{len(off_by)} of {len(leds)} drags settle in different places on the "
+        "canvas and on the board; clampLedFor()/unitSafe() and "
+        "pcb.clamp_led_obj/pcb.unit_safe have drifted:\n"
+        + "\n".join(off_by[:12]))
+    ui.assert_clean("clamp parity")
+
+
+@pytest.mark.browser
+def test_art_is_carved_around_a_unit_the_same_way_it_is_on_the_board(ui):
+    """The keepout the canvas erases art with is the one the generator uses.
+
+    `unitCopperPieces` and `pcb.unit_copper_pieces` are the labelled quads that
+    say how close artwork may come to a unit's pads, via, traces, reverse hole
+    and through-hole silk.  Drift means the user sees a logo hugging an LED and
+    downloads a board where that logo is eaten — or, the expensive direction,
+    sees it clear and gets copper art shorting a pad.
+    """
+    from minibadge_designer import pcb
+
+    leds = _clamped(_unit_matrix(sides=("front", "back")))
+    drawn = ui.js("(Ls) => Ls.map(L => { state.leds = [L];"
+                  " return unitCopperPieces(L); })", leds)
+    off_by = []
+    for d, js in zip(leds, drawn):
+        board = pcb.unit_copper_pieces(_py_led(d))
+        if [p[0] for p in js] != [p[0] for p in board]:
+            off_by.append(
+                f"{_describe(d)}: the canvas keeps art off {[p[0] for p in js]} "
+                f"but the board keeps it off {[p[0] for p in board]}")
+            continue
+        for (label, jq), (_, bq) in zip(js, board):
+            gap = _gap(jq, bq)
+            if gap > _PARITY_TOL:
+                off_by.append(f"{_describe(d)}: the {label} keepout is "
+                              f"{gap:.4f} mm out between canvas and board")
+
+    assert not off_by, (
+        f"{len(off_by)} keepout pieces across {len(leds)} units are carved "
+        "differently in the preview than on the board; unitCopperPieces() "
+        "and pcb.unit_copper_pieces have drifted:\n" + "\n".join(off_by[:12]))
+    ui.assert_clean("art keepout parity")
+
+
+@pytest.mark.browser
+def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
+    """A spot the canvas calls free is one the generator will not shove.
+
+    `padConflict` and `pcb.pad_conflict` both ask whether a unit's rotated
+    footprint lands on a kept connector pad pair.  The canvas refuses the drop;
+    the generator slides the unit away (`resolve_pad_overlap`).  If they
+    disagree the user places a unit against the header, and the board comes
+    back with it somewhere else — or worse, the canvas allows what the
+    generator then has to move, silently.
+
+    Dropped pins are the case worth having: dropping a pair frees its corner,
+    and the two implementations have to free the same corner.
+    """
+    from minibadge_designer import pcb
+
+    pinsets = [None, ("1", "2", "7", "8"), ("9", "10"), ("2", "15"), ()]
+    # A lattice that straddles all four corner keepouts and the free strips
+    # between them, so both true and false answers are exercised everywhere.
+    spots = [(x, y) for x in (1.2, 2.6, 4.2, 5.6, 10.0, 15.0, 17.8, 19.2)
+             for y in (1.2, 2.6, 4.2, 10.0, 16.2, 17.6, 19.2)]
+    base = _unit_matrix(rots=(0, 90, 37), advs=(None,))[::3]
+    disagree, said_yes = [], 0
+    for pins in pinsets:
+        leds = _clamped([dict(d, x=x, y=y) for d in base for x, y in spots])
+        _set_design(ui, leds, list(pins) if pins is not None else None)
+        drawn = ui.js("(Ls) => Ls.map(L => { state.leds = [L];"
+                      " return padConflict(L); })", leds)
+        for d, js in zip(leds, drawn):
+            board = pcb.pad_conflict(_py_led(d), pcb.ALL_PINS if pins is None
+                                     else pins)
+            said_yes += bool(board)
+            if js != board:
+                disagree.append(
+                    f"{_describe(d)} at ({d['x']:.2f}, {d['y']:.2f}) with pins "
+                    f"{'all' if pins is None else pins}: the canvas says "
+                    f"{'blocked' if js else 'free'}, the board says "
+                    f"{'blocked' if board else 'free'}")
+
+    assert said_yes, (
+        "no probe in the lattice landed on a connector pad, so this test "
+        "proved nothing — move the spots back over the corners")
+    assert not disagree, (
+        f"{len(disagree)} placements are judged differently by the canvas and "
+        "the board; padConflict() and pcb.pad_conflict have drifted:\n"
+        + "\n".join(disagree[:12]))
+    ui.assert_clean("pad conflict parity")
+
+
+@pytest.mark.browser
+def test_the_previewed_via_less_trace_takes_the_route_the_board_routes(ui):
+    """The via-less power trace is drawn along the copper that gets built.
+
+    `noviaRouteRaw` and `pcb.novia_route` are the longest duplicated algorithm
+    in the app: hazard collection, a visibility graph, Dijkstra, and a 45-degree
+    mitre pass, written twice and expected to pick the identical path down to
+    the tie-breaks.  The trace is real copper on the badge and the preview is
+    the only place a user ever sees it, so a drift ships a board whose power
+    run goes somewhere they never looked at — across a pad, or nowhere at all.
+
+    The matrix has to include a crowded board: on an empty one the straight
+    shot clears and neither implementation's graph search ever runs.
+    """
+    from minibadge_designer import pcb
+
+    # Every package on both faces and both layouts, at a right angle and at an
+    # oblique one.  A front through-hole unit is the branch that returns a
+    # single point and no trace at all, so the TH sizes are not decoration.
+    cases = [([_js_led(size=size, layout=lay, side=side, rot=rot, novia=True)],
+              None)
+             for size in _SIZES for lay in _LAYOUTS
+             for side in ("front", "back") for rot in (0, 37)]
+    # Which pins survive decides which pad the run chases and which pads become
+    # hazards; both implementations have to break the distance tie the same way.
+    cases += [([_js_led(size=size, side=side, novia=True)], pins)
+              for size in ("0805", "3mm") for side in ("front", "back")
+              for pins in (("1", "2", "9", "10"), ("7", "8"))]
+    # A crowded board is what makes the graph search run: on an empty one the
+    # straight shot clears and the Dijkstra half of both copies is never
+    # reached.  Hand-placed bends are the other branch, where the user's own
+    # nodes win and only the corners between them are mitred.
+    crowded = [
+        _js_led(x=6.0, y=8.0, novia=True),
+        _js_led(x=6.0, y=12.0, rot=90, layout="inline", size="1206", novia=True),
+        _js_led(x=14.0, y=10.0, rot=180, size="3mm", side="back", novia=True),
+    ]
+    cases += [(crowded, pins) for pins in (None, ("1", "2", "9", "10"))]
+    cases += [([_js_led(novia=True, nodes=[[5.0, 5.0], [3.0, 3.0]])], None)]
+
+    off_by, routed = [], 0
+    for design, pins in cases:
+        leds = _clamped(design)
+        _set_design(ui, leds, list(pins) if pins is not None else None)
+        drawn = ui.js("(Ls) => Ls.map((_, i) =>"
+                      " noviaRouteRaw(state.leds[i]))", leds)
+        units = [_py_led(d) for d in leds]
+        for i, d in enumerate(leds):
+            board = pcb.novia_route(
+                units[i], pcb.ALL_PINS if pins is None else pins, None,
+                units)
+            js = drawn[i]
+            if (board is None) != (js is None):
+                off_by.append(
+                    f"{_describe(d)} pins {'all' if pins is None else pins}: "
+                    f"the board {'refuses' if board is None else 'routes'} "
+                    f"but the canvas "
+                    f"{'refuses' if js is None else 'routes'}")
+                continue
+            if board is None:
+                continue
+            routed += 1
+            if len(js["pts"]) != len(board["pts"]):
+                off_by.append(
+                    f"{_describe(d)} pins {'all' if pins is None else pins}: "
+                    f"the board bends the run {len(board['pts'])} times, "
+                    f"the canvas draws {len(js['pts'])}")
+                continue
+            if bool(js.get("tight")) != bool(board.get("tight")):
+                off_by.append(
+                    f"{_describe(d)} pins {'all' if pins is None else pins}: "
+                    "only one of the two flags this run as too tight, so "
+                    "the warning the user sees does not match the copper")
+            gap = _gap(js["pts"], board["pts"])
+            if gap > _PARITY_TOL:
+                off_by.append(
+                    f"{_describe(d)} pins {'all' if pins is None else pins}: "
+                    f"the run is {gap:.4f} mm out — board "
+                    f"{[tuple(round(v, 3) for v in p) for p in board['pts']]}, "
+                    f"canvas {[tuple(round(v, 3) for v in p) for p in js['pts']]}")
+
+    assert routed, ("no case produced a route, so this test proved nothing — "
+                    "check that the units still have novia set")
+    assert not off_by, (
+        f"{len(off_by)} differences across {routed} via-less runs between "
+        "the copper drawn and the copper built; noviaRouteRaw() and "
+        "pcb.novia_route have drifted:\n"
+        + "\n".join(off_by[:10]))
+    ui.assert_clean("via-less route parity")
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("rings", [_HEX, _DONUT], ids=["hex", "donut"])
+def test_the_preview_never_offers_a_spot_the_board_would_move_the_unit_off(ui, rings):
+    """Every spot the canvas accepts on a custom outline is one the board keeps.
+
+    `unitInsideBoard` is the client's copy of the generator's containment test
+    (`outline.buffer(-0.55).contains(unit_poly)`, webapp.py).  It is
+    deliberately one-directional — 0.555 mm against the server's 0.55 mm — so
+    the canvas may refuse a spot the generator would have taken, but must never
+    accept one the generator refuses: that direction is a unit the user placed
+    over a cut-out, silently relocated somewhere else in the download.
+
+    A hole in the outline is the case that matters; a convex shape is satisfied
+    by the bounding box alone.
+
+    The probes are the canvas's *own* acceptance boundary, found by sliding
+    each unit outward until `unitInsideBoard` flips and bisecting.  A lattice
+    of round numbers cannot test this rule: the whole margin in dispute is
+    5 µm wide, so a grid of 3 mm probes stays green even with the client's
+    clearance cut to 0.5 mm — measured, before this test was rewritten.
+    """
+    from shapely.geometry import Polygon
+
+    from minibadge_designer import pcb
+
+    poly = Polygon(rings[0], rings[1:])
+    solid = poly.buffer(-0.55)
+    safe = pcb.unit_safe(pcb.BadgeSpec(outline=rings))
+    # Somewhere solid to start from, then push toward whatever edge is nearest:
+    # the cut-out for the donut, the slanted sides for the hex.
+    seeds = [(1.5 + 0.5 * i, 1.5 + 0.5 * j) for i in range(35) for j in range(35)]
+    dirs = [(1, 0), (-1, 0), (0, 1), (0, -1), (0.6, 0.8), (-0.6, -0.8),
+            (0.6, -0.8), (-0.6, 0.8)]
+    leds = _unit_matrix(rots=(0, 37))
+    _set_design(ui, leds, rings=rings)
+    edge = ui.js(_EDGE_OF_ACCEPTANCE, [leds, seeds, dirs])
+
+    probed, lies = 0, []
+    for d, row in zip(leds, edge):
+        for spot in row:
+            if spot is None:
+                continue   # this unit never left solid board along this ray
+            here = dict(d, x=spot[0], y=spot[1])
+            if _gap([pcb.clamp_led_obj(_py_led(here), safe)], [spot]) > _PARITY_TOL:
+                continue   # the safe rect stopped it first; that is the clamp
+                           # test's rule, not this one's
+            probed += 1
+            if not solid.contains(pcb.unit_poly(_py_led(here), safe)):
+                lies.append(f"{_describe(d)}: the canvas still accepts "
+                            f"({spot[0]:.4f}, {spot[1]:.4f}), where the "
+                            "generator relocates the unit")
+
+    assert probed >= len(leds), (
+        f"only {probed} boundary spots came back for {len(leds)} units, so the "
+        "5 µm margin this rule is about was barely tested — either the seed "
+        "lattice no longer lands on this outline, or the safe rect is now "
+        "clamping units before the outline gets a say")
+    assert not lies, (
+        f"{len(lies)} of {probed} spots at the edge of what the canvas accepts "
+        "are spots the generator moves the unit away from, so the download "
+        "will not match the preview; unitInsideBoard() and the webapp's "
+        "outline.buffer(-0.55) containment test have drifted:\n"
+        + "\n".join(lies[:12]))
+    ui.assert_clean("solid-board parity")
+
+
+@pytest.mark.browser
+@pytest.mark.xfail(strict=True, reason=(
+    "the bottom-row caption keepout is 0.10 mm higher in the preview than on "
+    "the board: index.html's PAD_PAIRS.bl/br `at` y is 17.78 where the top row "
+    "carries the same +0.18 mm canvas text-baseline nudge over pcb.PAD_PAIRS "
+    "that captionBoxes() then subtracts, so the bottom rows need 17.88"))
+def test_art_is_kept_off_the_pin_captions_the_same_way_in_both(ui):
+    """The band of art the canvas carves out for a caption is the printed one.
+
+    `captionBoxes` and `pcb.caption_boxes` are the keepout around the silk that
+    names each connector pin.  The preview erases art inside it, and
+    `textOverParts` refuses to build a design whose text lands in it, so a
+    drift both hides art the fab will print over the caption and warns about
+    text that is actually fine.
+    """
+    from minibadge_designer import pcb
+
+    off_by = []
+    for pins in (None, ("1", "2", "7", "8"), ("2", "7", "9", "16"), ("1",)):
+        drawn = ui.js("(p) => { state.pins = p ? p : ALL_PINS.slice();"
+                      " return captionBoxes(); }",
+                      list(pins) if pins is not None else None)
+        board = pcb.caption_boxes(pcb.ALL_PINS if pins is None else pins)
+        label = "all" if pins is None else pins
+        if len(drawn) != len(board):
+            off_by.append(f"pins {label}: the canvas carves {len(drawn)} "
+                          f"caption boxes, the board carves {len(board)}")
+            continue
+        for js, b in zip(drawn, board):
+            gap = max(abs(u - v) for u, v in zip(js, b))
+            if gap > _PARITY_TOL:
+                off_by.append(
+                    f"pins {label}: caption keepout is "
+                    f"{tuple(round(v, 3) for v in b)} on the board but "
+                    f"{tuple(round(v, 3) for v in js)} on the canvas "
+                    f"— {gap:.4f} mm out")
+
+    ui.assert_clean("caption keepout parity")
+    assert not off_by, (
+        "art is carved away from the pin captions differently in the preview "
+        "than on the board; captionBoxes() and pcb.caption_boxes have "
+        "drifted:\n" + "\n".join(off_by[:8]))
