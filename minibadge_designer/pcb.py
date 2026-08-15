@@ -587,6 +587,42 @@ def _round_hazard(cx: float, cy: float, r: float) -> list:
             (cx - r, cy - t), (cx - t, cy - r), (cx + t, cy - r), (cx + r, cy - t)]
 
 
+# Window/art keepout margin round a via barrel: the netclass copper-to-copper
+# minimum. Deliberately tighter than POUR_CLEARANCE — the plane a same-net
+# via keeps inside this collar only has to join its barrel to the bridge that
+# feeds it, and the FILL still clears other-net vias by the pour rule no
+# matter how close a window is allowed to erase.
+VIA_COLLAR_CLEAR = 0.2
+
+
+# A unit 16-gon from square roots alone — like OCT_T above, sqrt is pinned
+# exactly by IEEE-754 while cos/sin may differ by an ulp between here and the
+# JS mirror, and these pieces feed the bridge scan where an ulp can flip a
+# route. cos/sin of 22.5° and the 1/cos(11.25°) circumradius factor all have
+# nested-sqrt closed forms.
+_C16 = (2 + 2 ** 0.5) ** 0.5 / 2
+_S16 = (2 - 2 ** 0.5) ** 0.5 / 2
+_H45 = 2 ** 0.5 / 2
+_R16 = 2 / (2 + (2 + 2 ** 0.5) ** 0.5) ** 0.5
+_HEXADECAGON = ((1.0, 0.0), (_C16, _S16), (_H45, _H45), (_S16, _C16),
+                (0.0, 1.0), (-_S16, _C16), (-_H45, _H45), (-_C16, _S16),
+                (-1.0, 0.0), (-_C16, -_S16), (-_H45, -_H45), (-_S16, -_C16),
+                (0.0, -1.0), (_S16, -_C16), (_H45, -_H45), (_C16, -_S16))
+
+
+def _via_collar(cx: float, cy: float) -> list:
+    """16-gon just containing the plane a via keeps on a face.
+
+    The art/window keepout round a via barrel. Sixteen sides instead of
+    `_round_hazard`'s eight so the surviving patch of plane renders as the
+    round pad it effectively is — through a window the old octagon read as
+    a mysterious oversized pad (0.76 mm to its corners); this collar stops
+    at 0.55 mm flat-to-flat. Mirrored by viaCollar in index.html.
+    """
+    r = (VIA_SIZE / 2 + VIA_COLLAR_CLEAR) * _R16
+    return [(cx + r * ux, cy + r * uy) for ux, uy in _HEXADECAGON]
+
+
 def _knees45(a, b):
     """Corner options that turn leg a-b into an axis run plus a 45 diagonal.
 
@@ -882,18 +918,14 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
             pieces.append((f"trace_pad{n}" if n else "trace_pad",
                            _quad_seg(a, b, 1.1)))
     else:
-        # An octagon round the barrel, not a square. A via is round, so a
-        # square keepout claims clearance that is not there: at VIA_SIZE + 0.9
-        # its corners reached 1.13 mm from the centre for a 0.35 mm barrel —
-        # more than three barrel-radii of artwork erased, in a region that
-        # carries no current and only ever hosted the 0.3 mm stub. The margin
-        # is now the board's own pour-to-other-net rule rather than a number
-        # nobody derived, and the octagon's furthest point is 0.76 mm.
-        # `_round_hazard` already made this argument for routing; art gets it
-        # too. Mirrored by unitCopperPieces in index.html — the preview draws
+        # A round collar round the barrel — see _via_collar for why it is a
+        # 16-gon at the 0.2 mm netclass minimum rather than the old octagon
+        # at the pour rule (whose corners reached 0.76 mm and left a patch of
+        # plane that read as a mysterious oversized pad through a window).
+        # Mirrored by unitCopperPieces in index.html — the preview draws
         # the same carve, and tests/test_browser.py holds the two in parity.
         pieces += [
-            ("via", _round_hazard(*pt(*vo), VIA_SIZE / 2 + POUR_CLEARANCE)),
+            ("via", _via_collar(*pt(*vo))),
             ("trace_stub", quad_seg(g["led_k"] if front else g["res_in"], vo, 1.1)),
         ]
     if g["hole"]:
@@ -923,8 +955,7 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
             pieces = [(lb, q) for lb, q in pieces
                       if lb not in ("pad_led_k", "pad_led_a")]
             for lb, off in (("padvia_k", g["led_k"]), ("padvia_a", g["led_a"])):
-                pieces.append(
-                    (lb, _round_hazard(*pt(*off), VIA_SIZE / 2 + POUR_CLEARANCE)))
+                pieces.append((lb, _via_collar(*pt(*off))))
     return pieces
 
 
