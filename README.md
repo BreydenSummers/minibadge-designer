@@ -132,6 +132,22 @@ side of the `ports` mapping in `docker-compose.yml` (`"9000:8000"`).
 The container runs as a non-root user and reports health to Compose. A `.env`
 file is picked up if present but is not required.
 
+### Serving more than one person
+
+The container serves through **gunicorn with 4 single-threaded worker
+processes** (`gunicorn.conf.py`), so simultaneous users get parallel workers
+rather than queueing behind one interpreter — process isolation is also what
+makes concurrent exports safe by construction, since every request works in
+its own temp directory with its own kicad-cli. Tune per host via `.env`:
+
+- `WEB_CONCURRENCY` — worker count (default 4; ~100 MB each, 2 × cores is a
+  sane ceiling)
+- `WORKER_TIMEOUT` — per-request ceiling in seconds (default 300; the GLB
+  export and zone refill each carry a 120 s subprocess budget, and the
+  timeout doubles as the backstop that recycles a worker stuck on a
+  pathological upload)
+- `PORT` — bind port inside the container (default 8000)
+
 ## Running it with local Python (development)
 
 ```bash

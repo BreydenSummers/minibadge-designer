@@ -1,5 +1,7 @@
 # Runtime dependencies, one per line.
 flask>=3.0
+# Container serving only (Dockerfile CMD); local dev uses the Flask server.
+gunicorn>=23.0
 fonttools>=4.50
 pillow>=10.0
 shapely>=2.0
