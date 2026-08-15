@@ -873,8 +873,18 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
             pieces.append((f"trace_pad{n}" if n else "trace_pad",
                            _quad_seg(a, b, 1.1)))
     else:
+        # An octagon round the barrel, not a square. A via is round, so a
+        # square keepout claims clearance that is not there: at VIA_SIZE + 0.9
+        # its corners reached 1.13 mm from the centre for a 0.35 mm barrel —
+        # more than three barrel-radii of artwork erased, in a region that
+        # carries no current and only ever hosted the 0.3 mm stub. The margin
+        # is now the board's own pour-to-other-net rule rather than a number
+        # nobody derived, and the octagon's furthest point is 0.76 mm.
+        # `_round_hazard` already made this argument for routing; art gets it
+        # too. Mirrored by unitCopperPieces in index.html — the preview draws
+        # the same carve, and tests/test_browser.py holds the two in parity.
         pieces += [
-            ("via", quad_rect(*vo, VIA_SIZE + 0.9, VIA_SIZE + 0.9)),
+            ("via", _round_hazard(*pt(*vo), VIA_SIZE / 2 + POUR_CLEARANCE)),
             ("trace_stub", quad_seg(g["led_k"] if front else g["res_in"], vo, 1.1)),
         ]
     if g["hole"]:

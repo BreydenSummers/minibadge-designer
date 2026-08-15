@@ -1306,6 +1306,9 @@ function polysClear(A, B, gap) {
 // crosses layers just as a via would. Front-side through-hole LEDs need
 // nothing at all: the cathode lead is already plated to the back face.
 const NOVIA_CLEAR = 0.2, NOVIA_ESCAPE = 0.5, NOVIA_EDGE = 0.2 + 0.3 / 2;
+// pcb.POUR_CLEARANCE — copper pour to other-net copper. Kept in step with
+// pcb.py; tests/test_browser.py fails if the two art carves disagree.
+const POUR_CLEARANCE = 0.35;
 const padNetOf = label => (label === "GND" || label === "3V3") ? label : null;
 function quadSegPts(a, b, w) {
   let nx = -(b[1] - a[1]), ny = b[0] - a[0];
@@ -1692,7 +1695,12 @@ function unitCopperPieces(L) {
                 quadSegPts(nvr.pts[i], nvr.pts[i + 1], 1.1)]);
     }
   } else {
-    out.push(["via", quadRect(vo[0], vo[1], VIA_SIZE + 0.9, VIA_SIZE + 0.9)]);
+    // Octagon round the barrel, not a square — mirrors pcb.unit_copper_pieces.
+    // A square at VIA_SIZE + 0.9 reached 1.13 mm from the centre of a 0.35 mm
+    // barrel and erased artwork in a region that carries no current; the
+    // octagon reaches 0.76 mm and uses the board's own pour clearance.
+    out.push(["via", roundHazard(...unitPoint(L, vo[0], vo[1]),
+                                 VIA_SIZE / 2 + POUR_CLEARANCE)]);
     out.push(["trace_stub", quadSeg(front ? g.ledK : g.resIn, vo, 1.1)]);
   }
   if (g.hole) out.push(["hole", quadRect(0, 0, g.hole + 1.0, g.hole + 1.0)]);
