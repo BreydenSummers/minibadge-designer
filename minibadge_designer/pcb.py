@@ -1184,10 +1184,27 @@ def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
             del starts["B.Cu" if front else "F.Cu"]
         obstacles = pads + [q for j, ps in enumerate(all_pieces) if j != i
                             for _lbl, q in ps]
+        th = "drill" in PKG[g["pkg"]]
+        far = bool(led.farled) and not g["hole"] and not th
         out[i] = {}
         for layer, (lbl, off) in starts.items():
+            own = all_pieces[i]
+            if lbl == "via":
+                # This bridge runs on the unit's FAR layer, where its SMD pads
+                # and traces are not copper at all — they live on the mounting
+                # face only. Treating them as obstacles walled the via in: an
+                # inline unit's via sits 1.0 mm from the resistor pad center,
+                # inside that pad's inflated quad, so every one of the 16 rays
+                # "collided" and the unit fell back to the reserved 2 mm window
+                # corridor — a fat band of pour where a 0.3 mm trace belongs.
+                # Only pieces that penetrate the board can truly block this
+                # layer: the reverse-mount hole, a TH LED's pad annuli, and a
+                # far-side LED's via-in-pads.
+                keep = {"hole"} | ({"pad_led_k", "pad_led_a"} if th or far
+                                   else set())
+                own = [(lb, q) for lb, q in own if lb in keep]
             out[i][layer] = _bridge_route(
-                pt(off), all_pieces[i], _BRIDGE_EXCLUDE[lbl], obstacles, rings)
+                pt(off), own, _BRIDGE_EXCLUDE[lbl], obstacles, rings)
     return out
 
 

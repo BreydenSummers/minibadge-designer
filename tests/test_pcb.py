@@ -1,5 +1,7 @@
 import re
 
+import pytest
+
 from minibadge_designer import pcb
 
 
@@ -291,8 +293,15 @@ def test_bom_and_readme():
     assert "lukejenkins/minibadge" in readme and "Press B" in readme
 
 
-def test_back_led_lands_on_back_layers():
-    out = pcb.generate_pcb(pcb.BadgeSpec(leds=[pcb.Led(10.0, 10.0, "green", side="back")]))
+@pytest.mark.parametrize("layout,size,rot", [
+    ("stacked", "0805", 0),
+    ("inline", "0603", 0),
+    ("inline", "1206", 90),
+])
+def test_back_led_lands_on_back_layers(layout, size, rot):
+    out = pcb.generate_pcb(pcb.BadgeSpec(
+        leds=[pcb.Led(10.0, 10.0, "green", side="back",
+                      layout=layout, size=size, rot=rot)]))
     fps = re.findall(r'\(footprint "minibadge-designer:[^"]+" \(layer "([FB])\.Cu"\)', out)
     assert fps == ["B", "B"]
     assert '(layers "B.Cu" "B.Paste" "B.Mask")' in out
@@ -301,9 +310,18 @@ def test_back_led_lands_on_back_layers():
     # on B.Cu (2) plus the GND perimeter bridge (1). The only F.Cu segment
     # is the 3V3 bridge from the via to the ring.
     assert re.search(r"\(via .*\(net 1\)", out)
-    assert len(re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\)', out)) == 3
+    assert len(re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\)', out)) == 3, \
+        "a back unit's own traces plus its GND perimeter bridge live on B.Cu"
+    # The inline cases are the regression gate for the far-layer bridge scan:
+    # inline puts the via 1.0 mm from the resistor pad center, INSIDE that
+    # pad's inflated art-keepout quad. When the scan treated the unit's own
+    # back-face pads as F.Cu obstacles too, every ray "collided" with copper
+    # that is not on that layer, no F.Cu bridge routed, and the webapp fell
+    # back to the reserved 2 mm window corridor — a fat band of pour across
+    # the user's window where this 0.3 mm trace belongs.
     fsegs = re.findall(r'\(segment [^\n]+\(layer "F\.Cu"\) \(net (\d+)\)', out)
-    assert fsegs == ["1"]  # the 3V3 bridge
+    assert fsegs == ["1"], \
+        "the via's 3V3 feed must reach the front pour as a thin bridge trace"
 
 
 def test_front_led_unchanged_by_side_default():

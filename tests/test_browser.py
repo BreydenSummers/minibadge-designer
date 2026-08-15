@@ -1241,6 +1241,48 @@ def test_art_is_carved_around_a_unit_the_same_way_it_is_on_the_board(ui):
 
 
 @pytest.mark.browser
+def test_the_previewed_perimeter_bridges_match_the_generated_ones(ui):
+    """The bridge decision the canvas makes is the one the board ships.
+
+    `allBridges` and `pcb.unit_bridges` both decide, per unit and layer,
+    whether a thin power feed routes to the perimeter ring — and when either
+    copy answers None, the webapp reserves the fat 2 mm window corridor for
+    that unit instead. The lower-level `bridgeRoute` parity test feeds both
+    copies empty obstacle lists, so it cannot see this layer: which of the
+    unit's own pieces count as obstacles on which copper layer (a back unit's
+    SMD pads are not copper on F.Cu at all). Drift here lies in the expensive
+    direction: the user sees a hairline bridge and a window hugging their
+    unit, then downloads a board with a corridor of pour across the window —
+    or the reverse, a corridor drawn over art the board leaves alone.
+    """
+    from minibadge_designer import pcb
+
+    leds = _clamped(_unit_matrix(sides=("front", "back")))
+    drawn = ui.js("(Ls) => Ls.map(L => { state.leds = [L];"
+                  " return allBridges()[0]; })", leds)
+    off_by = []
+    for d, js in zip(leds, drawn):
+        board = pcb.unit_bridges(pcb.BadgeSpec(leds=[_py_led(d)]))[0]
+        for jkey, bkey in (("F", "F.Cu"), ("B", "B.Cu")):
+            jseg, bseg = js.get(jkey), board.get(bkey)
+            if (jseg is None) != (bseg is None):
+                off_by.append(
+                    f"{_describe(d)} on {bkey}: the canvas "
+                    f"{'draws a bridge' if jseg else 'reserves the corridor'} "
+                    f"but the board "
+                    f"{'routes one' if bseg else 'falls back to the corridor'}")
+            elif jseg and _gap(jseg, bseg) > _PARITY_TOL:
+                off_by.append(f"{_describe(d)} on {bkey}: the drawn bridge is "
+                              f"{_gap(jseg, bseg):.4f} mm from the shipped one")
+
+    assert not off_by, (
+        f"{len(off_by)} bridge decisions across {len(leds)} units differ "
+        "between preview and board; allBridges() and pcb.unit_bridges have "
+        "drifted:\n" + "\n".join(off_by[:12]))
+    ui.assert_clean("bridge parity")
+
+
+@pytest.mark.browser
 def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
     """A spot the canvas calls free is one the generator will not shove.
 
