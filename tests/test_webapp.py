@@ -2,6 +2,7 @@ import io
 import json
 import zipfile
 
+import invariants
 import pytest
 from PIL import Image, ImageDraw
 
@@ -304,6 +305,102 @@ def test_stranded_led_rejected_with_message(client):
     )
     assert resp.status_code == 400
     assert "does not fit" in resp.get_json()["error"]
+
+
+# A via-less unit gives up its via and instead runs a trace across its own
+# layer to a connector pad carrying the net it needs. Some placements have no
+# such run, and `_generate_impl` answers those with one of two hand-written
+# 400s (webapp.py:1221-1236). These are the two designs that reach them --
+# one per branch, so a repair of only one of the two messages still goes red.
+#
+# Both are deliberately off the defaults. Every other LED payload in this file
+# is a front-side, stacked, 0805 unit with the via left on, and that is exactly
+# the gap parameter-space defects hide in.
+_UNROUTABLE_DESIGNS = {
+    # (a) The user dragged the trace's bend nodes until the run skims other
+    #     copper -- a through-hole part on the back with its resistor nudged
+    #     and turned. Branch: "a trace bend runs too close to other copper".
+    "dragged-bend": [{
+        "x": 10, "y": 10, "color": "red", "novia": True,
+        "size": "1.8mm", "side": "back",
+        "nodes": [[10.2, 10.2], [10.3, 10.25]],
+        "adv": {"rx": 0.4, "ry": -0.3, "rrot": 90},
+    }],
+    # (b) Three inline 1206 units in a row along the top edge box each other
+    #     in: each one's channel across the pour fences off the pad the next
+    #     was aiming for. Branch: "cannot reach its power without a via".
+    "boxed-in-row": [
+        {"x": 6.0 + 4.0 * i, "y": 17.6, "color": "red", "novia": True,
+         "size": "1206", "layout": "inline"}
+        for i in range(3)
+    ],
+}
+
+
+@pytest.mark.webapp
+@pytest.mark.xfail(strict=True, reason=(
+    "defect #1 (webapp.py:1224): `rows` is a leftover name from the "
+    "keep-any-pin refactor, so novia_route raises NameError and the user gets "
+    "a 500 instead of the friendly 400 written ten lines below. strict=True "
+    "makes this go red the moment the one-token fix lands, so the marker "
+    "cannot outlive the defect."))
+@pytest.mark.parametrize("route", ["/generate", "/model3d"])
+@pytest.mark.parametrize("design", [
+    "dragged-bend",
+    # ~0.3 s a call: the pour has to be filled before the router can be told
+    # the channel is fenced off.
+    pytest.param("boxed-in-row", marks=pytest.mark.slow),
+])
+def test_a_via_less_led_that_cannot_route_is_refused_and_not_crashed(
+        client, route, design):
+    """An LED whose via is off and whose power trace has nowhere to go is
+    refused with an error the UI can display, on both download routes.
+
+    A design the router cannot serve is a user error, not a server error. The
+    client does `throw new Error((await resp.json()).error || resp.statusText)`
+    for both routes, so a 4xx carrying an `error` string becomes a sentence
+    naming the LED to move and how to free it. A 5xx instead hands the user
+    Flask's HTML error page, `resp.json()` throws inside that expression, and
+    the badge owner is left with a bare failure and nothing to act on -- with
+    the fix written and waiting ten lines below the crash.
+
+    `/model3d` is here without a kicad-cli guard on purpose: the refusal is
+    returned before `_model_glb` is ever called, so this route answers 400
+    whether or not the tool is installed (verified with the locator forced to
+    None). If it ever starts needing kicad-cli, that is the regression.
+    """
+    payload = {"params": json.dumps({"leds": _UNROUTABLE_DESIGNS[design]})}
+    try:
+        resp = client.post(route, data=payload,
+                           content_type="multipart/form-data")
+    except Exception as exc:  # noqa: BLE001
+        # TESTING=True propagates rather than 500ing; in production this same
+        # escape is the 500 the user's browser receives.
+        raise AssertionError(
+            f"{route} crashed on the {design!r} design instead of refusing "
+            f"it: {type(exc).__name__}: {exc}") from exc
+    invariants.assert_rejected(resp)
+
+
+@pytest.mark.webapp
+@pytest.mark.parametrize("design", sorted(_UNROUTABLE_DESIGNS))
+def test_switching_the_via_back_on_makes_the_same_design_downloadable(
+        client, design):
+    """The remedy the refusal above recommends actually produces a project.
+
+    This is also what keeps that test honest. Were these placements to become
+    unacceptable for some unrelated reason -- off the board, "does not fit" --
+    the refusal test would stay green while no longer exercising via-less
+    routing at all. Here the only edit is the via setting, so a rejection
+    above plus a project here isolates the cause to `novia`.
+    """
+    leds = [dict(led, novia=False) for led in _UNROUTABLE_DESIGNS[design]]
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps({"name": "viaon", "leds": leds})},
+        content_type="multipart/form-data",
+    )
+    invariants.assert_project_zip(resp, "viaon")
 
 
 def test_smoothing_strength_and_off(client):

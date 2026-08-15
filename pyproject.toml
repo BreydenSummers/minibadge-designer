@@ -16,6 +16,10 @@ dependencies = [
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    "pytest-cov>=7",        # installed but undeclared until now
+    "hypothesis>=6.100",    # installed but undeclared until now; property tier
+    "playwright>=1.60",     # browser tier
+    "pytest-xdist>=3.8",    # measured 4.5x on the full tier; opt-in, see below
 ]
 
 [project.scripts]
@@ -30,3 +34,98 @@ include = ["minibadge_designer*"]
 
 [tool.setuptools.package-data]
 minibadge_designer = ["templates/*", "fonts/*"]
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+# Tiers (see tests/conftest.py for the machinery). Measured on this machine:
+#
+#   fast    pytest -m "not kicad and not browser and not slow and not visual"
+#           5.4 s   -- every save, pre-commit.        budget 10 s
+#   full    pytest                                    budget 90 s serial
+#           46 s    -- pre-push. The default: everything except `visual`.
+#   visual  pytest -m visual
+#           never gates. Renders and GLB exports are non-deterministic at the
+#           artifact level (5 identical exports, 5 different sha256), so a
+#           human or the inspector agent reads the output; nothing asserts on
+#           a golden. Deselected in addopts so it cannot gate by accident.
+#
+# The tier markers are also *derived* from the fixtures a test resolves (see
+# _FIXTURE_TIER in conftest), so a forgotten decorator cannot leak a 0.55 s
+# subprocess into the fast tier. That alone took `fast` from 15.3 s to 5.4 s.
+#
+# Other useful commands:
+#
+#   pytest --strict-tools                  # a missing tool FAILS, never skips
+#   pytest -n 8                            # 49 s -> 11 s (4.5x) on the full tier;
+#                                          # deliberately NOT in addopts: the fast
+#                                          # tier is faster serial than at -n 8
+#   pytest --cov=minibadge_designer --cov-report=term-missing
+#   MINIBADGE_DISABLE_TOOLS=kicad,browser pytest -m "not kicad and not browser"
+#                                          # proves the library tests do not
+#                                          # secretly depend on an external tool
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# A bare @pytest.mark.xfail that starts passing must shout, not sit green.
+# Every defect marker in this suite already passes strict=True explicitly;
+# this makes that the default so a future one cannot forget and outlive its bug.
+xfail_strict = true
+
+# `pythonpath = ["."]` is load-bearing, not cosmetic. Without it, the `pytest`
+# console script and `python -m pytest` resolve *different* source trees: the
+# console script has no cwd on sys.path, so `minibadge_designer` comes from
+# the editable install (which points at whatever checkout was pip-installed),
+# while `python -m pytest` prepends cwd and gets the tree you are sitting in.
+# In a second checkout or a git worktree that means you edit one file and test
+# another. Prepending the rootdir makes both invocations agree.
+pythonpath = ["."]
+
+addopts = [
+    "-m", "not visual",   # visual tests never gate; they are read, not asserted
+    "--strict-markers",   # a typo'd marker is a collection error, not a no-op
+    "-ra",                # print the reason for every skip -- see D7 below
+]
+
+markers = [
+    "webapp: exercises the Flask HTTP surface (client fixture)",
+    "kicad: shells out to kicad-cli (DRC, GLB export) -- needs('kicad')",
+    "browser: drives the UI through Playwright -- needs('browser')",
+    "visual: produces an artifact for a human/agent to look at; NEVER gates, deselected by default",
+    "slow: takes more than ~0.25 s; excluded from the fast tier",
+    "meta: tests about the test suite itself (style, red-proof tooling)",
+    "property: Hypothesis-driven property test",
+    "needs(*tools): external tools this test requires; probed in conftest, see _PROBES",
+]
+
+filterwarnings = [
+    "error",
+    # DO NOT delete these two without first fixing defect #11: the TTF handle
+    # that textpoly._load_font holds in an lru_cache is never closed, so it is
+    # released at an arbitrary GC point. Under `-W error` pytest re-raises it
+    # as PytestUnraisableExceptionWarning against whichever *innocent* test
+    # happens to be running (reproduces 5/5 in-file, 0/1 alone). Blanket
+    # `error` therefore ships a permanently red, order-dependent suite.
+    # Once textpoly._load_font closes its file, delete these two lines: the
+    # suite emits no other warnings.
+    "default::ResourceWarning",
+    "default::pytest.PytestUnraisableExceptionWarning",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["minibadge_designer"]
+
+[tool.coverage.report]
+# Deliberately no `fail_under`. Coverage is cheap here (~3 % of wall time on
+# sys.monitoring), so cost is not the reason `--cov` stays out of addopts --
+# the reason is that any fail-under gate in shared config fails every
+# single-file run, since one test file covers ~30 % of the package. Gate in
+# the full-tier command instead:
+#   pytest --cov=minibadge_designer --cov-report=term-missing
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.$",
+]
