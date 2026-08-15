@@ -1075,3 +1075,42 @@ def test_every_battery_check_actually_evaluates_an_assertion():
         f"MEASURED_INERT lists {stale}, but a corpus row now reaches them — "
         "delete the entry so the list keeps shrinking."
     )
+
+
+@pytest.mark.meta
+def test_every_test_the_skill_documents_actually_exists():
+    """A reference file that cites a test nobody can run is fabricated evidence.
+
+    The worked example is the document that argues against exactly that, and it
+    cited `tests/test_worked_example.py` for a while before the module existed.
+    Same class as an invariant with no caller: it reads as covered, and is not.
+
+    Only `test_*` identifiers written in backticks count as citations, so prose
+    mentioning a module name does not trip this.
+    """
+    import re
+
+    refs = REPO / ".claude" / "skills" / "writing-tests" / "references"
+    if not refs.is_dir():
+        pytest.skip(f"{refs} is absent — the skill is gitignored, so a fresh "
+                    "clone legitimately has no reference files to check")
+
+    defined = set()
+    for f in TESTS.glob("test_*.py"):
+        defined |= set(re.findall(r"^def (test_\w+)", f.read_text(encoding="utf-8"),
+                                  re.M))
+    modules = {f.stem for f in TESTS.glob("test_*.py")}
+
+    missing: dict[str, set[str]] = {}
+    for doc in sorted(refs.glob("*.md")):
+        cited = set(re.findall(r"`(test_\w+)`", doc.read_text(encoding="utf-8")))
+        gone = {c for c in cited if c not in defined and c not in modules}
+        if gone:
+            missing[doc.name] = gone
+
+    assert not missing, (
+        "these reference files cite tests that do not exist:\n"
+        + "\n".join(f"  {d}: {', '.join(sorted(g))}" for d, g in missing.items())
+        + "\nEither the test was renamed and the doc was not, or the doc "
+          "describes a test nobody wrote. Both read as coverage that is not there."
+    )
