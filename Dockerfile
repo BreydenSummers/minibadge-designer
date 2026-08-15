@@ -127,4 +127,7 @@ ENV KICAD_CLI=/usr/bin/kicad-cli \
     PORT=8000 \
     PYTHONUNBUFFERED=1
 EXPOSE 8000
-CMD ["python3", "main.py"]
+# Real WSGI serving: worker processes so two users generating at once
+# do not queue behind each other. Knobs (WEB_CONCURRENCY, PORT,
+# WORKER_TIMEOUT) and the reasoning live in gunicorn.conf.py.
+CMD ["gunicorn", "-c", "gunicorn.conf.py", "minibadge_designer.webapp:app"]

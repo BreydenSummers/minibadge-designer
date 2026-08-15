@@ -20,6 +20,7 @@ dev = [
     "hypothesis>=6.100",    # installed but undeclared until now; property tier
     "playwright>=1.60",     # browser tier
     "pytest-xdist>=3.8",    # measured 4.5x on the full tier; opt-in, see below
+    "gunicorn>=23.0",       # the container's server; the deploy smoke test runs it
 ]
 
 [project.scripts]
