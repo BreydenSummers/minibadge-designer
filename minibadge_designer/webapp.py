@@ -1166,20 +1166,22 @@ def _generate_impl(render: bool):
             return out
 
         def _face_keepouts(face: str) -> list:
+            # The corridor fallback protects a unit's pour feed on BOTH
+            # layers (its band survives in both fills), so a window on either
+            # face keeps off it no matter which side the unit is mounted on —
+            # the canvas erases the same band from every window it draws.
             return (_window_base
                     + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
                        if led.side == face]
                     + _crossers(face)
                     + [_window_corridor(led, safe) for i, led in enumerate(leds)
-                       if led.side == face and None in bridges[i].values()])
+                       if None in bridges[i].values()])
 
-        # glow, and a bare window open on both faces
-        window_keepouts: list = (
-            _window_base
-            + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds]
-            + [_window_corridor(led, safe) for i, led in enumerate(leds)
-               if None in bridges[i].values()]
-        )
+        # Every window layer is carved per face: glow and through-bare
+        # drawings are emitted once per face below, each cut only by that
+        # face's keepouts, so the far side of a unit keeps its via (and
+        # whatever else crosses the board) instead of a slab of pour
+        # shadowing the whole part.
         bare_keepouts = {face: _face_keepouts(face) for face in ("front", "back")}
         # Windows stay 1.6 mm off the board edge so the copper pours keep a
         # continuous perimeter ring (pcb._fill_geometry enforces this too).
@@ -1197,7 +1199,9 @@ def _generate_impl(render: bool):
             outside = _OutsideKeepout(outline_poly.buffer(-0.35))
             decor_base["front"].append(outside)
             decor_base["back"].append(outside)
-            window_keepouts.append(_OutsideKeepout(outline_poly.buffer(-1.6)))
+            ring = _OutsideKeepout(outline_poly.buffer(-1.6))
+            bare_keepouts["front"].append(ring)
+            bare_keepouts["back"].append(ring)
 
         # Front texts that put ink on the mask carve the art beneath them (their
         # real ink bounds for TTF texts). Window-material texts ARE windows —
@@ -1381,26 +1385,45 @@ def _generate_impl(render: bool):
                 if window in ("through", "back"):
                     mask_open["back"].append(made)
 
+        def emit_window(i, source, material, window, side, carve_text=True):
+            """A window drawing -> one carved ArtLayer per face it cuts.
+
+            Each face's layer is carved by that face's own keepouts, so a
+            through window hugs a unit's real copper on its mounting face
+            while keeping, on the far face, only what crosses the board —
+            the via, a routed hole, TH pad annuli — instead of a slab of
+            pour (and, for bare, an unbroken mask island) shadowing the
+            whole part from the other side.
+            """
+            faces = ((window,) if material == "bare" and window in ("front", "back")
+                     else ("front", "back"))
+            for face in faces:
+                keepouts = bare_keepouts[face] + (
+                    text_keepouts if material == "bare" and carve_text else [])
+                made = emit(i, source, material, keepouts, window_board,
+                            side=side, window=face if len(faces) > 1 else window)
+                note_opening(material, side, made,
+                             face if len(faces) > 1 else window)
+
         for i, ci, window, art_side in classified:
             for material in ("copper", "glow", "bare"):
                 if material in ("glow", "bare"):
-                    base = (bare_keepouts[window]
-                            if material == "bare" and window in ("front", "back")
-                            else window_keepouts)
-                    keepouts = base + (text_keepouts if material == "bare" else [])
-                    made = emit(i, ci, material, keepouts, window_board, window=window)
+                    emit_window(i, ci, material, window, art_side)
                 else:
                     made = emit(i, ci, material, decor_of[art_side], art_board, side=art_side)
-                note_opening(material, art_side, made, window)
+                    note_opening(material, art_side, made, window)
         for key, src, side in text_entries:
             for material in ("copper", "glow", "bare"):
                 if material not in src:
                     continue
                 if material in ("glow", "bare"):
-                    made = emit(key, src, material, window_keepouts, window_board, side)
+                    # Window-material texts ARE windows; they are not carved
+                    # around ink texts the way window art is.
+                    emit_window(key, src, material, "through", side,
+                                carve_text=False)
                 else:
                     made = emit(key, src, material, decor_base[side], art_board, side)
-                note_opening(material, side, made)
+                    note_opening(material, side, made)
 
         def silk_carve(base: list, side: str) -> list:
             ks = list(base)

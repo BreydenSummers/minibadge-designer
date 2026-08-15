@@ -892,6 +892,60 @@ def test_silk_carved_by_copper_openings(client):
     assert silk == 0  # identical art fully covered by the copper opening
 
 
+@pytest.mark.parametrize("material", ["glow", "bare"])
+def test_a_window_leaves_only_board_crossing_copper_on_a_units_far_face(client, material):
+    # A back-mounted inline unit under a full-coverage through window. The
+    # window used to be carved around the WHOLE unit on both faces, so the
+    # front pour survived as a dead slab shadowing the part — plainly visible
+    # through a bare window or a translucent mask, and connected to nothing
+    # the front layer needs. Only copper that actually crosses the board (the
+    # via, fed by its thin perimeter bridge) has any business on that face,
+    # so each face's window is now carved by that face's own keepouts.
+    img = Image.new("L", (200, 200), 0)  # all black: full-coverage window art
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    params = _params(
+        name="farface",
+        leds=[{"x": 12, "y": 10, "color": "red", "side": "back",
+               "layout": "inline", "size": "1206"}],
+        art=[{"material": material, "threshold": 128,
+              "cx": 10.16, "cy": 10.16, "w": 18}],
+    )
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps(params),
+              "art0": (io.BytesIO(buf.getvalue()), "win.png")},
+        content_type="multipart/form-data",
+    )
+    board = invariants.assert_parses(
+        zipfile.ZipFile(io.BytesIO(resp.data))
+        .read("farface/farface.kicad_pcb").decode())
+    from shapely.geometry import Point
+
+    # Probe the res_in PAD center — the one spot where far-face shadow pour
+    # could actually ship. Calibrated on a broken build (both faces carved by
+    # the back keepouts): at 1206 the pad keepouts leave gaps, so the shadow
+    # fractures and the floating-copper filter already drops every fragment
+    # except the one touching the via anchor — the res_in/via piece. Probes
+    # at the part bodies or the other pads read False on broken code too
+    # (measured; the first two drafts of this test survived their mutant).
+    # Unit anchor (12, 10), inline 1206: res_in pad center (4.7875, 10).
+    front = list(board.emitted_fills("F.Cu"))
+    assert front, ("the front pour vanished entirely — that is a missing "
+                   "3V3 plane, not a well-carved window")
+    spot = Point(4.7875, 10.0)
+    assert not any(p.contains(spot) for p in front), (
+        f"the {material} window left front pour at ({spot.x}, {spot.y}), "
+        "shadowing a unit that is mounted on the back — dead copper the "
+        "user sees straight through their window")
+    # Contrast: the unit's own face keeps the pour hugging its cathode pad —
+    # that copper is the LED's ground connection, not a shadow.
+    pad = Point(13.5375, 10.0)
+    assert any(p.contains(pad) for p in board.emitted_fills("B.Cu")), (
+        "the window ate the back pour at the LED cathode pad; the unit's own "
+        "face must keep the copper its pads connect through")
+
+
 def test_texts_pass_through_and_sanitize(client):
     texts = [
         {"x": 10, "y": 4, "text": "front text", "size": 2.0},
