@@ -986,8 +986,18 @@ def _generate_impl(render: bool):
             for prev in leds[:i]:
                 leds[i] = pcb.resolve_overlap(prev, leds[i], safe=safe)
         # On custom outlines, every unit must sit on solid board (inside the
-        # outline, not over a cut-out hole). Relocate strays the same way the
-        # web UI does — scanning the same grid keeps preview and board in sync.
+        # outline, not over a cut-out hole). Relocate strays on a fixed 1.1 mm
+        # grid.
+        #
+        # This used to claim it scanned "the same grid" as the web UI, and that
+        # is no longer true: the client's freeSpot() went adaptive (span/90,
+        # floored at 0.25 mm) so the two searches are different algorithms by
+        # construction. That is fine — what has to agree is whether a given spot
+        # is *acceptable*, not which spot each one picks first. The predicates
+        # that decide acceptability are held in parity by
+        # tests/test_browser.py (unitInsideBoard, padConflict, clampLedFor);
+        # asserting the two searches land on the same coordinate would be a
+        # false-positive machine.
         if outline_poly is not None:
             from dataclasses import replace as _replace
 
