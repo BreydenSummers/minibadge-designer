@@ -2396,8 +2396,9 @@ function drawArtLayer(c, a, mat, viewSide) {
 }
 
 // Server-side art keepouts, mirrored for the preview: decor (silk/copper)
-// is carved around connector pads and front units; windows (glow/bare)
-// give the pads a wider berth and clear around EVERY unit.
+// is carved around connector pads and this face's units; windows (glow/bare)
+// give the pads a wider berth. Both hug per face — a unit only claims, on
+// its far face, the copper that actually crosses the board.
 function captionBoxes() { // mirrors pcb.caption_boxes
   const out = [];
   for (const key of activePairs()) {
@@ -2409,7 +2410,7 @@ function captionBoxes() { // mirrors pcb.caption_boxes
   }
   return out;
 }
-function eraseArtKeepouts(oc, forWindows, unitSide, windowCutsFar) {
+function eraseArtKeepouts(oc, forWindows, unitSide) {
   oc.save();
   oc.globalCompositeOperation = "destination-out";
   oc.fillStyle = "#000";
@@ -2423,10 +2424,13 @@ function eraseArtKeepouts(oc, forWindows, unitSide, windowCutsFar) {
     oc.fillRect(mm2px(x0), mm2px(y0), (x1 - x0) * SCALE, (y1 - y0) * SCALE);
   }
   for (const L of state.leds) {
-    // A window that only opens this face leaves the far face's copper alone,
-    // so it need only dodge what actually crosses the board there.
-    const farOnly = L.side !== (unitSide || "front")
-      && (!forWindows || windowCutsFar === false);
+    // Every layer is carved per face now (mirrors webapp emit_window): on
+    // the face a unit is NOT mounted on, art and windows alike only dodge
+    // what actually crosses the board there — the via, a routed hole, TH
+    // pad annuli, or a far-side LED's whole half (its pads carry vias).
+    const gF = geomOf(L), pF = PKG[gF.pkg];
+    const farled = !!L.farled && !gF.hole && !pF.drill;
+    const farOnly = L.side !== (unitSide || "front") && !farled;
     if (farOnly) {
       // A reverse unit's routed hole penetrates both faces — keep this
       // side's decor clear of the hole and its light spot (server parity).
@@ -2566,13 +2570,12 @@ function corridorRect(L) {
 function drawWindowLayers(c, mirror, mats, eraseText) {
   const [off, oc] = newLayer(c.canvas);
   const viewSide = mirror ? "back" : "front";
-  let any = false, cutsFar = false;
+  let any = false;
   for (const mat of mats) {
     for (const a of state.art) {
       if (!layerHasMat(a, mat)) continue;
       const faces = windowFaces(a, mat);
       if (!faces.includes(viewSide)) continue;  // does not open on this face
-      if (faces.length > 1) cutsFar = true;     // through window: cuts both
       drawArtSided(oc, a, mat, viewSide);
       any = true;
     }
@@ -2586,8 +2589,10 @@ function drawWindowLayers(c, mirror, mats, eraseText) {
   oc.fillRect(mm2px(ob[0] + 1.16), mm2px(ob[1] + 1.16),
               (ob[2] - ob[0] - 2.32) * SCALE, (ob[3] - ob[1] - 2.32) * SCALE);
   clipToBoard(oc);
-  // Only a window that cuts the far side has to dodge parts mounted there.
-  eraseArtKeepouts(oc, true, viewSide, cutsFar);
+  // Each view's window is carved by that face's own keepouts (mirrors the
+  // generator's per-face emit): a unit mounted on the other face keeps only
+  // its board-crossing copper here, so no slab shadows it through the window.
+  eraseArtKeepouts(oc, true, viewSide);
   state.leds.forEach((L, i) => { // corridor fallback: only unroutable units
     const br = allBridges()[i];
     if (br.F && br.B) return;
