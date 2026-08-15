@@ -162,12 +162,15 @@ def _parse_pins(params: dict) -> tuple[str, ...]:
 
 
 def _led_keepout(led: pcb.Led, safe=None, pins=pcb.ALL_PINS, others=(),
-                 outline=None) -> "_GeomKeepout":
+                 outline=None, face: str | None = None) -> "_GeomKeepout":
     # The unit's actual copper (pads/via/traces/hole) plus clearance margins
     # — not the old bounding rectangle — so art wraps snugly around units.
     # pins/others matter for a via-less unit: its power trace runs to a
-    # connector pad, and where it goes depends on both.
-    return _GeomKeepout(pcb.unit_copper_poly(led, safe, pins, others, outline))
+    # connector pad, and where it goes depends on both. `face` matters for a
+    # far-side LED, whose copper is split across the board: each face's art
+    # and windows dodge only the copper that is really there.
+    return _GeomKeepout(pcb.unit_copper_poly(led, safe, pins, others, outline,
+                                             face))
 
 
 def _reverse_hole_keepout(led: pcb.Led, safe=None) -> "CircleKeepout":
@@ -1127,13 +1130,13 @@ def _generate_impl(render: bool):
         decor_base = {
             side: [CircleKeepout(x, y, 1.65) for x, y in kept_pads]
             + captions
-            + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
+            + [_led_keepout(led, safe, pins, leds, outline_rings, side) for led in leds
                if led.side == side]
             + [_reverse_hole_keepout(led, safe) for led in leds
                if led.side != side and led.reverse]
             # "LED on the other side" puts that half of the unit on the far face,
             # with a via in each of its pads: art on this face has to clear it too.
-            + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
+            + [_led_keepout(led, safe, pins, leds, outline_rings, side) for led in leds
                if led.side != side and led.farled]
             # Through-hole LED pads penetrate both faces: far-side decor keeps
             # clear of the pad annuli (server parity with eraseArtKeepouts).
@@ -1160,7 +1163,8 @@ def _generate_impl(render: bool):
                     continue
                 g = pcb.led_geometry(led)
                 if led.farled and not g["hole"] and "drill" not in pcb.PKG[g["pkg"]]:
-                    out.append(_led_keepout(led, safe, pins, leds, outline_rings))
+                    out.append(_led_keepout(led, safe, pins, leds, outline_rings,
+                                            face))
                     continue
                 if led.reverse:
                     out.append(_reverse_hole_keepout(led, safe))
@@ -1174,8 +1178,8 @@ def _generate_impl(render: bool):
             # face keeps off it no matter which side the unit is mounted on —
             # the canvas erases the same band from every window it draws.
             return (_window_base
-                    + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
-                       if led.side == face]
+                    + [_led_keepout(led, safe, pins, leds, outline_rings, face)
+                       for led in leds if led.side == face]
                     + _crossers(face)
                     + [_window_corridor(led, safe) for i, led in enumerate(leds)
                        if None in bridges[i].values()])

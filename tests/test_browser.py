@@ -1241,6 +1241,46 @@ def test_art_is_carved_around_a_unit_the_same_way_it_is_on_the_board(ui):
 
 
 @pytest.mark.browser
+def test_a_far_side_leds_keepout_is_carved_per_face_in_both(ui):
+    """A far-side LED's per-face keepout matches between canvas and board.
+
+    `unitCopperPieces` / `pcb.unit_copper_pieces` take a face argument for
+    far-side ("LED on the other side") units, whose copper is split across
+    the board: the LED face keeps only its pads, via and hole, while on the
+    resistor face the departed pads shrink to their two via barrels. Drift
+    here re-opens the ghost-pad bug on one side only: the preview erases a
+    window over copper the board keeps — or shows pad-shaped slabs the
+    board no longer ships.
+    """
+    from minibadge_designer import pcb
+
+    leds = _clamped([_js_led(farled=True, layout=lay, size=size, side=side,
+                             rot=rot)
+                     for lay in _LAYOUTS for size in ("0603", "1206")
+                     for side in ("front", "back") for rot in (0, 90, 37)])
+    off_by = []
+    for face in ("front", "back"):
+        drawn = ui.js("([Ls, face]) => Ls.map(L => { state.leds = [L];"
+                      " return unitCopperPieces(L, face); })", [leds, face])
+        for d, js in zip(leds, drawn):
+            board = pcb.unit_copper_pieces(_py_led(d), face=face)
+            if [p[0] for p in js] != [p[0] for p in board]:
+                off_by.append(
+                    f"{_describe(d)} on {face}: canvas keeps {[p[0] for p in js]} "
+                    f"but the board keeps {[p[0] for p in board]}")
+                continue
+            for (label, jq), (_, bq) in zip(js, board):
+                gap = _gap(jq, bq)
+                if gap > _PARITY_TOL:
+                    off_by.append(f"{_describe(d)} on {face}: the {label} "
+                                  f"piece is {gap:.4f} mm out")
+    assert not off_by, (
+        f"{len(off_by)} far-side per-face pieces differ between preview and "
+        "board:\n" + "\n".join(off_by[:12]))
+    ui.assert_clean("far-side per-face keepout parity")
+
+
+@pytest.mark.browser
 def test_the_previewed_perimeter_bridges_match_the_generated_ones(ui):
     """The bridge decision the canvas makes is the one the board ships.
 
