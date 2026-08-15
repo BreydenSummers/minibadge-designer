@@ -446,6 +446,11 @@
             <option value="enig" selected>Gold (ENIG)</option>
             <option value="hasl">Silver (HASL)</option>
           </select></div>
+        <div><div class="sub" style="margin-top:0">Vias</div>
+          <select id="tenting" title="Via tenting — whether the fab covers via barrels with soldermask (tented is every manufacturer's default)">
+            <option value="tented" selected>Tented (mask)</option>
+            <option value="exposed">Exposed metal</option>
+          </select></div>
       </div>
       <div class="sub" style="margin-top:0">Shape</div>
       <select id="shapemode">
@@ -891,6 +896,7 @@ const state = {
   texts: [], // {x, y, text, size, side, rot}
   mask: "green",
   finish: "enig",  // surface finish: what color the exposed metal plates
+  tenting: true,   // vias covered with soldermask (every fab's default)
   pins: [...ALL_PINS],
   shape: {
     mode: "square", smooth: 0.12,
@@ -2464,15 +2470,17 @@ function eraseArtKeepouts(oc, forWindows, unitSide) {
   }
   oc.restore();
 }
-// Bridge traces are copper: stroke them wherever this view's windows cut
-// the pour (source-atop keeps them inside the already-painted window pixels).
+// Copper crossing a window keeps its soldermask (mirrors the generator's
+// _window_mask_covers): each bridge is roofed by a 0.5 mm dam of mask, and a
+// tented via keeps its cap. Paint board-mask strips back over the window
+// pixels (source-atop clips to them); with tenting off the via plates bare.
 function strokeBridgesInWindows(oc, viewSide) {
   const layer = viewSide === "back" ? "B" : "F";
   const bridges = allBridges();
   oc.save();
   oc.globalCompositeOperation = "source-atop";
-  oc.strokeStyle = padCol();
-  oc.lineWidth = 0.3 * SCALE;
+  oc.strokeStyle = MASKS[state.mask];
+  oc.lineWidth = 0.5 * SCALE;
   oc.lineCap = "butt";
   for (const br of bridges) {
     const seg = br[layer];
@@ -2481,6 +2489,21 @@ function strokeBridgesInWindows(oc, viewSide) {
     oc.moveTo(mm2px(seg[0][0]), mm2px(seg[0][1]));
     oc.lineTo(mm2px(seg[1][0]), mm2px(seg[1][1]));
     oc.stroke();
+  }
+  for (const L of state.leds) {
+    if (L.novia) continue;  // no via: nothing of this unit crosses a window
+    const [bx, by] = unitPoint(L, ...viaOffset(L));
+    oc.beginPath();
+    if (state.tenting) {
+      oc.arc(mm2px(bx), mm2px(by), (VIA_SIZE / 2 + 0.1) * SCALE, 0, 7);
+      oc.fillStyle = MASKS[state.mask]; oc.fill();
+    } else {
+      oc.arc(mm2px(bx), mm2px(by), VIA_SIZE / 2 * SCALE, 0, 7);
+      oc.fillStyle = padCol(); oc.fill();
+      oc.beginPath();
+      oc.arc(mm2px(bx), mm2px(by), VIA_DRILL / 2 * SCALE, 0, 7);
+      oc.fillStyle = "#05080d"; oc.fill();
+    }
   }
   oc.restore();
 }
@@ -4626,6 +4649,10 @@ $("finish").addEventListener("change", () => {
   renderLegend();
   draw();
 });
+$("tenting").addEventListener("change", () => {
+  state.tenting = $("tenting").value !== "exposed";
+  draw(); // vias crossing windows repaint as mask caps or bare annuli
+});
 
 function designFormData() { // the full design, as /generate and /render take it
   const fd = new FormData();
@@ -4639,6 +4666,7 @@ function designFormData() { // the full design, as /generate and /render take it
     name: $("name").value || "minibadge",
     mask_color: state.mask,
     finish: state.finish,
+    tenting: state.tenting,
     pins: ALL_PINS.filter(pinOn),
     shape: shapeParams(),
     art: state.art.map(a => ({
@@ -5004,7 +5032,7 @@ const TIPS = {
     <li><b>Exposed copper</b> — the stripes: mask opened so the metal shines. <b>Gold or silver</b> comes from the Surface finish picker in the top bar (ENIG = gold, HASL = silver) — one finish for all exposed metal, pads included.</li>
     <li><b>Glow window</b> — the visor: copper stripped from both layers, mask kept, so back-side LED light shines through.</li>
     <li><b>Bare board</b> — like glow, but the mask opens too: raw laminate, the brightest window. A bare layer's <b>Side</b> select gains a <b>Through</b> option (both faces — the default for shape windows); Front/Back opens one face only, e.g. a bigger back-only window behind a small front graphic.</li>
-    <li>Windows always keep a copper ring at the board edge, and every LED ties to that ring with a hairline copper bridge — you'll see it cross any window it passes through.</li>
+    <li>Windows always keep a copper ring at the board edge, and every LED ties to that ring with a hairline copper bridge — where one crosses a window it stays under a thin strip of soldermask (vias keep their mask cap too, unless you pick exposed vias in Shape).</li>
   </ul>` },
   leds: { title: "Step 4 — a red LED behind the visor", img: "leds.webp", html: `<ul>
     <li>Drop a <b>back-side</b> LED and drag its dashed ghost behind the visor on the front view — its light will shine through the glow window when the badge is powered.</li>
@@ -5118,6 +5146,7 @@ for (const el of document.querySelectorAll("#viewtabs div")) {
 function designJSON() {
   return {
     v: 1, name: $("name").value, mask: state.mask, finish: state.finish,
+    tenting: state.tenting,
     pins: [...(state.pins || ALL_PINS)],
     shape: {
       mode: state.shape.mode, smooth: state.shape.smooth,
@@ -5209,6 +5238,8 @@ async function restoreDesign(d) {
   $("name").value = d.name || "my-minibadge";
   state.mask = d.mask || "green"; $("mask").value = state.mask;
   state.finish = d.finish || "enig"; $("finish").value = state.finish;
+  state.tenting = d.tenting !== false;  // absent (older saves) means tented
+  $("tenting").value = state.tenting ? "tented" : "exposed";
   // Saved designs from before per-pin control stored rows; a row means both
   // of its corner pairs, so they translate straight across.
   state.pins = Array.isArray(d.pins) ? ALL_PINS.filter(n => d.pins.includes(n))
