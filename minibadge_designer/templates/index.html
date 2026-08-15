@@ -68,10 +68,14 @@
   .rico span { font-size: 8px; letter-spacing: .06em; text-transform: uppercase; }
   .rico svg { width: 17px; height: 17px; display: block; }
   .rico.on { border-color: var(--accent); color: var(--accent); background: var(--bg); }
+  /* The rail is a column: the controls scroll, the message dock is pinned
+     under them. Both have their own box, so neither can ever cover the
+     other — or anything in the work area. */
   #listpanel {
     background: var(--panel); border-right: 1px solid var(--edge);
-    padding: 14px; overflow-y: auto;
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden;
   }
+  #panelscroll { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; }
   .panel h3 {
     margin: 2px 2px 12px; font: 700 10.5px/1 ui-monospace, "SF Mono", Menlo, monospace;
     letter-spacing: .18em; color: var(--accent); text-transform: uppercase;
@@ -213,26 +217,35 @@
     cursor: pointer; letter-spacing: .02em;
   }
   button#download:disabled { opacity: .5; cursor: default; }
-  /* Toast stack in the top-left of the work area: transient status messages
-     and the standing warnings about problems with the design (a part off the
-     board, text over a pad, ...). z-index outranks #stage3d so a failed 3D
-     export still shows while the model is up, and the stack sits clear of the
-     centered view selector and the top-right legend. */
+  /* Message dock at the foot of the rail: transient status messages and the
+     standing warnings about problems with the design (a part off the board,
+     text over a pad, ...). It is IN FLOW, not floating over the work area:
+     the standing warnings are re-raised on every draw and so live as long as
+     the problem does, and a permanent overlay is a permanent hole in whatever
+     it covers — here it covered the view selector and made FRONT unclickable.
+     Newest at the bottom, nearest the eye; the stack scrolls rather than
+     eating the rail, and vanishes entirely when there is nothing to say. */
   #toasts {
-    position: absolute; top: 12px; left: 14px; z-index: 5;
+    flex: 0 0 auto; max-height: 45%; overflow-y: auto;
     display: flex; flex-direction: column; gap: 6px;
-    max-width: min(340px, 40%); pointer-events: none;
+    padding: 10px 12px; border-top: 1px solid var(--edge); background: var(--bg);
   }
+  #toasts:empty { display: none; }
   .toast {
     color: var(--dim); font: 500 11px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
     background: var(--panel); border: 1px solid var(--edge);
     border-left: 3px solid var(--accent); border-radius: 4px;
     padding: 7px 12px; letter-spacing: .04em; text-align: left;
     box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
-    animation: statuspop .18s ease-out; pointer-events: auto;
+    animation: statuspop .18s ease-out; flex: 0 0 auto;
   }
   .toast.err { color: #ff6b60; border-left-color: #ff6b60; }
   .toast.warn { color: #e0a63f; border-left-color: #e0a63f; }
+  /* Standing warnings first, the transient status line last: the status is
+     the answer to what the user just did, so it belongs nearest the eye and
+     at a fixed place, not wherever creation order happened to put it. */
+  .toast.warn { order: 0; }
+  .toast.info, .toast.err { order: 1; }
   /* Standing warnings clear themselves when the design is fixed, so they
      get a pointer only where clicking does something: jumping to the part. */
   .toast.info, .toast.err { cursor: pointer; }
@@ -418,6 +431,7 @@
     <button class="rico" id="tab-text" title="Text" aria-label="Text">A<span>Text</span></button>
   </nav>
   <aside id="listpanel">
+    <div id="panelscroll">
     <div class="panel" id="panel-shape">
       <h3>Board characteristics <button class="qm" tabindex="-1" data-tip="shape" title="How board shapes work">?</button></h3>
       <div class="row" style="margin-bottom:8px">
@@ -464,6 +478,14 @@
       <h3>Text <button class="qm" tabindex="-1" data-tip="text" title="Fonts and materials">?</button><button id="addtext" class="add">+ Add text</button></h3>
       <div id="textlist"></div>
     </div>
+    </div>
+    <!-- Messages dock at the foot of the rail, in normal flow. They used to
+         float over the top-left of the work area, where the standing warnings
+         — re-raised on every draw, so effectively permanent — sat on top of
+         the centred FRONT/BACK/BOTH selector and swallowed its clicks. A
+         notification must never be able to cover a control, and the only way
+         to promise that is to give it a box of its own. -->
+    <div id="toasts" aria-live="polite"></div>
   </aside>
   <div id="canvaszone">
     <div id="restorebar" class="mono">Found an autosaved design.
@@ -519,7 +541,6 @@
       <span class="lg"><span class="lgchip" id="viachip" style="background:#cfa435;border-radius:50%"></span>via</span>
       <button class="qm" tabindex="-1" data-tip="materials" title="What the materials mean">?</button>
     </div>
-    <div id="toasts" aria-live="polite"></div>
   </div>
 </div>
 
@@ -786,8 +807,13 @@ function putToast(key, msg, kind, onClick) {
   // on every draw (i.e. every mousemove of a drag), and rewriting the node
   // would restart the pop-in animation and flicker the whole stack.
   const cls = "toast " + kind;
+  const changed = el.className !== cls || el.textContent !== msg;
   if (el.className !== cls) el.className = cls;
   if (el.textContent !== msg) el.textContent = msg;
+  // The dock scrolls once there are more messages than room. Something the
+  // user cannot see has not been said, so bring a new or reworded message
+  // into view — but only then, or every draw would fight their scrolling.
+  if (changed) el.scrollIntoView({block: "nearest"});
   el.onclick = onClick || null;
   el.title = onClick ? "" : "Click to dismiss";
   if (!onClick) el.onclick = () => dropToast(key);
@@ -821,6 +847,11 @@ function undoDelete() {
   if (!lastDeleted) return false;
   const { kind, index, item } = lastDeleted;
   lastDeleted = null;
+  // Belt and braces behind removeItem()'s "never record an empty slot": a
+  // hole spliced into these arrays is not a wrong value, it is a value that
+  // makes blockingProblems() (and every later draw) throw, which brings the
+  // whole editor down with no toast, no DOM change and no failed request.
+  if (item === undefined || item === null) return false;
   if (kind === "led") {
     state.leds.splice(Math.min(index, state.leds.length), 0, item);
     renderLedList();
@@ -1698,10 +1729,10 @@ function rayExit(sx, sy, dx, dy, rings) {
       const ax = px - sx, ay = py - sy;
       const t = (rx * ay - ry * ax) / den;
       const s = (dx * ay - dy * ax) / den;
-      if (t > 1e-9 && s >= -1e-9 && s <= 1 + 1e-9 && (best === null || t < best)) best = t;
+      if (t > 1e-9 && s >= -1e-9 && s <= 1 + 1e-9 && (best === null || t < best[0])) best = [t, rx, ry];
     }
   }
-  return best;
+  return best;   // [distance, edge dx, edge dy] -- the edge is needed by the caller
 }
 function bridgeRoute(start, ownPieces, skip, obstacles, rings) {
   const [sx, sy] = start;
@@ -1710,13 +1741,26 @@ function bridgeRoute(start, ownPieces, skip, obstacles, rings) {
   for (let k = 0; k < 16; k++) {
     const a = k * 22.5 * Math.PI / 180;
     const dx = Math.cos(a), dy = Math.sin(a);
-    const t = rayExit(sx, sy, dx, dy, rings);
-    if (t === null || t - BRIDGE_INSET < BRIDGE_MIN) continue;
-    cands.push([t, k, dx, dy]);
+    const hit = rayExit(sx, sy, dx, dy, rings);
+    if (hit === null) continue;
+    const [t, ex, ey] = hit;
+    // Mirrors pcb.py _bridge_route exactly. BRIDGE_INSET is a CLEARANCE from
+    // the outline, so it is taken perpendicular to the edge the ray meets, not
+    // along the ray. This scan walks 16 directions 22.5 deg apart; subtracting
+    // it along the ray left only 0.8*sin(22.5) = 0.306 mm at that angle, and
+    // less TRACK_W/2 that is 0.156 mm of copper-to-edge against a 0.2 mm rule.
+    // If this ever stops matching pcb.py the preview draws a bridge the
+    // downloaded board does not have, which is worse than either being wrong.
+    const elen = Math.hypot(ex, ey);
+    if (elen < 1e-12) continue;
+    const sinA = Math.abs(dx * ey - dy * ex) / elen;
+    if (sinA < 1e-9) continue;            // running along the edge
+    const ln = t - BRIDGE_INSET / sinA;
+    if (ln < BRIDGE_MIN) continue;
+    cands.push([t, k, dx, dy, ln]);
   }
   cands.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-  for (const [t, , dx, dy] of cands) {
-    const ln = t - BRIDGE_INSET;
+  for (const [, , dx, dy, ln] of cands) {
     const ex = sx + dx * ln, ey = sy + dy * ln;
     const nx = -dy * 0.5, ny = dx * 0.5;
     const swath = [[sx + nx, sy + ny], [ex + nx, ey + ny],
@@ -1908,19 +1952,30 @@ function pushApart(i) {
     if (!moved) return;
   }
 }
+// How fine the placement lattice is. Two failure modes to stay between:
+// a lattice coarser than the gaps between units throws away room that really
+// exists (the old fixed 0.55 mm one gave up a whole unit early on the 20 mm
+// square, where an 0805 in-line unit measures 10.3 x 2.8 mm), while a fixed
+// fine lattice on a 118 mm custom outline is ~150k probes per sweep and turns
+// one refused click into a multi-second freeze. So: a fixed *probe budget*
+// per axis, floored at 0.25 mm. Small boards get the fine lattice they need;
+// big boards, which have room to spare anyway, stay bounded.
+const FREE_SPOT_PROBES = 90, FREE_SPOT_MIN_STEP = 0.25;
+function freeSpotStep(sf) {
+  const span = Math.max(sf[2] - sf[0], sf[3] - sf[1], FREE_SPOT_MIN_STEP);
+  return Math.max(FREE_SPOT_MIN_STEP, span / FREE_SPOT_PROBES);
+}
 function freeSpot(led, skip) {
   // Prefer the standard square, then sweep the full board bounds so big
-  // custom outlines can hold as many units as physically fit. A finer
-  // second sweep packs thin in-line units the coarse grid misses.
+  // custom outlines can hold as many units as physically fit.
   const sf = unitSafe();
+  const step = freeSpotStep(sf);
   const spans = [[3.5, 17, 3.5, 17.5], [sf[1] + 2, sf[3] - 2, sf[0] + 2, sf[2] - 2]];
-  for (const step of [1.1, 0.55]) {
-    for (const [yLo, yHi, xLo, xHi] of spans) {
-      for (let y = yLo; y <= yHi; y += step) {
-        for (let x = xLo; x <= xHi; x += step) {
-          const [cx2, cy2] = clampLedFor(led, x, y);
-          if (ledPosOk({...led, x: cx2, y: cy2}, skip === undefined ? -1 : skip)) return [cx2, cy2];
-        }
+  for (const [yLo, yHi, xLo, xHi] of spans) {
+    for (let y = yLo; y <= yHi; y += step) {
+      for (let x = xLo; x <= xHi; x += step) {
+        const [cx2, cy2] = clampLedFor(led, x, y);
+        if (ledPosOk({...led, x: cx2, y: cy2}, skip === undefined ? -1 : skip)) return [cx2, cy2];
       }
     }
   }
@@ -2914,6 +2969,10 @@ let m3d = { url: null, designKey: null, busy: false, pending: false,
 let mode3d = false;
 function draw() {
   if (ready) { dirty = true; scheduleAutosave(); }
+  // Every edit funnels through here, so this is the one place that can promise
+  // the handles, the arrow keys and Delete are all still aimed at the object
+  // the user picked — whatever spliced, swapped or replaced the lists since.
+  reconcileSelection();
   updateView();
   drawView(cvF, "front");
   drawView(cvB, "back");
@@ -3217,7 +3276,7 @@ function attachPointer(cv, side) {
       const L = state.leds[plus.index];
       L.nodes = [...(L.nodes || [])];
       L.nodes.splice(plus.leg, 0, [plus.x, plus.y]);
-      selected = { kind: "lednode", index: plus.index, side: L.side };
+      setSelection("lednode", plus.index, L.side);
       drag = { kind: "lednode", index: plus.index, node: plus.leg, dx: 0, dy: 0 };
       nodeHint = null;
       cv.setPointerCapture(e.pointerId);
@@ -3226,7 +3285,7 @@ function attachPointer(cv, side) {
       return;
     }
     const hit = hitAt(mx, my);
-    selected = hit ? { kind: hit.kind, index: hit.index, side: hit.side } : null;
+    if (hit) setSelection(hit.kind, hit.index, hit.side); else clearSelection();
     if (hit) {
       drag = { kind: hit.kind, index: hit.index, node: hit.node,
                dx: hit.x - mx, dy: hit.y - my };
@@ -3512,6 +3571,48 @@ function bindPair(root, cls, apply) {
 const WAND_MATS = { ignore: "Ignore (mask)", ...MATERIALS };
 let picking = null; // {index, material} while a magic-wand pick is armed
 let selected = null; // {kind, index, side} — last clicked object, for keyboard nudge/delete
+// `selected.index` names a slot in one of the design arrays, and every splice,
+// swap or duplicate moves the objects between those slots. Remembering WHICH
+// object was picked lets the index be re-derived (or the selection dropped)
+// after any list edit — without that, deleting or reordering a card silently
+// hands the arrow keys and the Delete key an object the user never picked.
+let selectedRef = null;
+const SEL_LIST = { text: () => state.texts, art: () => state.art,
+                   shapeel: () => state.shape.elements };
+// led / ledres / ledvia / ledbody / lednode are all parts of one LED unit.
+const selList = kind => (SEL_LIST[kind] || (() => state.leds))();
+function setSelection(kind, index, side) {
+  const item = kind ? selList(kind)[index] : null;
+  if (!kind || !item) { selected = null; selectedRef = null; return; }
+  selected = { kind, index, side: side !== undefined ? side : (item.side || "front") };
+  selectedRef = item;
+}
+function clearSelection() { selected = null; selectedRef = null; }
+// The invariant: `selected` names a live object, or nothing. Cheap enough to
+// run on every draw (the lists hold tens of items at most), which is what
+// makes it hold after edits that never think about the selection at all.
+function reconcileSelection() {
+  if (!selected) return;
+  const list = selList(selected.kind);
+  if (list[selected.index] === selectedRef && selectedRef) return;
+  const i = selectedRef ? list.indexOf(selectedRef) : -1;
+  if (i < 0) clearSelection();
+  else selected = { ...selected, index: i };
+}
+// The single door out of the design arrays. Deleting through it is what keeps
+// the undo buffer and the selection honest: an empty slot is never recorded
+// as a deletion (undo would splice `undefined` back in and every later draw
+// would throw), and the selection never outlives the object it named.
+function removeItem(kind, i, label) {
+  const list = selList(kind);
+  const item = list[i];
+  if (!item) return false;
+  noteDeleted(kind, i, item, label);
+  list.splice(i, 1);
+  if (selectedRef === item) clearSelection();
+  else reconcileSelection();
+  return true;
+}
 
 function renderArtList() {
   picking = null;
@@ -3551,8 +3652,8 @@ function renderArtList() {
         ${a.kind === "rect" ? `<div class="sub">Height (mm)</div>${pairHTML("hh", 3, 119, 0.5, a.h || 10)}` : ""}`;
       div.querySelector(".fname").textContent = `${i + 1}. ${SHAPE_KIND_LABELS[a.kind]} (shape)`;
       div.querySelector(".del").onclick = () => {
-        noteDeleted("art", i, state.art[i], `layer ${i + 1}`);
-        state.art.splice(i, 1); renderArtList(); draw();
+        if (!removeItem("art", i, `layer ${i + 1}`)) return;
+        renderArtList(); draw();
       };
       div.querySelector(".up").onclick = () => {
         if (i > 0) { [state.art[i-1], state.art[i]] = [state.art[i], state.art[i-1]]; renderArtList(); draw(); }
@@ -3630,8 +3731,8 @@ function renderArtList() {
       draw();
     };
     div.querySelector(".del").onclick = () => {
-      noteDeleted("art", i, state.art[i], `layer ${i + 1}`);
-      state.art.splice(i, 1); renderArtList(); draw();
+      if (!removeItem("art", i, `layer ${i + 1}`)) return;
+      renderArtList(); draw();
     };
     div.querySelector(".up").onclick = () => {
       if (i > 0) { [state.art[i-1], state.art[i]] = [state.art[i], state.art[i-1]]; renderArtList(); draw(); }
@@ -3749,7 +3850,7 @@ function revealItem(kind, i) {
   const item = { led: state.leds, text: state.texts, art: state.art,
                  shapeel: state.shape.elements }[kind][i];
   if (!item) return;
-  selected = { kind, index: i, side: item.side || "front" };
+  setSelection(kind, i);
   showPanel(WARN_PANEL[kind]);
   ({ led: renderLedList, text: renderTextList, art: renderArtList,
      shapeel: renderShapeOpts })[kind]();
@@ -3973,8 +4074,8 @@ function renderLedList() {
       refreshWarnings();
     };
     div.querySelector(".itemhead button").onclick = () => {
-      noteDeleted("led", i, state.leds[i], `LED ${i + 1}`);
-      state.leds.splice(i, 1); renderLedList(); draw();
+      if (!removeItem("led", i, `LED ${i + 1}`)) return;
+      renderLedList(); draw();
     };
     div.querySelector(".c").onchange = e => { L.color = e.target.value; draw(); };
     // Re-render the card: the side decides whether the back-visibility note
@@ -4084,8 +4185,8 @@ function renderTextList() {
       ${t.font === "kicad" ? `<div class="sub">KiCad's stroke font is silkscreen-only — pick another font to use copper, glow, or bare.</div>` : ""}`;
     div.querySelector(".tx").value = t.text;
     div.querySelector(".itemhead button").onclick = () => {
-      noteDeleted("text", i, state.texts[i], `text ${i + 1}`);
-      state.texts.splice(i, 1); renderTextList(); draw();
+      if (!removeItem("text", i, `text ${i + 1}`)) return;
+      renderTextList(); draw();
     };
     // The warnings themselves are raised by refreshWarnings() (via draw) as
     // toasts; the card only keeps its character counter current.
@@ -4283,9 +4384,7 @@ function renderShapeOpts() {
     div.querySelector(".fname").textContent =
       `${i + 1}. ${isImg ? el.fname || "image" : SHAPE_KIND_LABELS[el.kind]}${el.op === "cut" ? " (cut)" : ""}`;
     div.querySelector(".del").onclick = () => {
-      noteDeleted("shapeel", i, s.elements[i], `outline part ${i + 1}`);
-      s.elements.splice(i, 1);
-      selected = null;
+      if (!removeItem("shapeel", i, `outline part ${i + 1}`)) return;
       renderShapeOpts();
       requestOutline(true);
     };
@@ -4347,7 +4446,7 @@ function renderShapeOpts() {
 }
 $("shapemode").addEventListener("change", () => {
   state.shape.mode = $("shapemode").value;
-  selected = null;
+  clearSelection();
   renderShapeOpts();
   requestOutline(true);
 });
@@ -4413,22 +4512,38 @@ function renderPinGrid() {
     note.style.color = missing.length ? "#e0a63f" : "";
   }
 }
+// Orientations tried for a new unit, in preference order. A unit's envelope
+// is strongly asymmetric (the resistor and via hang off one end), so 180/270
+// are genuinely different shapes to fit, not mirror images of 0/90 — they are
+// what lets a lopsided custom outline take another unit.
+const LED_TRY_ORIENT = [["inline", 0], ["stacked", 0], ["inline", 90], ["stacked", 90],
+                        ["inline", 180], ["stacked", 180], ["inline", 270], ["stacked", 270]];
+// Mutates `led` to the orientation that fits. Returns null only when no
+// orientation fits anywhere — which is what makes the refusal message true.
+function spotForNewLed(led) {
+  for (const [layout, rot] of LED_TRY_ORIENT) {
+    led.layout = layout; led.rot = rot;
+    const spot = freeSpot(led);
+    if (spot) return spot;
+  }
+  return null;
+}
 $("addled").addEventListener("click", () => {
-  if (state.leds.length >= MAX_LEDS) return;
+  // Saying nothing is the one unacceptable answer: the click has to either
+  // place a unit or explain itself.
+  if (state.leds.length >= MAX_LEDS) {
+    setStatus(`That is the limit — ${MAX_LEDS} LED units on one badge. `
+      + "Remove one before adding another.", true);
+    return;
+  }
   // Back is the default: back-side LEDs glow through windows in the board,
   // the classic minibadge look (and they face you on a badge you're wearing).
-  // Placement tries the thin in-line strip first, then the compact stacked
-  // block, then both rotated 90° — so a crowded or oddly-shaped board gets
-  // every chance before we give up.
   const led = {x: 10, y: 10, color: "red", side: "back", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null};
-  let spot = null;
-  for (const [layout, rot] of [["inline", 0], ["stacked", 0], ["inline", 90], ["stacked", 90]]) {
-    led.layout = layout; led.rot = rot;
-    spot = freeSpot(led);
-    if (spot) break;
-  }
+  const spot = spotForNewLed(led);
   if (!spot) {
-    setStatus("No room for another LED — drag units closer together, switch some to the smaller 0603 size, or enlarge the board.", true);
+    setStatus(`No room for another LED — ${state.leds.length} unit`
+      + `${state.leds.length === 1 ? "" : "s"} already fill this board. Drag units `
+      + "closer together, switch some to the smaller 0603 size, or enlarge the board.", true);
     return;
   }
   [led.x, led.y] = spot;
@@ -4437,7 +4552,11 @@ $("addled").addEventListener("click", () => {
   draw();
 });
 $("addtext").addEventListener("click", () => {
-  if (state.texts.length >= MAX_TEXTS) return;
+  if (state.texts.length >= MAX_TEXTS) {
+    setStatus(`That is the limit — ${MAX_TEXTS} text layers on one badge. `
+      + "Remove one before adding another.", true);
+    return;
+  }
   const n = state.texts.length;
   const t = {x: 10.16, y: 10.16 + (n % 5) * 2.2 - 4.4, text: "", size: 1.5,
              side: "front", font: "kicad", material: "silk", rot: 0};
@@ -4544,7 +4663,7 @@ $("download").addEventListener("click", async () => {
     const m = /LED (\d+)/.exec(err.message);
     const i = m ? parseInt(m[1], 10) - 1 : -1;
     if (i >= 0 && state.leds[i]) {
-      selected = { kind: "led", index: i, side: state.leds[i].side };
+      setSelection("led", i, state.leds[i].side);
       showPanel("leds");
       renderLedList();
       const card = document.querySelectorAll("#ledlist .item")[i];
@@ -4727,6 +4846,10 @@ $("d3refresh").addEventListener("click", () => m3dLoad(true));
 window.addEventListener("keydown", e => {
   const tag = (e.target.tagName || "").toLowerCase();
   if (tag === "input" || tag === "select" || tag === "textarea") return;
+  // A keystroke can arrive without an intervening draw(), so re-check the
+  // selection here too: nudging or deleting something the user never picked
+  // is worse than doing nothing.
+  reconcileSelection();
   if (e.key === "Escape") {
     if (tipOpen) {
       hideTip();
@@ -4738,7 +4861,7 @@ window.addEventListener("keydown", e => {
       renderArtList();
       setStatus("Wand pick cancelled.");
     } else if (selected) {
-      selected = null;
+      clearSelection();
       draw();
     }
     return;
@@ -4807,24 +4930,19 @@ window.addEventListener("keydown", e => {
     e.preventDefault();
     const idx = selected.index;
     if (selected.kind === "led") {
-      noteDeleted("led", idx, state.leds[idx], `LED ${idx + 1}`);
-      state.leds.splice(idx, 1); renderLedList();
+      if (removeItem("led", idx, `LED ${idx + 1}`)) renderLedList();
     } else if (selected.kind === "text") {
-      noteDeleted("text", idx, state.texts[idx], `text ${idx + 1}`);
-      state.texts.splice(idx, 1); renderTextList();
+      if (removeItem("text", idx, `text ${idx + 1}`)) renderTextList();
     } else if (selected.kind === "art") {
-      noteDeleted("art", idx, state.art[idx], `layer ${idx + 1}`);
-      state.art.splice(idx, 1); renderArtList();
+      if (removeItem("art", idx, `layer ${idx + 1}`)) renderArtList();
     } else if (selected.kind === "shapeel") {
-      noteDeleted("shapeel", idx, state.shape.elements[idx], `outline part ${idx + 1}`);
-      state.shape.elements.splice(idx, 1);
-      selected = null;
-      renderShapeOpts();
-      requestOutline(true);
+      if (removeItem("shapeel", idx, `outline part ${idx + 1}`)) {
+        renderShapeOpts();
+        requestOutline(true);
+      }
       return;
     }
     else return;
-    selected = null;
     draw();
   }
 });

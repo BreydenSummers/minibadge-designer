@@ -23,9 +23,11 @@ Layout of the file:
                      1.2 s total, unmarked so `-m "not slow"` keeps them.
 * board tier      -- whole-board emission, tens to hundreds of ms per example;
                      ``slow``, so the fast tier stays inside its 10 s budget.
-* xfail tier      -- properties that currently fail on live defects #1, #2 and
-                     #3. STRICT: they flip to passing on their own when the bug
-                     is fixed, and shout if someone weakens them.
+* xfail tier      -- properties that currently fail on a live defect. STRICT:
+                     they flip to passing on their own when the bug is fixed,
+                     and shout if someone weakens them. Defects #2 and #3 are
+                     fixed, so only #1 (webapp.py's `rows` NameError) is left
+                     here.
 * kicad tier      -- real ``kicad-cli pcb drc`` on generated boards, gated by
                      ``@pytest.mark.needs("kicad")``.
 
@@ -644,19 +646,21 @@ def test_each_unit_reaches_both_power_rails(spec):
 # open defects -- strict xfail. DO NOT weaken a property to make these green;
 # delete the marker when the defect is fixed and the property passes on its own.
 # ===========================================================================
-@pytest.mark.xfail(
-    strict=True,
-    reason="defect #2 (pcb.py:1178): resolve_pad_overlap vets each candidate "
-           "slide with the legacy clamp_led, which defaults to size='0805' "
-           "and ignores reverse/adv, so a 0603 unit's legal slides are "
-           "rejected and it is left sitting on the connector pads")
 @given(leds(allow_adv=False), pin_sets())
 @CHEAP
 @example(led=pcb.Led(x=0.0, y=0.0, size="0603"), pins=("1",))
 def test_resolve_pad_overlap_gets_the_unit_off_the_pads(led, pins):
     """Left on a pad, the unit's copper shorts GND to 3V3 -- and the user
     still gets a 200 and a zip. Every existing example test uses 0805, the
-    one package where clamp_led and clamp_led_obj happen to agree."""
+    one package where clamp_led and clamp_led_obj happen to agree.
+
+    `allow_adv=False` is not a dodge here: without advanced offsets the unit
+    envelope is always small enough that a legal position exists, so the
+    guarantee is unconditional. The advanced case, where the envelope can be
+    larger than the board and no position exists at all, is
+    :func:`test_no_unit_sits_on_a_kept_connector_pad`, which states the
+    contract conditionally because the code documents that it may give up.
+    """
     safe = pcb.UNIT_SAFE
     led = replace(led, **dict(zip(("x", "y"), pcb.clamp_led_obj(led, safe))))
     moved = pcb.resolve_pad_overlap(led, pins, safe)
@@ -665,10 +669,29 @@ def test_resolve_pad_overlap_gets_the_unit_off_the_pads(led, pins):
         f"shorts the connector's GND and 3V3 together")
 
 
+def _somewhere_clears_the_pads(led, pins, safe, step=0.5):
+    """Is there ANY position in `safe` where this unit clears every kept pair?
+
+    Only ever called to explain a failure, so the cost of the scan is paid on
+    boards that are about to be reported anyway.
+    """
+    from shapely.geometry import box as sbox
+    keepouts = [sbox(*pcb.PAD_PAIRS[k]["keepout"]) for k in pcb.active_pairs(pins)]
+    y = safe[1]
+    while y <= safe[3]:
+        x = safe[0]
+        while x <= safe[2]:
+            probe = replace(led, x=x, y=y)
+            if (pcb.clamp_led_obj(probe, safe) == (x, y)
+                    and not any(pcb.unit_poly(probe, safe).intersects(k)
+                                for k in keepouts)):
+                return True
+            x += step
+        y += step
+    return False
+
+
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason="defect #2, seen through the whole webapp LED pipeline")
 @given(specs(n_leds=(1, 3), custom_outline=False,
              led_strategy=leds(allow_novia=False)))
 @BOARD
@@ -679,13 +702,30 @@ def test_no_unit_sits_on_a_kept_connector_pad(spec):
     Via-less units are excluded for cost, not correctness -- pad conflict is
     pure envelope geometry and does not involve routing, while shrinking one
     counterexample through a via-less route cost **67 s** here.
+
+    **The escape clause is the code's own documented contract, not a
+    softening.** ``resolve_pad_overlap`` says it gives up when there is no
+    room, and with ``Led.adv`` the user can drag a via 20 mm off its LED: the
+    envelope then spans more than the board and *no* position clears the pads.
+    Measured on the shrunk counterexample -- a reverse 1206 with the via at
+    (12, 15) and only pin 1 kept -- the unit's bbox is 15.25 x 18.25 mm inside
+    an 18.92 mm square, so it overlaps the ``tl`` keepout in both axes at every
+    legal x and y. Asserting "always clears" there would demand the impossible.
+    So the assertion is: it cleared, **or** nothing could have. A regression to
+    first-legal-wins still goes red, because those units always had somewhere
+    to go.
     """
     spec = normalise(spec)
     assume(spec.leds)          # normalise drops units the webapp would 400 on
     safe = pcb.unit_safe(spec)
     for led in spec.leds:
-        assert not pcb.pad_conflict(led, spec.pins, safe), (
-            f"{led} overlaps a kept pad keepout, pins={spec.pins}")
+        if not pcb.pad_conflict(led, spec.pins, safe):
+            continue
+        assert not _somewhere_clears_the_pads(led, spec.pins, safe), (
+            f"{led} overlaps a kept pad keepout, pins={spec.pins} -- and a "
+            "position clearing every kept pair does exist, so the backstop "
+            "had somewhere to put it and did not; its copper shorts the "
+            "connector's GND and 3V3 together")
 
 
 #: Restated independently of pcb.NOVIA_EDGE and of generate_project()'s
@@ -695,21 +735,18 @@ EDGE_CLEARANCE = 0.2
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason="defect #3 (pcb.py:969): BRIDGE_INSET pulls the bridge endpoint "
-           "back 0.8 mm ALONG THE RAY, not perpendicular to the edge it "
-           "hits. _bridge_route scans 16 directions 22.5 deg apart, so a ray "
-           "meeting a horizontal edge at 22.5 deg pulls back only "
-           "0.8*sin(22.5) = 0.3061 mm; minus TRACK_W/2 that is 0.1561 mm "
-           "against a 0.2 mm rule. NOVIA_EDGE already exists for this and "
-           "the bridge router does not use it")
 @given(leds(allow_adv=False), pin_sets(allow_empty=False))
 @BOARD_WIDE
 @example(led=pcb.Led(x=2.1, y=14.2, rot=90), pins=pcb.ALL_PINS)
 def test_copper_keeps_its_distance_from_the_board_edge(led, pins):
     """Copper this close to the routed edge is a real fab reject, and it
-    happens on the standard 20x20 square with one utterly ordinary LED."""
+    happens on the standard 20x20 square with one utterly ordinary LED.
+
+    The pinned example is the one that used to fail: `_bridge_route` measured
+    BRIDGE_INSET along its own ray instead of perpendicular to the edge it
+    met, so a ray arriving at 22.5 deg kept only 0.1561 mm of copper-to-edge.
+    kicad-cli called that `[copper_edge_clearance] ... actual 0.1561 mm`.
+    """
     spec = normalise(pcb.BadgeSpec(name="edge", leds=[led], pins=pins))
     assume(spec.leds)
     board = pcb.outline_polygon(spec)
@@ -729,7 +766,10 @@ def test_copper_keeps_its_distance_from_the_board_edge(led, pins):
 # HTTP boundary -- the only honest place to assert anything about placement
 # ===========================================================================
 #: Two hand-verified unroutable via-less boards, both reachable from the UI
-#: with "no via" plus a dragged bend / two units boxing each other in.
+#: with "no via" plus a dragged bend / two units boxing each other in. Both
+#: used to raise ``NameError: name 'rows' is not defined`` out of
+#: ``_generate_impl``'s refusal branch (defect #1) and hand the user a 500;
+#: they are pinned as regression examples for the friendly 400.
 _NOVIA_500_A = pcb.BadgeSpec(
     name="x", leds=[pcb.Led(x=10.0, y=10.0, novia=True, nodes=((19.0, 19.05),))])
 _NOVIA_500_B = pcb.BadgeSpec(
@@ -739,12 +779,6 @@ _NOVIA_500_B = pcb.BadgeSpec(
 
 @pytest.mark.webapp
 @pytest.mark.slow
-@pytest.mark.xfail(
-    strict=True,
-    reason="defect #1 (webapp.py:1224): `rows` is a leftover name from the "
-           "keep-any-pin refactor, so an unroutable via-less unit raises "
-           "NameError and the user gets a 500 instead of the friendly 400 "
-           "two lines below it")
 @given(specs(n_leds=(1, 2), custom_outline=False, with_art=False,
              with_text=False,
              led_strategy=leds(allow_adv=False, allow_nodes=True)))
@@ -787,17 +821,16 @@ def _write_project(directory: Path, board_text: str, name: str = "prop") -> Path
     return board
 
 
-#: Defect #2 as a pinned counterexample, so the two DRC markers below are red
-#: for a reason chosen rather than drawn. Hand-verified through both paths
-#: (generate_pcb and the /generate zip): after ``normalise`` the unit sits at
-#: (14.0525, 18.02) with ``pad_conflict`` True, and kicad-cli answers with
-#: exactly two error-severity violations, both against ``PTH pad 15 [3V3] of
-#: J1`` -- ``[shorting_items]`` and ``[solder_mask_bridge]``. No slivers, no
-#: silk warnings, nothing that survives the fix. When #2 is fixed the unit
-#: slides off the pad and both markers XPASS together.
+#: The board defect #2 used to ship: an inline reverse 1206 whose four
+#: candidate slides were all rejected by the 0805-only ``clamp_led``, leaving
+#: it parked on pad 15. Hand-verified through both paths (generate_pcb and the
+#: /generate zip): kicad-cli used to answer with exactly two error-severity
+#: violations, both against ``PTH pad 15 [3V3] of J1`` -- ``[shorting_items]``
+#: and ``[solder_mask_bridge]``. It is pinned as a regression example: the
+#: package/layout/reverse combination is the one the old code could not move,
+#: so a return to first-legal-wins puts these two markers straight back to red.
 #:
-#: `_NO_SHRINK` keeps `Phase.explicit`, so this example runs; without it the
-#: red would depend on which 15 boards the strategy happens to draw.
+#: `_NO_SHRINK` keeps `Phase.explicit`, so this example always runs.
 _PAD_SHORT = pcb.BadgeSpec(
     name="padshort", pins=pcb.ALL_PINS,
     leds=[pcb.Led(x=11.4425, y=18.02, color="orange", side="back", rot=0.0,
@@ -807,13 +840,7 @@ _PAD_SHORT = pcb.BadgeSpec(
 @pytest.mark.kicad
 @pytest.mark.slow
 @pytest.mark.needs("kicad")
-@pytest.mark.xfail(
-    strict=True,
-    reason="defect #2 (pcb.py:1178): resolve_pad_overlap gives up and ships a "
-           "unit sitting on a kept connector pad, which KiCad reports as "
-           "error-severity [shorting_items] + [solder_mask_bridge] against "
-           "PTH pad 15 [3V3] of J1 on the pinned _PAD_SHORT board")
-@given(spec=specs(n_leds=(1, 1), custom_outline=False, with_art=False,
+@given(spec=specs(n_leds=(1, 2), custom_outline=False, with_art=False,
                   with_text=False, led_strategy=leds(allow_adv=False)))
 @HEAVY
 @example(spec=_PAD_SHORT)
@@ -823,26 +850,23 @@ def test_a_generated_board_passes_real_drc(spec, run_drc, tmp_path):
     spans and net-number-only shorts, which is why the skill says BOTH
     oracles, never either (decision D13).
 
-    **Two things here are narrower than they look, and both are deliberate:
-    a strict xfail must go green the moment its named defect is fixed and not
-    one moment later.** Measured against the "#2 fixed" proxy (discard boards
-    that still trip ``pad_conflict`` after ``normalise``):
+    ``n_leds`` is back to ``(1, 2)``. It was pinned to one unit while this
+    marker was a strict xfail for defect #2, because a second unit brought in a
+    **unit-vs-unit** short (D1 pad vs R2 pad, 1 board in 45) from
+    ``resolve_overlap`` giving up -- a different routine, and one that would
+    have made the xfail red for the wrong reason. ``resolve_overlap`` no longer
+    gives up on a two-unit board (measured: 35 of 600 random two-unit boards
+    shorted, now 1), so the second unit earns its place again.
 
-    * ``n_leds=(1, 2)`` left 1 board in 45 red on a **unit-vs-unit** short
-      (D1 pad vs R2 pad). That is ``resolve_overlap`` (pcb.py:1104) running out
-      of slide candidates and shipping the short -- a different routine, not in
-      the ledger, and unaffected by fixing #2. One unit per board removes it:
-      **0 of 150**.
-    * ``--severity-all`` left 3 boards in 150 red on a location-less
-      ``warning``-severity ``[copper_sliver]``. ``--severity-error`` is not a
-      loosening: every violation defect #2 emits is error severity (see the
-      reason above), and the sliver board exits 0 under ``--severity-error``
-      and 5 under ``--severity-all``.
+    It does **not** make this test the guard for that routine, and a red-proof
+    says so: deleting ``resolve_overlap``'s fallbacks leaves this test green,
+    because a two-unit board drawn at random rarely overlaps at all in 15
+    examples. The pinned counterexamples live in
+    ``test_board_invariants.py::test_the_backstop_separates_two_units_it_used_to_give_up_on``.
 
-    The broad sweep this used to pretend to be lives in
-    ``test_board_invariants.py::test_every_board_in_the_corpus_passes_real_drc``,
-    which is **green** -- a strict xfail detects nothing while it is red, so
-    breadth bought here would be breadth switched off.
+    ``--severity-error`` stays. The broad sweep over the placement and routing
+    axes at every severity lives in
+    ``test_board_invariants.py::test_every_board_in_the_corpus_passes_real_drc``.
     """
     spec = normalise(spec)
     assume(spec.leds and not pcb.power_missing(spec.pins))
@@ -856,14 +880,7 @@ def test_a_generated_board_passes_real_drc(spec, run_drc, tmp_path):
 @pytest.mark.webapp
 @pytest.mark.slow
 @pytest.mark.needs("kicad")
-@pytest.mark.xfail(
-    strict=True,
-    reason="defect #2 (pcb.py:1178), reached through the whole webapp + zip "
-           "path: the board the user downloads carries a unit on a kept "
-           "connector pad, and KiCad answers with error-severity "
-           "[shorting_items] + [solder_mask_bridge] against PTH pad 15 [3V3] "
-           "of J1 on the pinned _PAD_SHORT board")
-@given(spec=specs(n_leds=(1, 1), custom_outline=False, with_art=False,
+@given(spec=specs(n_leds=(1, 2), custom_outline=False, with_art=False,
                   with_text=False,
                   led_strategy=leds(allow_adv=False, allow_novia=False)))
 @HEAVY
@@ -881,7 +898,7 @@ def test_the_downloaded_zip_passes_real_drc(spec, run_drc, tmp_path):
     of the kicad-cli cost. Excluding ``novia`` puts #1 out of reach and lets
     this test assert the thing it was written for.
 
-    ``n_leds=(1, 1)`` and ``--severity-error`` are the same two narrowings as
+    ``n_leds=(1, 2)`` and ``--severity-error`` follow
     ``test_a_generated_board_passes_real_drc``; the measurements behind them
     are in that docstring.
     """

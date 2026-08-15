@@ -9,6 +9,7 @@ import zipfile
 
 from flask import Flask, render_template, request, send_file
 from PIL import Image
+from shapely.errors import ShapelyError
 
 from . import pcb, svgart, textpoly
 from .logo import (
@@ -25,6 +26,101 @@ MAX_LEDS = 64   # generous: custom outlines can reach ~120 mm across
 MAX_TEXTS = 24
 MAX_ART = 8
 
+#: Soldermask colors the fabs (and the UI's picker) actually offer. The value
+#: is interpolated straight into the KiCad stackup, so anything outside this
+#: list would ship a board file KiCad refuses to open — a `mask_color` of
+#: `green")` used to close the stackup's s-expression early (defect #4).
+#: Whitelisting at the boundary is the same treatment `finish` already gets.
+MASK_COLORS = ("green", "purple", "black", "red", "blue", "white")
+
+#: Exceptions that degenerate geometry raises. `shapely` reports a NaN or
+#: otherwise unbuildable ring as `GEOSException`, which is a *sibling* of
+#: `ValueError` (`GEOSException -> ShapelyError -> Exception`), so a tuple of
+#: builtins never sees it. The user's numbers made the geometry impossible;
+#: that is a 400, not a server fault.
+_GEOMETRY_ERRORS = (OSError, ValueError, TypeError, AttributeError, KeyError,
+                    IndexError, ZeroDivisionError, ShapelyError,
+                    Image.DecompressionBombError)
+
+
+#: How much vector detail one uploaded SVG may carry before the exact pipeline
+#: gives up on it. The cost of the exact pipeline is superlinear and was
+#: uncapped: measured on this repo, a single `<path>` of 40 000 line vertices
+#: (272 KB) takes 5.3 s, 80 000 takes 26 s and 200 000 takes 493 s, all
+#: returning 200. Bezier segments cost ~4 ms each, roughly linearly.
+#:
+#: The score below weights a curve/arc segment as `SVG_CURVE_COST` line
+#: vertices precisely so that both shapes hit this ceiling at about the same
+#: wall-clock cost, which is ~5 s for a line-heavy file and ~13 s for the
+#: worst curve-heavy one. Raise this one number to buy more detail and more
+#: seconds; nothing else needs editing.
+#:
+#: It is deliberately generous — 40 000 straight vertices, or ~2 500 Bezier
+#: segments, is far more detail than a 20 mm badge can print (the average
+#: chord would be ~0.01 mm against a ~0.15 mm minimum feature). And it is not
+#: a refusal: an SVG over the cap falls back to the browser's raster render of
+#: the same file, exactly like a gradient-filled SVG does today. Only a client
+#: that sent no raster fallback is turned away, with a message saying so.
+MAX_SVG_COMPLEXITY = 40_000
+SVG_CURVE_COST = 16
+
+
+class _TooComplex(ValueError):
+    """An SVG whose exact vector geometry would cost minutes to build."""
+
+
+# Path-data commands and how many numbers one segment of each consumes. `t`
+# and `s` are the smooth-curve forms, so they count as curves despite their
+# short argument lists.
+_SVG_ARITY = {"m": 2, "l": 2, "t": 2, "h": 1, "v": 1,
+              "c": 6, "s": 4, "q": 4, "a": 7, "z": 0}
+_SVG_CURVES = frozenset("csqta")
+_SVG_PATH_D = re.compile(rb"""\bd\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.DOTALL)
+_SVG_POINTS = re.compile(rb"""\bpoints\s*=\s*(?:"([^"]*)"|'([^']*)')""", re.DOTALL)
+_SVG_TOKEN = re.compile(rb"([MmZzLlHhVvCcSsQqTtAa])|([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)")
+
+
+def _path_complexity(d: bytes) -> int:
+    """Weighted segment count of one `d` attribute.
+
+    Counts *segments*, not command letters: SVG path data repeats a command
+    implicitly (`L1 1 2 2 3 3` is three line-tos), and auto-tracers lean on
+    that heavily, so counting letters would under-measure a traced logo by an
+    order of magnitude.
+    """
+    cost = 0
+    cmd, run = "l", 0
+
+    def flush(cmd: str, run: int) -> int:
+        arity = _SVG_ARITY.get(cmd, 2)
+        if not arity or not run:
+            return 0
+        return max(1, run // arity) * (SVG_CURVE_COST if cmd in _SVG_CURVES else 1)
+
+    for m in _SVG_TOKEN.finditer(d):
+        letter = m.group(1)
+        if letter is None:
+            run += 1
+            continue
+        cost += flush(cmd, run)
+        cmd, run = letter.decode().lower(), 0
+    return cost + flush(cmd, run)
+
+
+def _check_svg_complexity(data: bytes) -> None:
+    """Refuse the exact vector pipeline an SVG too intricate to build in time."""
+    cost = sum(_path_complexity(m.group(1) or m.group(2) or b"")
+               for m in _SVG_PATH_D.finditer(data))
+    for m in _SVG_POINTS.finditer(data):  # <polygon>/<polyline>
+        cost += len(_SVG_TOKEN.findall(m.group(1) or m.group(2) or b"")) // 2
+    if cost > MAX_SVG_COMPLEXITY:
+        raise _TooComplex(
+            "this SVG carries too much vector detail to trace exactly "
+            f"(about {cost:,} segments against a {MAX_SVG_COMPLEXITY:,} limit) — "
+            "simplify the path, raise the smoothing/tolerance in your tracing "
+            "tool, or upload a PNG of the same artwork instead")
+
+
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD
 
@@ -39,14 +135,28 @@ def _parse_pins(params: dict) -> tuple[str, ...]:
 
     Older saved designs (and the old UI) sent rows = ["top", "bottom"]; a
     row means both of its corner pairs, so they map straight onto pin lists.
+
+    Raises ValueError when the payload holds something no pin list can be read
+    out of (`pins: 5`, `rows: 5`). This runs before any of the handlers' own
+    guards, so without the type check a scalar here escaped as a 500 rather
+    than the 400 a malformed request deserves.
     """
     raw = params.get("pins")
     if raw is not None:
-        return tuple(q for q in pcb.ALL_PINS if q in set(map(str, raw)))
+        try:
+            wanted = set(map(str, raw))
+        except TypeError:
+            raise ValueError('pins must be a list of connector pin numbers, '
+                             'like ["1", "2"]') from None
+        return tuple(q for q in pcb.ALL_PINS if q in wanted)
     raw_rows = params.get("rows")
     if raw_rows is None:
         raw_rows = ["top", "bottom"]
-    keep = {r for r in ("top", "bottom") if r in raw_rows}
+    try:
+        keep = {r for r in ("top", "bottom") if r in raw_rows}
+    except TypeError:
+        raise ValueError('rows must be a list of connector rows, '
+                         'like ["top", "bottom"]') from None
     return tuple(q for q in pcb.ALL_PINS
                  if pcb.PAD_PAIRS[pcb.pair_of(q)]["row"] in keep)
 
@@ -300,7 +410,15 @@ def _image_silhouette(el: dict, data: bytes | None, raster: bytes | None, smooth
     ex = pcb.OUTLINE_EXTENT
     if svgart.is_svg(data):
         try:
+            _check_svg_complexity(data)
             return _svg_shape_geometry(data, el)
+        except _TooComplex:
+            # Too intricate to trace exactly in reasonable time. The browser's
+            # raster render of the same file is a perfectly good silhouette,
+            # so degrade to it; only say no when the client sent none.
+            if raster is None:
+                raise
+            data = raster
         except Exception:  # noqa: BLE001 — any parse issue means "not exact"
             # Not exactly parseable (gradients, malformed markup, ...) —
             # use the browser's raster render of the same SVG instead.
@@ -471,23 +589,40 @@ def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict):
     return _geom_rings(outline), bool(bridges)
 
 
+def _read_upload(field: str) -> bytes | None:
+    """Whole body of one uploaded file, releasing the stream behind it.
+
+    Werkzeug spills anything over ~500 KB into a temporary file, and the app
+    reads every upload exactly once — so holding the handle open past the read
+    just leaves a descriptor for the garbage collector to find later. The
+    upload cap is 24 MiB, so that is worth not doing.
+    """
+    f = request.files.get(field)
+    if not f:
+        return None
+    try:
+        return f.read()
+    finally:
+        f.close()
+
+
 def _shape_uploads() -> tuple[dict, dict]:
     """Collect outline image uploads: legacy "shape" key + per-element keys."""
     uploads: dict = {}
     rasters: dict = {}
-    legacy = request.files.get("shape")
-    if legacy:
-        uploads["legacy"] = legacy.read()
-    legacy_r = request.files.get("shape_raster")
-    if legacy_r:
-        rasters["legacy"] = legacy_r.read()
+    legacy = _read_upload("shape")
+    if legacy is not None:
+        uploads["legacy"] = legacy
+    legacy_r = _read_upload("shape_raster")
+    if legacy_r is not None:
+        rasters["legacy"] = legacy_r
     for i in range(12):
-        f = request.files.get(f"shape{i}")
-        if f:
-            uploads[i] = f.read()
-        fr = request.files.get(f"shape{i}_raster")
-        if fr:
-            rasters[i] = fr.read()
+        f = _read_upload(f"shape{i}")
+        if f is not None:
+            uploads[i] = f
+        fr = _read_upload(f"shape{i}_raster")
+        if fr is not None:
+            rasters[i] = fr
     return uploads, rasters
 
 
@@ -512,16 +647,23 @@ def outline_preview():
     The same _compute_outline runs again during /generate, so the preview
     polygon is exactly what lands on Edge.Cuts.
     """
+    # Every failure here answers "no custom outline", which the UI draws as the
+    # ordinary square — the preview is allowed to be more conservative than
+    # /generate, never more optimistic. json.JSONDecodeError is a ValueError,
+    # and so is the "not an object" / bad-pins case, so one guard covers the
+    # envelope; the geometry keeps its own.
     try:
         params = json.loads(request.form.get("params", "{}"))
-    except json.JSONDecodeError:
-        return {"rings": None}
-    pins = _parse_pins(params)
+        if not isinstance(params, dict):
+            return {"rings": None, "bridged": False}
+        pins = _parse_pins(params)
+    except ValueError:
+        return {"rings": None, "bridged": False}
     try:
         uploads, rasters = _shape_uploads()
         shape_meta = params.get("shape") or {}
         rings, bridged = _compute_outline(shape_meta, uploads, pins, rasters)
-    except (OSError, ValueError, TypeError, AttributeError, Image.DecompressionBombError):
+    except _GEOMETRY_ERRORS:
         return {"rings": None, "bridged": False}
     return {"rings": rings, "bridged": bridged}
 
@@ -661,6 +803,28 @@ def _refill_zones(board_path: str) -> bool:
     return run.returncode == 0
 
 
+def _glb_meshes(data: bytes) -> int:
+    """Number of meshes in a GLB, or 0 if these bytes are not a usable one.
+
+    `kicad-cli pcb export glb` can exit non-zero and still have written a
+    complete, openable model — typically it failed to substitute one component
+    footprint and says so on stderr. Reading the file rather than trusting the
+    exit code is what lets that case reach the viewer instead of a 500.
+    """
+    import struct
+
+    if len(data) < 20 or data[:4] != b"glTF":
+        return 0
+    ln, typ = struct.unpack_from("<I4s", data, 12)
+    if typ != b"JSON" or 20 + ln > len(data):
+        return 0
+    try:
+        gltf = json.loads(data[20:20 + ln])
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return 0
+    return len(gltf.get("meshes", []) or []) if isinstance(gltf, dict) else 0
+
+
 def _model_glb(spec: "pcb.BadgeSpec", slug: str):
     import subprocess
     import tempfile
@@ -688,12 +852,30 @@ def _model_glb(spec: "pcb.BadgeSpec", slug: str):
             )
         except subprocess.TimeoutExpired:
             return {"error": "the 3D export timed out"}, 500
-        if run.returncode != 0:
-            return {"error": "KiCad could not export this board"}, 500
-        with open(glb, "rb") as f:
-            data = _tag_glb_layers(f.read())
-    return send_file(io.BytesIO(data), mimetype="model/gltf-binary",
+        try:
+            with open(glb, "rb") as f:
+                raw = f.read()
+        except OSError:
+            raw = b""
+        # A non-zero exit is not the same as no model. kicad-cli complains and
+        # exits 1 when it cannot substitute a component's 3D model, yet still
+        # writes the whole board — the honest answer there is the board the
+        # user can actually look at, with a warning, not a 500 that hides it.
+        if _glb_meshes(raw) == 0:
+            note = run.stderr.decode("utf-8", "replace").strip().splitlines()
+            return {"error": "KiCad could not export this board"
+                             + (f" — {note[-1][:200]}" if note else "")}, 500
+        data = _tag_glb_layers(raw)
+    resp = send_file(io.BytesIO(data), mimetype="model/gltf-binary",
                      download_name=f"{slug}.glb")
+    if run.returncode != 0:
+        # The viewer gets a real model; say plainly that it may be incomplete
+        # rather than presenting a part-less board as the finished article.
+        resp.headers["X-Minibadge-Export-Warning"] = (
+            "kicad-cli reported problems exporting this board; a component "
+            "model may be missing from the 3D view. The downloaded KiCad "
+            "project is unaffected.")
+    return resp
 
 
 def _generate_impl(render: bool):
@@ -701,14 +883,26 @@ def _generate_impl(render: bool):
         params = json.loads(request.form.get("params", "{}"))
     except json.JSONDecodeError:
         return {"error": "invalid params"}, 400
+    # Valid JSON that is not an object (null, [], 42, "s") used to sail past
+    # the guard above and blow up on the first params.get().
+    if not isinstance(params, dict):
+        return {"error": "invalid params — expected a JSON object"}, 400
 
     name = str(params.get("name", "minibadge"))[:60]
-    mask_color = str(params.get("mask_color", "green"))[:20]
+    # Whitelisted, not escaped: this value is interpolated into the board's
+    # stackup, so an unknown one has to become the default rather than reach
+    # the file. Same treatment as `finish` below.
+    mask_color = str(params.get("mask_color", "green"))[:20].lower()
+    if mask_color not in MASK_COLORS:
+        mask_color = "green"
     finish = params.get("finish")
     if finish not in ("enig", "hasl"):
         finish = "enig"
 
-    pins = _parse_pins(params)
+    try:
+        pins = _parse_pins(params)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
 
     # Custom board outline (standard square when shape mode is "square").
     outline_rings = None
@@ -717,7 +911,9 @@ def _generate_impl(render: bool):
         shape_meta = params.get("shape") or {}
         uploads, rasters = _shape_uploads()
         outline_rings, _bridged = _compute_outline(shape_meta, uploads, pins, rasters)
-    except (OSError, ValueError, TypeError, AttributeError, Image.DecompressionBombError):
+    except _TooComplex as exc:
+        return {"error": f"board shape: {exc}"}, 400
+    except _GEOMETRY_ERRORS:
         return {"error": "could not process the board shape"}, 400
     if outline_rings:
         from shapely.geometry import Polygon as _Poly
@@ -777,64 +973,74 @@ def _generate_impl(render: bool):
                                 novia=novia, nodes=nodes, farled=farled, adv=adv))
     except (TypeError, ValueError, AttributeError):
         return {"error": "invalid led parameters"}, 400
-    # Backstop nudges: units clear the connector pad pairs and each other
-    # (the UI prevents both during drag; hand-crafted requests may not).
-    leds = [pcb.resolve_pad_overlap(led, pins, safe) for led in leds]
-    for i in range(1, len(leds)):
-        for prev in leds[:i]:
-            leds[i] = pcb.resolve_overlap(prev, leds[i], safe=safe)
-    # On custom outlines, every unit must sit on solid board (inside the
-    # outline, not over a cut-out hole). Relocate strays the same way the
-    # web UI does — scanning the same grid keeps preview and board in sync.
-    if outline_poly is not None:
-        from dataclasses import replace as _replace
+    # Placing the units is pure geometry over user-supplied numbers, so a
+    # degenerate design (a NaN or absurd coordinate) makes shapely refuse to
+    # build the polygon rather than returning a wrong one. That is a bad
+    # request, not a server fault -- but the raising calls used to sit
+    # outside every `try` and escaped as a 500 (defect #6).
+    try:
+        # Backstop nudges: units clear the connector pad pairs and each other
+        # (the UI prevents both during drag; hand-crafted requests may not).
+        leds = [pcb.resolve_pad_overlap(led, pins, safe) for led in leds]
+        for i in range(1, len(leds)):
+            for prev in leds[:i]:
+                leds[i] = pcb.resolve_overlap(prev, leds[i], safe=safe)
+        # On custom outlines, every unit must sit on solid board (inside the
+        # outline, not over a cut-out hole). Relocate strays the same way the
+        # web UI does — scanning the same grid keeps preview and board in sync.
+        if outline_poly is not None:
+            from dataclasses import replace as _replace
 
-        from shapely.prepared import prep as _prep
+            from shapely.prepared import prep as _prep
 
-        solid = _prep(outline_poly.buffer(-0.55))
+            solid = _prep(outline_poly.buffer(-0.55))
 
-        def on_board(led):
-            return solid.contains(pcb.unit_poly(led, safe))
+            def on_board(led):
+                return solid.contains(pcb.unit_poly(led, safe))
 
-        def overlaps_any(probe, skip):
-            pp = pcb.unit_poly(probe, safe)
-            return any(
-                j != skip and pp.distance(pcb.unit_poly(o, safe)) < 0.2
-                for j, o in enumerate(leds)
-            )
+            def overlaps_any(probe, skip):
+                pp = pcb.unit_poly(probe, safe)
+                return any(
+                    j != skip and pp.distance(pcb.unit_poly(o, safe)) < 0.2
+                    for j, o in enumerate(leds)
+                )
 
-        for i, led in enumerate(leds):
-            if on_board(led):
-                continue
-            # Scan the whole board's bounds — the standard square first, so
-            # relocated units land near the middle before drifting outward.
-            found = None
-            spans = [(3.5, 17.0, 3.5, 17.5),
-                     (safe[1] + 2, safe[3] - 2, safe[0] + 2, safe[2] - 2)]
-            for y_lo, y_hi, x_lo, x_hi in spans:
-                y = y_lo
-                while y <= y_hi and found is None:
-                    x = x_lo
-                    while x <= x_hi:
-                        probe = _replace(led, x=x, y=y)
-                        cx, cy = pcb.clamp_led_obj(probe, safe)
-                        probe = _replace(probe, x=cx, y=cy)
-                        if (on_board(probe) and not overlaps_any(probe, i)
-                                and not pcb.pad_conflict(probe, pins, safe)):
-                            found = probe
-                            break
-                        x += 1.1
-                    y += 1.1
+            for i, led in enumerate(leds):
+                if on_board(led):
+                    continue
+                # Scan the whole board's bounds — the standard square first, so
+                # relocated units land near the middle before drifting outward.
+                found = None
+                spans = [(3.5, 17.0, 3.5, 17.5),
+                         (safe[1] + 2, safe[3] - 2, safe[0] + 2, safe[2] - 2)]
+                for y_lo, y_hi, x_lo, x_hi in spans:
+                    y = y_lo
+                    while y <= y_hi and found is None:
+                        x = x_lo
+                        while x <= x_hi:
+                            probe = _replace(led, x=x, y=y)
+                            cx, cy = pcb.clamp_led_obj(probe, safe)
+                            probe = _replace(probe, x=cx, y=cy)
+                            if (on_board(probe) and not overlaps_any(probe, i)
+                                    and not pcb.pad_conflict(probe, pins, safe)):
+                                found = probe
+                                break
+                            x += 1.1
+                        y += 1.1
+                    if found is not None:
+                        break
                 if found is not None:
-                    break
-            if found is not None:
-                leds[i] = found
-        stranded = [i for i, led in enumerate(leds) if not on_board(led)]
-        if stranded:
-            return {
-                "error": f"LED {stranded[0] + 1} does not fit on this board shape — "
-                         "move it, remove it, or enlarge the shape"
-            }, 400
+                    leds[i] = found
+            stranded = [i for i, led in enumerate(leds) if not on_board(led)]
+            if stranded:
+                return {
+                    "error": f"LED {stranded[0] + 1} does not fit on this board shape — "
+                             "move it, remove it, or enlarge the shape"
+                }, 400
+    except _GEOMETRY_ERRORS:
+        return {"error": "could not place the LEDs on this board — check for "
+                          "missing or out-of-range x/y, rotation or advanced "
+                          "offset values"}, 400
 
     texts = []
     try:
@@ -890,113 +1096,120 @@ def _generate_impl(render: bool):
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
         return {"error": "could not render a text"}, 400
 
-    # Artwork layers. Silk/copper decorate the front, so front parts and
-    # text carve them. Glow/bare windows cut copper from BOTH pours, so they
-    # must stay clear of every unit (either side) and give the connector
-    # pads a wider berth to keep them solidly attached to the pours.
-    kept_pads = [(x, y) for num, x, y, _net, _row in pcb.CONNECTOR_PADS
-                 if num in pins]
-    # Per-face decor keepouts (pads + that face's LED units); vector text can
-    # sit on either face, while image art stays front-only.
-    # The printed pin captions live on both silks — art keeps clear of them
-    # exactly like it keeps clear of the pads.
-    captions = [RectKeepout(*b) for b in pcb.caption_boxes(pins)]
-    decor_base = {
-        side: [CircleKeepout(x, y, 1.65) for x, y in kept_pads]
-        + captions
-        + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
-           if led.side == side]
-        + [_reverse_hole_keepout(led, safe) for led in leds
-           if led.side != side and led.reverse]
-        # "LED on the other side" puts that half of the unit on the far face,
-        # with a via in each of its pads: art on this face has to clear it too.
-        + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
-           if led.side != side and led.farled]
-        # Through-hole LED pads penetrate both faces: far-side decor keeps
-        # clear of the pad annuli (server parity with eraseArtKeepouts).
-        + [CircleKeepout(x, y, r + 0.5)
-           for led in leds if led.side != side
-           for x, y, r in pcb.th_pad_circles(led, safe)]
-        for side in ("front", "back")
-    }
-    bridges = pcb.unit_bridges(
-        pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds), safe
-    )
-    # A window has to keep clear of anything whose copper it would cut. A glow
-    # window cuts both faces, so it avoids every unit. A bare window that opens
-    # one face only cuts that face, so it need only avoid units mounted there —
-    # plus whatever crosses the board regardless (plated pads, routed holes, a
-    # LED sitting on the far side). That is what lets a back-only window run
-    # right under a part mounted on the front.
-    _window_base = ([CircleKeepout(x, y, 2.0) for x, y in kept_pads] + captions)
-
-    def _crossers(face: str) -> list:
-        out: list = []
-        for led in leds:
-            if led.side == face:
-                continue
-            g = pcb.led_geometry(led)
-            if led.farled and not g["hole"] and "drill" not in pcb.PKG[g["pkg"]]:
-                out.append(_led_keepout(led, safe, pins, leds, outline_rings))
-                continue
-            if led.reverse:
-                out.append(_reverse_hole_keepout(led, safe))
-            out += [CircleKeepout(x, y, r + 0.5)
-                    for x, y, r in pcb.th_pad_circles(led, safe)]
-        return out
-
-    def _face_keepouts(face: str) -> list:
-        return (_window_base
-                + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
-                   if led.side == face]
-                + _crossers(face)
-                + [_window_corridor(led, safe) for i, led in enumerate(leds)
-                   if led.side == face and None in bridges[i].values()])
-
-    # glow, and a bare window open on both faces
-    window_keepouts: list = (
-        _window_base
-        + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds]
-        + [_window_corridor(led, safe) for i, led in enumerate(leds)
-           if None in bridges[i].values()]
-    )
-    bare_keepouts = {face: _face_keepouts(face) for face in ("front", "back")}
-    # Windows stay 1.6 mm off the board edge so the copper pours keep a
-    # continuous perimeter ring (pcb._fill_geometry enforces this too).
-    window_board = (1.26, 1.26, 19.06, 19.06)
-    art_board = (0.16, 0.16, 20.16, 20.16)
-    if outline_poly is not None:
-        b = outline_poly.bounds
-        art_board = (
-            min(0.16, b[0]), min(0.16, b[1]), max(20.16, b[2]), max(20.16, b[3])
+    # Same story as the unit placement above: every keepout here is shapely
+    # geometry derived from user numbers, and a degenerate one used to escape
+    # as a 500 from outside every `try` (defect #6).
+    try:
+        # Artwork layers. Silk/copper decorate the front, so front parts and
+        # text carve them. Glow/bare windows cut copper from BOTH pours, so they
+        # must stay clear of every unit (either side) and give the connector
+        # pads a wider berth to keep them solidly attached to the pours.
+        kept_pads = [(x, y) for num, x, y, _net, _row in pcb.CONNECTOR_PADS
+                     if num in pins]
+        # Per-face decor keepouts (pads + that face's LED units); vector text can
+        # sit on either face, while image art stays front-only.
+        # The printed pin captions live on both silks — art keeps clear of them
+        # exactly like it keeps clear of the pads.
+        captions = [RectKeepout(*b) for b in pcb.caption_boxes(pins)]
+        decor_base = {
+            side: [CircleKeepout(x, y, 1.65) for x, y in kept_pads]
+            + captions
+            + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
+               if led.side == side]
+            + [_reverse_hole_keepout(led, safe) for led in leds
+               if led.side != side and led.reverse]
+            # "LED on the other side" puts that half of the unit on the far face,
+            # with a via in each of its pads: art on this face has to clear it too.
+            + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
+               if led.side != side and led.farled]
+            # Through-hole LED pads penetrate both faces: far-side decor keeps
+            # clear of the pad annuli (server parity with eraseArtKeepouts).
+            + [CircleKeepout(x, y, r + 0.5)
+               for led in leds if led.side != side
+               for x, y, r in pcb.th_pad_circles(led, safe)]
+            for side in ("front", "back")
+        }
+        bridges = pcb.unit_bridges(
+            pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds), safe
         )
-        window_board = (
-            art_board[0] + 1.1, art_board[1] + 1.1, art_board[2] - 1.1, art_board[3] - 1.1
+        # A window has to keep clear of anything whose copper it would cut. A glow
+        # window cuts both faces, so it avoids every unit. A bare window that opens
+        # one face only cuts that face, so it need only avoid units mounted there —
+        # plus whatever crosses the board regardless (plated pads, routed holes, a
+        # LED sitting on the far side). That is what lets a back-only window run
+        # right under a part mounted on the front.
+        _window_base = ([CircleKeepout(x, y, 2.0) for x, y in kept_pads] + captions)
+
+        def _crossers(face: str) -> list:
+            out: list = []
+            for led in leds:
+                if led.side == face:
+                    continue
+                g = pcb.led_geometry(led)
+                if led.farled and not g["hole"] and "drill" not in pcb.PKG[g["pkg"]]:
+                    out.append(_led_keepout(led, safe, pins, leds, outline_rings))
+                    continue
+                if led.reverse:
+                    out.append(_reverse_hole_keepout(led, safe))
+                out += [CircleKeepout(x, y, r + 0.5)
+                        for x, y, r in pcb.th_pad_circles(led, safe)]
+            return out
+
+        def _face_keepouts(face: str) -> list:
+            return (_window_base
+                    + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds
+                       if led.side == face]
+                    + _crossers(face)
+                    + [_window_corridor(led, safe) for i, led in enumerate(leds)
+                       if led.side == face and None in bridges[i].values()])
+
+        # glow, and a bare window open on both faces
+        window_keepouts: list = (
+            _window_base
+            + [_led_keepout(led, safe, pins, leds, outline_rings) for led in leds]
+            + [_window_corridor(led, safe) for i, led in enumerate(leds)
+               if None in bridges[i].values()]
         )
-        # Clip artwork to the actual board shape.
-        outside = _OutsideKeepout(outline_poly.buffer(-0.35))
-        decor_base["front"].append(outside)
-        decor_base["back"].append(outside)
-        window_keepouts.append(_OutsideKeepout(outline_poly.buffer(-1.6)))
+        bare_keepouts = {face: _face_keepouts(face) for face in ("front", "back")}
+        # Windows stay 1.6 mm off the board edge so the copper pours keep a
+        # continuous perimeter ring (pcb._fill_geometry enforces this too).
+        window_board = (1.26, 1.26, 19.06, 19.06)
+        art_board = (0.16, 0.16, 20.16, 20.16)
+        if outline_poly is not None:
+            b = outline_poly.bounds
+            art_board = (
+                min(0.16, b[0]), min(0.16, b[1]), max(20.16, b[2]), max(20.16, b[3])
+            )
+            window_board = (
+                art_board[0] + 1.1, art_board[1] + 1.1, art_board[2] - 1.1, art_board[3] - 1.1
+            )
+            # Clip artwork to the actual board shape.
+            outside = _OutsideKeepout(outline_poly.buffer(-0.35))
+            decor_base["front"].append(outside)
+            decor_base["back"].append(outside)
+            window_keepouts.append(_OutsideKeepout(outline_poly.buffer(-1.6)))
 
-    # Front texts that put ink on the mask carve the art beneath them (their
-    # real ink bounds for TTF texts). Window-material texts ARE windows —
-    # they carve nothing.
-    def _text_rect(ti: int, t: pcb.Text) -> RectKeepout:
-        g = text_geoms.get(ti)
-        if g is not None:
-            gb = g.bounds
-            return RectKeepout(gb[0] - 0.4, gb[1] - 0.4, gb[2] + 0.4, gb[3] + 0.4)
-        return _text_keepout(t)
+        # Front texts that put ink on the mask carve the art beneath them (their
+        # real ink bounds for TTF texts). Window-material texts ARE windows —
+        # they carve nothing.
+        def _text_rect(ti: int, t: pcb.Text) -> RectKeepout:
+            g = text_geoms.get(ti)
+            if g is not None:
+                gb = g.bounds
+                return RectKeepout(gb[0] - 0.4, gb[1] - 0.4, gb[2] + 0.4, gb[3] + 0.4)
+            return _text_keepout(t)
 
-    carve_rects = {
-        side: [
-            _text_rect(ti, t) for ti, t in enumerate(texts)
-            if t.side == side and t.material in ("silk", "copper")
-        ]
-        for side in ("front", "back")
-    }
-    decor_of = {s: decor_base[s] + carve_rects[s] for s in ("front", "back")}
+        carve_rects = {
+            side: [
+                _text_rect(ti, t) for ti, t in enumerate(texts)
+                if t.side == side and t.material in ("silk", "copper")
+            ]
+            for side in ("front", "back")
+        }
+        decor_of = {s: decor_base[s] + carve_rects[s] for s in ("front", "back")}
+    except _GEOMETRY_ERRORS:
+        return {"error": "could not work out where the artwork may go — check "
+                          "the LED and text positions, rotations and sizes"}, 400
 
     try:
         art_meta = list(params.get("art", []))[:MAX_ART]
@@ -1090,17 +1303,19 @@ def _generate_impl(render: bool):
                     "invert": bool(meta.get("invert", False)),
                     "material": material,
                 }
-            data = upload.read()
+            data = _read_upload(f"art{i}")
             if svgart.is_svg(data):
                 # Exact vector pipeline; the browser's raster render of the
                 # same SVG is the fallback for gradients etc.
                 try:
+                    _check_svg_complexity(data)
                     classified.append((i, _svg_classify(data, **mode_kw, **common), window, art_side))
                     continue
-                except Exception:  # noqa: BLE001 — fall back to the raster render
-                    fb = request.files.get(f"art{i}_raster")
-                    data = fb.read() if fb else None
+                except Exception as exc:  # any parse issue: fall back to the raster render
+                    data = _read_upload(f"art{i}_raster")
                     if data is None:
+                        if isinstance(exc, _TooComplex):
+                            raise
                         raise ValueError("could not parse an SVG artwork layer") from None
             classified.append((i, classify_image(data, **mode_kw, **common), window, art_side))
 
@@ -1192,7 +1407,9 @@ def _generate_impl(render: bool):
         for key, src, side in text_entries:
             if "silk" in src:
                 emit(key, src, "silk", silk_carve(decor_base[side], side), art_board, side)
-    except (OSError, ValueError, TypeError, AttributeError, Image.DecompressionBombError):
+    except _TooComplex as exc:
+        return {"error": f"artwork: {exc}"}, 400
+    except _GEOMETRY_ERRORS:
         return {"error": "could not process an artwork image"}, 400
     art_layers = [layer for i in sorted(parts) for layer in parts[i]]
 
@@ -1221,7 +1438,7 @@ def _generate_impl(render: bool):
     resolved, unroutable = pcb.resolve_novia(spec, safe)
     if unroutable:
         i = unroutable[0]
-        route = pcb.novia_route(leds[i], rows, safe, leds, outline=outline_rings)
+        route = pcb.novia_route(leds[i], pins, safe, leds, outline=outline_rings)
         if route and route.get("manual") and route.get("tight"):
             # Their own bends are the problem, so say that rather than blaming
             # the via setting they deliberately turned off.
