@@ -2890,9 +2890,11 @@ Open and finish in KiCad (7 or newer)
    *warnings* are possible where you deliberately put text or art over a pad:
    those are cosmetic, and the fab clips the overlap when it prints.
 4. File > Fabrication Outputs > Gerbers (plot all layers + drill files),
-   zip them, and upload to your fab (JLCPCB, PCBWay, OSH Park, ...).
-   1.6 mm thickness, 2 layers, surface finish as noted above (the finish
-   sets whether exposed metal comes out gold or silver).
+   zip them, and upload to your fab (JLCPCB, PCBWay, OSH Park, ...) —
+   or use the designer's "Gerbers for fab" button, which plots this exact
+   package for you. OSH Park also accepts the .kicad_pcb itself.
+   Order 1.6 mm thickness, 2 layers, surface finish as noted above (the
+   finish sets whether exposed metal comes out gold or silver).
 
 Assembly and how the wiring works
 ---------------------------------

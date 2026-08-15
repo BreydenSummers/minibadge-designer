@@ -1747,3 +1747,207 @@ def test_a_3d_export_that_produces_no_model_is_still_reported_as_a_failure(
     body = resp.get_json()
     assert isinstance(body, dict) and body.get("error"), (
         f"failure carried no error message: {body!r}")
+
+
+# ---------------------------------------------------------------------------
+# The fab Gerber package (POST /gerbers)
+#
+# DRC never sees a Gerber: everything in this section is invisible to both
+# in-process invariants and `kicad-cli pcb drc`, because those read the
+# .kicad_pcb.  The only oracle for "the fab receives the right board" is the
+# plotted package itself.
+# ---------------------------------------------------------------------------
+
+def _fab_params():
+    """A design deliberately off every default the plot path reads: TH back
+    LED, rotated inline 0603, HASL, black mask, half the pins dropped."""
+    return _params(
+        name="Fab Test!", mask_color="black", finish="hasl",
+        pins=["1", "2", "15", "16"], art=[],
+        leds=[
+            {"x": 6, "y": 13, "color": "green", "size": "3mm", "side": "back"},
+            {"x": 13, "y": 7, "color": "red", "size": "0603",
+             "layout": "inline", "rot": 90},
+        ],
+        texts=[{"text": "fab", "x": 10, "y": 17, "size": 1.2, "side": "back"}],
+    )
+
+
+@pytest.mark.webapp
+@pytest.mark.kicad
+@pytest.mark.needs("kicad")
+def test_fab_gerber_zip_uploads_to_a_board_house_as_is(client, kicad_cli):
+    """The /gerbers zip is the whole fab handshake: flat, one file per layer
+    plus a merged drill file, in the one dialect all the popular fabs accept
+    (Protel extensions, plain RS-274X, metric decimal Excellon).
+
+    A missing member, a folder wrapper, or X2 attributes each break a real
+    upload: JLCPCB maps layers by the Protel extension, PCBWay documents that
+    its CAM mishandles X2, and a zip whose mask or outline never arrived gets
+    fabbed as a wrong-but-real board.
+    """
+    import re as _re
+    import time
+
+    started = time.monotonic()
+    resp = client.post(
+        "/gerbers",
+        data={"params": json.dumps(_fab_params())},
+        content_type="multipart/form-data",
+    )
+    elapsed = time.monotonic() - started
+    assert resp.status_code == 200, resp.get_data()[:300]
+    assert elapsed <= 30, f"fab export took {elapsed:.1f}s — hang territory"
+    assert resp.headers.get("Content-Disposition", "").endswith("-gerbers.zip")
+
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    names = zf.namelist()
+    assert names, "the fab zip arrived empty"
+    assert all("/" not in n for n in names), (
+        f"fab zip must be flat — board-house upload forms read the archive "
+        f"root: {names}")
+    # The board-house contract, stated independently of webapp._FAB_LAYERS /
+    # _FAB_EXTENSIONS: if someone trims that constant, this goes red.
+    required = {"gtl", "gbl",          # copper
+                "gts", "gbs",          # soldermask
+                "gto", "gbo",          # silkscreen
+                "gtp", "gbp",          # paste
+                "gm1",                 # board outline
+                "drl"}                 # drill
+    have = {n.rsplit(".", 1)[-1].lower() for n in names}
+    assert required <= have, f"fab zip is missing layers: {required - have}"
+    assert have <= required | {"gbrjob"}, (
+        f"unexpected extras in the fab zip may confuse a CAM auto-loader: "
+        f"{have - required - {'gbrjob'}}")
+
+    drills = [n for n in names if n.endswith(".drl")]
+    assert len(drills) == 1, (
+        f"PTH and NPTH must ship merged in one Excellon file, got {drills}")
+    drl = zf.read(drills[0]).decode()
+    assert "METRIC" in drl, "drill file is not metric — every fab guide asks for mm"
+    # Fab-critical hole sizes, stated literally (not read back from pcb.py):
+    # the 0.30 mm via drill is the cheap-tier minimum this project targets,
+    # and 0.95 mm is the minibadge connector's plated hole.
+    tools = [l for l in drl.splitlines() if _re.match(r"T\d+C", l)]
+    assert any("C0.300" in t for t in tools), f"via drill missing: {tools}"
+    assert any("C0.950" in t for t in tools), f"connector drill missing: {tools}"
+
+    for n in names:
+        if n.endswith((".drl", ".gbrjob")):
+            continue
+        text = zf.read(n).decode()
+        assert "%FSLAX" in text, f"{n} lacks an RS-274X format header"
+        assert "%TF" not in text, (
+            f"{n} carries X2 attributes — PCBWay's CAM is documented to "
+            "mishandle them; the package must stay plain RS-274X")
+    edge = zf.read(next(n for n in names if n.endswith(".gm1"))).decode()
+    assert "D01*" in edge, "the board outline plotted empty"
+
+
+@pytest.mark.webapp
+@pytest.mark.kicad
+@pytest.mark.needs("kicad")
+def test_gerbers_are_refused_when_zones_cannot_be_refilled(
+        client, kicad_cli, tmp_path, monkeypatch):
+    """A server that cannot refill the pours must refuse the fab package, not
+    ship it: the .kicad_pcb's fills carry fracture slits to the board edge (a
+    file-format constraint), and plotting them puts hairline copper gaps
+    across both power planes on the physical boards.
+
+    Only the environment is substituted: a poisoned PYTHONPATH shadows pcbnew
+    for every interpreter the refill could reach (the subprocess inherits it,
+    and PYTHONPATH outranks site-packages), so no pcbnew exists anywhere as
+    far as this request is concerned.  The locator, route, plotting tool and
+    refusal logic all run for real — which is the point: if the refusal is
+    ever dropped, the real kicad-cli plots the slit board successfully and
+    this test sees the 200 it must never see.
+    """
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    (poison / "pcbnew.py").write_text(
+        'raise ImportError("pcbnew unavailable (poisoned by '
+        'test_gerbers_are_refused_when_zones_cannot_be_refilled)")\n')
+    monkeypatch.setenv("PYTHONPATH", str(poison))
+
+    resp = client.post(
+        "/gerbers",
+        data={"params": json.dumps(_fab_params())},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code >= 500, (
+        f"a fab package the server could not refill answered "
+        f"{resp.status_code} — slit copper may have shipped")
+    body = resp.get_json()
+    assert isinstance(body, dict) and body.get("error"), (
+        f"the refusal carried no error message: {body!r}")
+
+
+@pytest.mark.webapp
+@pytest.mark.kicad
+@pytest.mark.slow  # two real plots and a pcbnew refill
+@pytest.mark.needs("kicad")
+def test_fab_copper_is_the_refilled_fill_not_the_slit_open_form(
+        client, kicad_cli, tmp_path):
+    """The copper in the fab package is what KiCad's own filler produces, not
+    the slit-open form stored in the .kicad_pcb.
+
+    Differential oracle: plot the very board /generate ships, without a
+    refill, with the same plot flags — if /gerbers ever skips the refill its
+    copper comes out byte-identical to that baseline (gerber plots are
+    deterministic modulo G04 comment lines; measured: two plots of one board
+    agree exactly, while slit vs refilled differ by hundreds of outline
+    vertices).  Equality here therefore means slit copper shipped.
+
+    Only the copper layers are plotted for the baseline, with the
+    copper-relevant flags copied from the endpoint (no-x2, no-netlist).  If
+    the endpoint's plot dialect ever drifts from these, the two plots become
+    trivially different and this test silently loses power rather than going
+    red — keep them in step when changing the export.
+    """
+    import subprocess
+
+    params = _params(
+        name="slitcheck", mask_color="purple", finish="enig", art=[
+            # A glow window voids both pours (kind layers need no upload), so
+            # the shipped fill is guaranteed to carry slits to refill away.
+            {"kind": "circle", "material": "glow", "cx": 10.16, "cy": 10.16,
+             "w": 6, "h": 6},
+        ],
+        leds=[{"x": 6, "y": 6, "color": "red", "size": "1206"},
+              {"x": 14, "y": 14, "color": "blue", "side": "back"}])
+    data = {"params": json.dumps(params)}
+
+    gen = client.post("/generate", data=dict(data),
+                      content_type="multipart/form-data")
+    assert gen.status_code == 200, gen.get_data()[:300]
+    board = zipfile.ZipFile(io.BytesIO(gen.data)).read(
+        "slitcheck/slitcheck.kicad_pcb")
+    src = tmp_path / "slitcheck.kicad_pcb"
+    src.write_bytes(board)
+    run = subprocess.run(
+        [kicad_cli, "pcb", "export", "gerbers", "-o", str(tmp_path) + "/",
+         "--layers", "F.Cu,B.Cu", "--no-x2", "--no-netlist", str(src)],
+        capture_output=True, timeout=120)
+    assert run.returncode == 0, run.stderr[-300:]
+
+    fab = client.post("/gerbers", data=dict(data),
+                      content_type="multipart/form-data")
+    assert fab.status_code == 200, (
+        f"the fab endpoint refused a board /generate accepted: "
+        f"{fab.get_data()[:300]}")
+    zf = zipfile.ZipFile(io.BytesIO(fab.data))
+
+    def stripped(text: str) -> str:
+        # G04 lines carry the plot timestamp; everything else is geometry.
+        return "\n".join(l for l in text.splitlines()
+                         if not l.startswith("G04"))
+
+    for ext, layer in (("gtl", "F_Cu"), ("gbl", "B_Cu")):
+        baseline = stripped(
+            (tmp_path / f"slitcheck-{layer}.{ext}").read_text())
+        shipped = stripped(zf.read(
+            next(n for n in zf.namelist() if n.endswith(f".{ext}"))).decode())
+        assert "%FSLAX" in shipped and "%FSLAX" in baseline
+        assert shipped != baseline, (
+            f"{layer}: the fab package's copper is identical to a no-refill "
+            "plot — the zone refill was skipped and slit copper shipped")
