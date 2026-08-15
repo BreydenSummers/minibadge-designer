@@ -999,6 +999,42 @@ def test_a_far_side_led_leaves_no_ghost_pads_on_either_face(client):
         "the LED ships wired to nothing")
 
 
+@pytest.mark.slow  # two full fill computations (webapp accept + direct refuse)
+def test_a_far_side_led_without_its_power_via_still_downloads(client):
+    # "No power via" plus "LED on the other side", under a window: the GND
+    # contact on the resistor face is just the via-in-pad collar, tied to the
+    # plane by its perimeter bridge. resolve_novia's first pass judged the
+    # fill WITHOUT bridges, saw an isolated collar, and refused the download
+    # — 78 of 100 reasonable placements 400'd while the 2D preview showed a
+    # working route. The pass now unions the unit's bridge, like pass two
+    # always did.
+    params = _params(
+        name="nvf",
+        leds=[{"x": 6, "y": 6, "color": "red", "side": "back",
+               "layout": "inline", "novia": True, "farled": True}],
+        art=[{"kind": "rect", "material": "bare",
+              "cx": 9.2, "cy": 8.4, "w": 10.5, "h": 10.5}],
+    )
+    resp = client.post("/generate", data={"params": json.dumps(params)},
+                       content_type="multipart/form-data")
+    assert resp.status_code == 200, (
+        f"a buildable no-power-via far-side board was refused: {resp.data[:200]}")
+    invariants.assert_parses(
+        zipfile.ZipFile(io.BytesIO(resp.data)).read("nvf/nvf.kicad_pcb").decode())
+    # Contrast: a window drawn WITHOUT the webapp's pad halos really does
+    # strand the collar's ring fragment (measured: the shipped board has 3
+    # unconnected items), and that board must still be refused.
+    from minibadge_designer import pcb
+
+    broken = pcb.BadgeSpec(
+        leds=[pcb.Led(x=10, y=10, side="back", novia=True, farled=True)],
+        art=[pcb.ArtLayer("bare", rects=[(2.0, 2.0, 16.0, 16.0)])])
+    _leds, bad = pcb.resolve_novia(broken)
+    assert bad == [0], (
+        "a genuinely stranded no-power-via unit slipped past resolve_novia — "
+        "the user downloads a board whose LED is wired to nothing")
+
+
 def _window_board(client, tenting):
     """A back inline unit under a full-coverage bare window, generated for
     the mask-cover tests: its 3V3 bridge and its via both cross the opening."""
