@@ -1802,11 +1802,26 @@ function allBridges() { // {F: seg|null, B: seg|null} per LED, memoized
       F: front ? ["pad_res_in", g.resIn] : (L.novia ? null : ["via", g.viaB]),
       B: front ? (L.novia ? null : ["via", g.viaF]) : ["pad_led_k", g.ledK],
     };
+    const p = PKG[g.pkg];
+    const th = !!p.drill;
+    const far = !!L.farled && !g.hole && !th;
     const out = {};
     for (const [layer, spec] of Object.entries(starts)) {
       if (!spec) continue;   // via-less: nothing of this unit on the far layer
       const [lbl, off] = spec;
-      out[layer] = bridgeRoute(unitPoint(L, off[0], off[1]), pieces[i],
+      let own = pieces[i];
+      if (lbl === "via") {
+        // Mirrors pcb.unit_bridges: this bridge runs on the unit's FAR layer,
+        // where its SMD pads and traces are not copper at all. Treating them
+        // as obstacles walled the via in (an inline unit's via sits inside
+        // the resistor pad's inflated quad) and forced the 2 mm corridor
+        // fallback. Only board-penetrating pieces block this layer: the
+        // reverse hole, TH pad annuli, and a far-side LED's via-in-pads.
+        const keep = new Set(th || far ? ["hole", "pad_led_k", "pad_led_a"]
+                                       : ["hole"]);
+        own = own.filter(([l]) => keep.has(l));
+      }
+      out[layer] = bridgeRoute(unitPoint(L, off[0], off[1]), own,
                                BRIDGE_EXCLUDE[lbl], obstacles, rings);
     }
     return out;
