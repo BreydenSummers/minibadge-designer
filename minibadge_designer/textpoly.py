@@ -107,10 +107,24 @@ def _contours_to_geom(contours):
 
 @lru_cache(maxsize=None)
 def _load_font(key: str):
+    """Parse one bundled face. Owns no OS file descriptor once it returns.
+
+    The `with` is load-bearing, not tidiness. This cache is unbounded and
+    never evicted, so anything the returned TTFont still holds is held for
+    the life of the process -- and a Flask worker that has rendered text in
+    every bundled face would then be sitting on one descriptor per face that
+    nothing can ever reclaim, until the worker runs out and starts refusing
+    requests. Handing TTFont a path instead lets *it* open the file, and
+    whether it closes that handle is an internal detail of the non-lazy
+    read path (ttFont.py: `if not self.lazy: ... if closeStream: file.close()`);
+    a `lazy=True` added later for speed silently keeps it open forever. Open
+    it here and the guarantee is ours to keep.
+    """
     from fontTools.ttLib import TTFont
 
-    label, fname = FONTS[key]
-    font = TTFont(str(FONT_DIR / fname))
+    _label, fname = FONTS[key]
+    with (FONT_DIR / fname).open("rb") as fh:
+        font = TTFont(fh)  # non-lazy: the whole file is in memory before we exit
     upm = font["head"].unitsPerEm
     cap = getattr(font.get("OS/2"), "sCapHeight", 0) or 0
     if cap <= 0:

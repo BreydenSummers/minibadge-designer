@@ -100,19 +100,34 @@ markers = [
 ]
 
 filterwarnings = [
+    # Bare `error`: every warning fails the run, with no category demoted.
+    #
+    # Getting here took untangling a misattribution. Defect #11 was filed
+    # against textpoly._load_font, and that was wrong: `TTFont(path)` on the
+    # default non-lazy path reads the file into a BytesIO and closes the
+    # descriptor inside __init__ (fontTools 4.63, ttFont.py:303-315), and
+    # rendering all twelve bundled faces under `-W error::ResourceWarning` is
+    # silent. _load_font now opens the file itself under a `with` so that stays
+    # true whatever fontTools does next; tests/test_textpoly_resources.py holds
+    # it.
+    #
+    # The warning the suite really emitted came from `/fonts/<key>.ttf`
+    # (webapp.py:500-505), which answers with send_file. Its FileWrapper is
+    # closed by whoever consumes the WSGI iterable -- a real server always does
+    # per PEP 3333, the werkzeug *test client* does not -- so a TTF opened by a
+    # test that never closed its response was finalised at an arbitrary GC point
+    # and blamed on whichever innocent test happened to be running (measured 5/5
+    # in-file, 0/1 alone). The fix is one `resp.close()` in the test, not a
+    # demotion here.
+    #
+    # Two things to know before adding an exemption back. Uploads in tests must
+    # stay under ~500 KB: werkzeug's test client spools larger request bodies to
+    # a temp file it does not close. And PytestUnraisableExceptionWarning must
+    # keep erroring -- it is how an exception swallowed inside any __del__ or
+    # callback would otherwise reach us, which is exactly the class of bug that
+    # produced this comment.
     "error",
-    # DO NOT delete these two without first fixing defect #11: the TTF handle
-    # that textpoly._load_font holds in an lru_cache is never closed, so it is
-    # released at an arbitrary GC point. Under `-W error` pytest re-raises it
-    # as PytestUnraisableExceptionWarning against whichever *innocent* test
-    # happens to be running (reproduces 5/5 in-file, 0/1 alone). Blanket
-    # `error` therefore ships a permanently red, order-dependent suite.
-    # Once textpoly._load_font closes its file, delete these two lines: the
-    # suite emits no other warnings.
-    "default::ResourceWarning",
-    "default::pytest.PytestUnraisableExceptionWarning",
 ]
-
 [tool.coverage.run]
 branch = true
 source = ["minibadge_designer"]

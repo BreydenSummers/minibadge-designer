@@ -938,11 +938,14 @@ def _quads_overlap(a: list, b: list, gap: float = 0.0) -> bool:
     return True
 
 
-def _ray_exit(sx: float, sy: float, dx: float, dy: float, rings) -> float | None:
-    """Distance along (dx,dy) from (sx,sy) to the first outline crossing.
+def _ray_exit_edge(sx: float, sy: float, dx: float, dy: float, rings):
+    """First outline crossing along (dx,dy) from (sx,sy): (distance, edge).
 
     Rings are closed point lists (exterior first, then holes) — a hole
     boundary counts as an exit too, so bridges never span board cut-outs.
+    The edge comes back with the distance because a pullback measured along
+    the ray is not a clearance: only the angle the ray makes with the edge it
+    meets turns one into the other.
     """
     best = None
     for ring in rings:
@@ -958,8 +961,8 @@ def _ray_exit(sx: float, sy: float, dx: float, dy: float, rings) -> float | None
             t = (rx * ay - ry * ax) / den
             s = (dx * ay - dy * ax) / den
             if t > 1e-9 and -1e-9 <= s <= 1 + 1e-9:
-                if best is None or t < best:
-                    best = t
+                if best is None or t < best[0]:
+                    best = (t, ((px, py), (qx, qy)))
     return best
 
 
@@ -988,13 +991,30 @@ def _bridge_route(start, own_pieces, skip_labels, obstacles, rings):
     for k in range(16):
         a = math.radians(k * 22.5)
         dx, dy = math.cos(a), math.sin(a)
-        t = _ray_exit(sx, sy, dx, dy, rings)
-        if t is None or t - BRIDGE_INSET < BRIDGE_MIN:
+        hit = _ray_exit_edge(sx, sy, dx, dy, rings)
+        if hit is None:
             continue
-        cands.append((t, k, dx, dy))
+        t, ((e0x, e0y), (e1x, e1y)) = hit
+        # BRIDGE_INSET is a CLEARANCE — how far the endpoint has to sit back
+        # from the outline — so it has to be taken perpendicular to the edge
+        # the ray meets, not along the ray. The scan walks 16 directions
+        # 22.5 deg apart, so a ray meeting a horizontal edge at 22.5 deg used
+        # to pull back only 0.8*sin(22.5) = 0.306 mm of real clearance; less
+        # TRACK_W/2 that is 0.156 mm of copper-to-edge against a 0.2 mm rule,
+        # which is a fab reject on an utterly ordinary placement.
+        ex_, ey_ = e1x - e0x, e1y - e0y
+        elen = math.hypot(ex_, ey_)
+        if elen < 1e-12:
+            continue
+        sin_a = abs(dx * ey_ - dy * ex_) / elen   # sin of ray-to-edge angle
+        if sin_a < 1e-9:
+            continue  # running along the edge; no pullback is enough
+        ln = t - BRIDGE_INSET / sin_a
+        if ln < BRIDGE_MIN:
+            continue
+        cands.append((t, k, dx, dy, ln))
     cands.sort(key=lambda c: (c[0], c[1]))
-    for t, _k, dx, dy in cands:
-        ln = t - BRIDGE_INSET
+    for t, _k, dx, dy, ln in cands:
         ex, ey = sx + dx * ln, sy + dy * ln
         nx, ny = -dy * 0.5, dx * 0.5
         swath = [(sx + nx, sy + ny), (ex + nx, ey + ny),
@@ -1022,7 +1042,8 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     placements and would make the preview lie, so unreachable units are
     reported instead; the caller refuses the download and says so.
     """
-    from shapely.geometry import Point
+    from shapely.geometry import LineString, Point
+    from shapely.ops import unary_union
 
     leds = list(spec.leds)
     if not any(led.novia for led in leds):
@@ -1030,6 +1051,13 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     if safe is None:
         safe = unit_safe(spec)
     problems: list[int] = []
+    fills: dict = {}
+
+    def islands(pour, layer):
+        if (pour, layer) not in fills:
+            fills[(pour, layer)] = _fill_geometry(pour, layer, spec)
+        return fills[(pour, layer)]
+
     for i, led in enumerate(leds):
         if not led.novia:
             continue
@@ -1039,6 +1067,10 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
         if route.get("tight"):
             problems.append(i)
             continue
+        # The channel this run cuts can fence the pour's own connector pads
+        # apart. That splits the whole RAIL, not just this unit — KiCad answers
+        # with unconnected_items on the net — so the unit's contact and every
+        # kept pad of its pour have to end up on one island.
         front = led.side != "back"
         layer, pour = ("F.Cu", "3V3") if front else ("B.Cu", "GND")
         g = led_geometry(led)
@@ -1047,10 +1079,58 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
         must = [(cx + ox, cy + oy)] + [
             (px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
             if pnet == pour and num in spec.pins]
-        polys = _fill_geometry(pour, layer, spec)
-        if not any(all(poly.distance(Point(*m)) < 0.7 for m in must) for poly in polys):
+        if not any(all(poly.distance(Point(*m)) < 0.7 for m in must)
+                   for poly in islands(pour, layer)):
             problems.append(i)
-    return leds, problems
+
+    # Then the question that check cannot ask: a channel is cut across a whole
+    # pour, and the unit it fences off is very often SOMEBODY ELSE. Asking only
+    # whether each via-less unit's own contact still reaches a pad missed the
+    # case entirely — two via-less runs can jointly enclose a third unit's
+    # ordinary via, and that third unit was never examined at all because it is
+    # not via-less. So walk every unit's rail contacts too.
+    bridges = unit_bridges(spec, safe)
+    for i, led in enumerate(leds):
+        if i in problems:
+            continue
+        g = led_geometry(led)
+        cx, cy = clamp_led_obj(led, safe)
+
+        def at(off, cx=cx, cy=cy, led=led):
+            rx, ry = _r(off[0], off[1], led.rot)
+            return (cx + rx, cy + ry)
+
+        front = led.side != "back"
+        # The two rail terminals, exactly as unit_bridges anchors them: a
+        # front unit feeds 3V3 into the resistor from the F.Cu pour and drops
+        # GND through its via; a back unit is the mirror image.
+        contacts = {
+            "F.Cu": (at(g["res_in"]) if front else at(g["via_back"]), "3V3"),
+            "B.Cu": (at(g["via_front"]) if front else at(g["led_k"]), "GND"),
+        }
+        if led.novia:
+            # No via: the far rail arrives through the connector pad the run
+            # lands on (or, for a front through-hole LED, through its own
+            # plated lead), so there is no far-layer terminal to strand.
+            contacts.pop("B.Cu" if front else "F.Cu", None)
+        for layer, (pt, pour) in contacts.items():
+            pads = [(px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
+                    if pnet == pour and num in spec.pins]
+            if not pads:
+                continue  # no rail on this badge at all; power_missing() says so
+            # The unit's perimeter bridge is real same-net copper on this
+            # layer and can be the only thing joining its island to the plane.
+            seg = bridges.get(i, {}).get(layer)
+            copper = unary_union(
+                list(islands(pour, layer))
+                + ([LineString(seg).buffer(TRACK_W / 2)] if seg else []))
+            if copper.is_empty or not any(
+                    part.distance(Point(*pt)) < 0.7
+                    and any(part.distance(Point(*q)) < 1.0 for q in pads)
+                    for part in getattr(copper, "geoms", [copper])):
+                problems.append(i)
+                break
+    return leds, sorted(problems)
 
 
 def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
@@ -1104,31 +1184,156 @@ def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
 def resolve_overlap(
     a: Led, b: Led, gap: float = 0.2,
     safe: tuple[float, float, float, float] | None = None,
+    pins=ALL_PINS,
 ) -> Led:
     """Return b, shifted if needed so its unit does not overlap a's.
 
     Units conflict even on opposite sides: each one's via penetrates both
     copper layers. The web UI prevents overlap during drag; this is the
     server-side backstop for hand-crafted requests.
+
+    Callers run this AFTER resolve_pad_overlap, so a slide that parks b back
+    on a connector pad quietly undoes the pad backstop and ships a short —
+    measured on two reverse 1206s at y=3.59, where the pad resolver moved the
+    second unit from x=16.49 to 13.63 and this routine put it straight back.
+    Landing on a pad is therefore a tiebreak, not a hard rule: the search runs
+    once refusing the kept pads and again without them, so separating the two
+    units still wins if nothing else can.
     """
     from dataclasses import replace
 
+    from shapely.geometry import Polygon
+    from shapely.geometry import box as sbox
+
+    if safe is None:
+        safe = UNIT_SAFE
     pa = unit_poly(a, safe)
     eps = 1e-6  # sliding to exactly `gap` separation must count as clear
     if unit_poly(b, safe).distance(pa) >= gap - eps:
         return b
+    # Hoisted out of the candidate loop: the rotated footprint corners and the
+    # kept pad keepouts do not depend on where the probe goes, and the search
+    # below can try several hundred probes.
+    _bg = led_geometry(b)
+    _bb = _bg["bbox"]
+    _corners = [_r(px, py, b.rot) for px, py in
+                ((_bb[0], _bb[1]), (_bb[2], _bb[1]),
+                 (_bb[2], _bb[3]), (_bb[0], _bb[3]))]
+    _ox0, _oy0, _ox1, _oy1 = _bbox_offsets_g(_bg, b.rot)
+    _keepouts = [sbox(*PAD_PAIRS[k]["keepout"]) for k in active_pairs(pins)]
+
+    def fits(x, y, avoid_pads=True):
+        # clamp_led_obj would silently pull the probe back onto the board, so
+        # a candidate outside the legal centre range is not a real choice.
+        if not (safe[0] - _ox0 <= x <= safe[2] - _ox1
+                and safe[1] - _oy0 <= y <= safe[3] - _oy1):
+            return None
+        poly = Polygon([(x + px, y + py) for px, py in _corners])
+        if poly.distance(pa) < gap - eps:
+            return None
+        if avoid_pads and any(poly.intersects(k) for k in _keepouts):
+            return None
+        return replace(b, x=x, y=y)
+
     ba, bb = led_unit_bbox(a, safe), led_unit_bbox(b, safe)
-    for x, y in (
-        (b.x + (ba[2] + gap - bb[0]), b.y),  # slide right
-        (b.x - (bb[2] - ba[0] + gap), b.y),  # slide left
-        (b.x, b.y + (ba[3] + gap - bb[1])),  # slide down
-        (b.x, b.y - (bb[3] - ba[1] + gap)),  # slide up
-    ):
-        probe = replace(b, x=x, y=y)
-        if clamp_led_obj(probe, safe) == (x, y):
-            if unit_poly(probe, safe).distance(pa) >= gap - eps:
+
+    def axis_slides(avoid):
+        for x, y in (
+            (b.x + (ba[2] + gap - bb[0]), b.y),  # slide right
+            (b.x - (bb[2] - ba[0] + gap), b.y),  # slide left
+            (b.x, b.y + (ba[3] + gap - bb[1])),  # slide down
+            (b.x, b.y - (bb[3] - ba[1] + gap)),  # slide up
+        ):
+            probe = fits(x, y, avoid)
+            if probe is not None:
                 return probe
-    return b  # no room; KiCad DRC will flag it
+        return None
+
+    # Pad avoidance is preferred at EQUAL displacement, never at the cost of
+    # a much bigger move: each stage is tried pad-free and then relaxed before
+    # the next, wider stage starts. Exhausting the whole search pad-first
+    # instead flung units across the board and measurably made three- and
+    # four-unit boards worse (271 -> 282 of 600) while fixing nothing extra.
+    for stage in (axis_slides,
+                  lambda avoid: _resolve_overlap_min_push(b, gap, safe, pa,
+                                                          fits, avoid)):
+        for avoid in (True, False):
+            found = stage(avoid)
+            if found is not None:
+                return found
+
+    # The ring walk interleaves the two passes instead of running twice: it is
+    # by far the most expensive stage, and "pad-free at this radius, else any
+    # at this radius" is the same preference for half the probes.
+    def place(x, y):
+        for avoid in (True, False):
+            probe = fits(x, y, avoid)
+            if probe is not None:
+                return probe
+        return None
+
+    return _resolve_overlap_rings(b, safe, place) or b
+
+
+def _resolve_overlap_min_push(b, gap, safe, pa, fits, avoid=True):
+    """Smallest translation that separates b's tight footprint from `pa`.
+
+    resolve_overlap's four axis slides clear a's whole axis-aligned ENVELOPE,
+    which is far more room than two tilted units actually need, and on the big
+    packages all four land outside `safe` — so the unit stayed exactly where it
+    was and shipped a pad-to-pad short (measured: 35 of 600 random two-unit
+    boards, every one of them a give-up rather than a bad slide).
+
+    Both footprints are convex quads, so a separating axis exists whenever they
+    can be parted at all, and each quad edge normal supplies one: push b just
+    far enough along it to open `gap`. Shortest push first, so the unit ends up
+    as close to where the user put it as the board allows.
+    """
+    pushes = []
+    for poly in (pa, unit_poly(b, safe)):
+        pts = list(poly.exterior.coords[:-1])
+        n = len(pts)
+        for i in range(n):
+            x0, y0 = pts[i]
+            x1, y1 = pts[(i + 1) % n]
+            nx, ny = y1 - y0, x0 - x1
+            ln = (nx * nx + ny * ny) ** 0.5
+            if ln < 1e-12:
+                continue
+            nx, ny = nx / ln, ny / ln
+            da = [px * nx + py * ny for px, py in pa.exterior.coords[:-1]]
+            db = [px * nx + py * ny for px, py in
+                  unit_poly(b, safe).exterior.coords[:-1]]
+            pushes.append((max(da) + gap - min(db), nx, ny))
+            pushes.append((max(db) + gap - min(da), -nx, -ny))
+    for dist, nx, ny in sorted(pushes):
+        if dist <= 0:
+            continue
+        probe = fits(b.x + nx * dist, b.y + ny * dist, avoid)
+        if probe is not None:
+            return probe
+    return None
+
+
+def _resolve_overlap_rings(b, safe, place):
+    """Last resort when even the minimal push runs off `safe`.
+
+    Walk outward in rings until something fits. Nearest ring first keeps the
+    unit near where it was asked for, and this only runs on a board that would
+    otherwise ship two units shorted together.
+    """
+    import math
+
+    lim = max(safe[2] - safe[0], safe[3] - safe[1]) if safe else 20.0
+    r = 0.6
+    while r <= lim:
+        for k in range(16):
+            t = math.radians(k * 22.5)
+            probe = place(b.x + r * math.cos(t), b.y + r * math.sin(t))
+            if probe is not None:
+                return probe
+        r += 0.6
+    return None  # nothing fits under this pass's rules; the caller relaxes them
 
 
 def pad_conflict(
@@ -1159,6 +1364,7 @@ def resolve_pad_overlap(
 
     from shapely.geometry import box as sbox
 
+    start = led
     for _ in range(3):
         b = led_unit_bbox(led, safe)
         poly = unit_poly(led, safe)
@@ -1169,18 +1375,76 @@ def resolve_pad_overlap(
         )
         if hit is None:
             return led
+        # Vet each slide with clamp_led_obj, never the legacy positional
+        # clamp_led: that one defaults to size="0805" and reverse=False and
+        # knows nothing about Led.adv, so it rejects the legal slides of every
+        # other package and leaves the unit parked on the pads, shorting 3V3
+        # to GND on a board the user still gets a 200 for.
+        #
+        # A slide that runs off `safe` is CLAMPED back onto the board rather
+        # than discarded. The pair being cleared is in one axis; the clamp only
+        # moves the other one, so the slide still does its job — and discarding
+        # it stranded units whose envelope only fits the board one way round.
+        cands = []
         for x, y in (
             (led.x + (hit[2] + 0.05 - b[0]), led.y),  # slide right
             (led.x - (b[2] - hit[0] + 0.05), led.y),  # slide left
             (led.x, led.y + (hit[3] + 0.05 - b[1])),  # slide down
             (led.x, led.y - (b[3] - hit[1] + 0.05)),  # slide up
         ):
-            if clamp_led(x, y, led.rot, led.layout, safe) == (x, y):
-                led = replace(led, x=x, y=y)
-                break
-        else:
-            return led  # no room; KiCad DRC will flag it
-    return led
+            probe = replace(led, x=x, y=y)
+            cx, cy = clamp_led_obj(probe, safe)
+            cands.append(replace(probe, x=cx, y=cy))
+        # Prefer a slide that actually lands the unit clear of EVERY kept pair,
+        # not merely the first one that stays on the board. A wide unit (an
+        # inline 1206) clearing the pair it started on can drop straight onto
+        # the other pair of the same row, and the old first-legal-wins pick
+        # then ping-ponged between them until the retry budget ran out.
+        clear = next((p for p in cands if not pad_conflict(p, pins, safe)), None)
+        if clear is not None:
+            return clear
+        moved = next((p for p in cands if (p.x, p.y) != (led.x, led.y)), None)
+        if moved is None:
+            break  # every slide was clamped straight back; retrying is a no-op
+        led = moved
+
+    # An axis slide clears the pair the unit sits on; it cannot help a unit
+    # whose envelope has to thread BETWEEN pairs, which an advanced placement
+    # (a via dragged metres from its LED) routinely produces. Walk outward from
+    # where the unit was asked for until something fits, rather than shipping
+    # copper sitting on the connector's 3V3 and GND pads.
+    import math
+
+    from shapely.geometry import Polygon
+
+    if safe is None:
+        safe = UNIT_SAFE
+    # Everything that does not depend on the probe position is hoisted: the
+    # rotated envelope, the legal centre range clamp_led_obj enforces, the
+    # rotated footprint corners and the kept keepout boxes. The scan is a few
+    # hundred probes on a board that would otherwise ship a short, and this is
+    # the difference between it costing microseconds and milliseconds.
+    g = led_geometry(start)
+    ox0, oy0, ox1, oy1 = _bbox_offsets_g(g, start.rot)
+    lo_x, hi_x = safe[0] - ox0, safe[2] - ox1
+    lo_y, hi_y = safe[1] - oy0, safe[3] - oy1
+    bb = g["bbox"]
+    corners = [_r(px, py, start.rot) for px, py in
+               ((bb[0], bb[1]), (bb[2], bb[1]), (bb[2], bb[3]), (bb[0], bb[3]))]
+    keepouts = [sbox(*PAD_PAIRS[k]["keepout"]) for k in active_pairs(pins)]
+    lim = max(safe[2] - safe[0], safe[3] - safe[1])
+    r = 0.5
+    while r <= lim:
+        for k in range(16):
+            t = math.radians(k * 22.5)
+            x, y = start.x + r * math.cos(t), start.y + r * math.sin(t)
+            if not (lo_x <= x <= hi_x and lo_y <= y <= hi_y):
+                continue  # clamp_led_obj would move it back; not a real choice
+            poly = Polygon([(x + px, y + py) for px, py in corners])
+            if not any(poly.intersects(box) for box in keepouts):
+                return replace(start, x=x, y=y)
+        r += 0.5
+    return led  # no room; KiCad DRC will flag it
 
 
 @dataclass
@@ -1853,26 +2117,6 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
     # Morphological opening: drop slivers narrower than the zone min_thickness.
     filled = filled.buffer(-POUR_MIN_WIDTH / 2).buffer(POUR_MIN_WIDTH / 2)
 
-    # KiCad stores fills as simple outlines (no holes). Convert each hole
-    # into an edge notch by cutting a thin slit from inside the hole down
-    # past the board edge. The slit must start at a point actually inside
-    # the void — a hole's bounding-box center can land on copper for
-    # C/U-shaped holes, which would leave the hole intact (and the emitter
-    # below would then pour copper straight over other-net pads).
-    from shapely.geometry import Polygon as ShapelyPolygon
-
-    slit_bottom = board.bounds[3] + 1.0  # past the outline's lowest edge
-    for _ in range(8):
-        polys = list(filled.geoms) if filled.geom_type == "MultiPolygon" else [filled]
-        slits = []
-        for poly in polys:
-            for ring in poly.interiors:
-                pt = ShapelyPolygon(ring).representative_point()
-                slits.append(box(pt.x - 0.06, pt.y, pt.x + 0.06, slit_bottom))
-        if not slits:
-            break
-        filled = filled.difference(unary_union(slits))
-
     # Copper-material art enclosed by a glow/bare window becomes an isolated
     # island (the window severs it from the plane). Those are intentional
     # decoration — a skull's gold eyes inside a bare face — so they survive
@@ -1886,15 +2130,111 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
         keep += _art_shapely(art.polys)
     keep_union = unary_union(keep) if keep else None
 
+    # Drop floating copper BEFORE opening the holes, so the decision is made
+    # on the real plane. Doing it afterwards judged the fracture's own
+    # fragments: a hole vented out to the edge could fence a live piece of
+    # rail off from the pad that feeds it, and the fragment still touched an
+    # anchor pad of its own, so it passed the filter and shipped disconnected.
     polys = list(filled.geoms) if filled.geom_type == "MultiPolygon" else [filled]
     anchor_union = unary_union(anchors)
-    return [
-        p.simplify(0.005)
-        for p in polys
-        if not p.is_empty and p.area > 0.05
-        and (p.intersects(anchor_union)
-             or keep_union is not None and p.intersects(keep_union))
-    ]
+    def alive(p):
+        return (not p.is_empty and p.area > 0.05
+                and (p.intersects(anchor_union)
+                     or keep_union is not None and p.intersects(keep_union)))
+
+    polys = [p.simplify(0.005) for p in polys if alive(p)]
+    # Then make each island representable: KiCad stores fills as simple
+    # outlines with no interior rings, so every hole has to be vented out to
+    # the boundary. `_open_holes` keeps the island in one piece while it does
+    # that; the filter runs again only to catch the fragments its last-resort
+    # branch can leave behind.
+    out = []
+    for p in polys:
+        out += _open_holes(p)
+    return [p for p in out if alive(p)]
+
+
+SLIT_W = 0.12     # width of the hole-venting slit (see _open_holes)
+SLIVER_W = 0.10   # hairs this thin are shaved off the vented fill
+
+
+def _open_holes(poly) -> list:
+    """Vent a fill polygon's holes to its boundary without severing the plane.
+
+    ``(filled_polygon (pts ...))`` has no syntax for an interior ring and
+    KiCad treats every polygon in a zone as its own island — even where two of
+    them share an edge or overlap, both measured here — so each hole has to be
+    opened out to the boundary by actually removing a slit of copper.
+
+    A slit from a hole to the boundary is topologically harmless on its own.
+    Running every slit in the same direction, out to the same board edge, is
+    not: two of them either side of a unit run straight through the perimeter
+    ring that is supposed to keep the plane continuous and fence the unit's
+    rail onto an island wired to nothing. The board passes every gate
+    ``/generate`` applies, the user downloads it, and the LED never lights.
+
+    So each hole is vented one at a time, shortest slit first, and a direction
+    is only accepted if the piece it leaves behind is still in one piece.
+    """
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.geometry import box
+
+    def parts(geom):
+        return [g for g in getattr(geom, "geoms", [geom])
+                if g.geom_type == "Polygon" and not g.is_empty]
+
+    pending, done = [poly], []
+    # One hole is vented per pass, and every pass strictly reduces the hole
+    # count of the piece it touches, so this terminates; the cap is only there
+    # so a degenerate ring cannot spin.
+    for _ in range(400):
+        if not pending:
+            break
+        p = pending.pop()
+        if not p.interiors:
+            done.append(p)
+            continue
+        # The slit must start at a point genuinely inside the void — a hole's
+        # bounding-box centre lands on copper for C/U-shaped holes, which
+        # would leave the hole intact and let the emitter flood other-net pads.
+        pt = ShapelyPolygon(p.interiors[0]).representative_point()
+        x0, y0, x1, y1 = p.bounds
+        h = SLIT_W / 2
+        cands = sorted((
+            (y1 + 1.0 - pt.y, box(pt.x - h, pt.y, pt.x + h, y1 + 1.0)),
+            (pt.y - (y0 - 1.0), box(pt.x - h, y0 - 1.0, pt.x + h, pt.y)),
+            (x1 + 1.0 - pt.x, box(pt.x, pt.y - h, x1 + 1.0, pt.y + h)),
+            (pt.x - (x0 - 1.0), box(x0 - 1.0, pt.y - h, pt.x, pt.y + h)),
+        ), key=lambda c: c[0])
+        cut = None
+        for _len, slit in cands:
+            trial = p.difference(slit)
+            # One piece out means the vent reduced the hole count and nothing
+            # else — no fenced-off island, so no stranded rail.
+            if trial.geom_type == "Polygon" and not trial.is_empty:
+                cut = trial
+                break
+        if cut is None:
+            # Every direction fences something. Take the shortest slit and let
+            # the floating-copper filter in the caller judge the fragments —
+            # strictly better than shipping an unrepresentable hole.
+            cut = p.difference(cands[0][1])
+        pending += parts(cut)
+
+    # A slit that grazes another void leaves a hair of copper beside it, and
+    # KiCad reports those as [copper_sliver] — a fab flags them, and a sliver
+    # that lifts can bridge to whatever it lands on. Shave them off with a
+    # morphological opening well under POUR_MIN_WIDTH, so it cannot touch any
+    # neck the zone's own min_thickness already guarantees, and only where the
+    # piece stays whole and hole-free afterwards.
+    out = []
+    for p in done + pending:
+        if p.area <= 1e-9 or p.interiors:
+            continue
+        shaved = p.buffer(-SLIVER_W / 2).buffer(SLIVER_W / 2)
+        out.append(shaved if (shaved.geom_type == "Polygon" and not shaved.is_empty
+                              and not shaved.interiors) else p)
+    return out
 
 
 def _window_geometry(spec: BadgeSpec, face: str | None = None):

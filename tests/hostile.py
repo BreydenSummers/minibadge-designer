@@ -15,13 +15,14 @@ request, makes those two assertions itself, and returns `None`. A test module
 driving this corpus never sees a status code, so it cannot assert on one.
 `Case` objects carry payloads only; they carry no expected status.
 
-**Known-crashing cases are marked `xfail(strict=True)`.** Several payloads below
-500 today against live defects recorded in `ROUND1-DECISIONS.md` §2 and
-`ROUND2-DECISIONS.md` §6 (the ledger the numbers in `DEFECTS` come from). Those
-are deliberately not fixed. `route_cases()` attaches a strict xfail naming the
-defect, so the case flips to a pass the moment the defect is fixed and shouts if
-someone removes a crash without removing the marker. Do not weaken an assertion
-to make the suite green; either fix the defect and drop the marker, or leave both.
+**Known-crashing cases are marked `xfail(strict=True)`.** A payload that 500s
+against a defect nobody is fixing right now carries `crashes={route: "#N"}`;
+`route_cases()` turns that into a strict xfail naming the defect, so the case
+flips to a *failure* the moment the defect is fixed and the marker cannot
+outlive it. Do not weaken an assertion to make the suite green; either fix the
+defect and drop the marker, or leave both. `DEFECTS` is empty today: the five
+defects the corpus pinned are repaired, and all seventeen markers naming them
+went red as `[XPASS(strict)]` on cue. The payloads stayed.
 
 Usage (the whole consuming test module)::
 
@@ -72,55 +73,38 @@ DEFAULT_BUDGET_S = 20.0
 
 #: A board-shape or artwork SVG is a logo, not a mesh. Auto-traced art routinely
 #: carries tens of thousands of points, and a quarter-megabyte file has to come
-#: back while the user is still looking at the preview. This budget is the
-#: assertion for defect #5 — a hang is invisible to a status check, and every
-#: one of these returns 200 eventually. Measured cost of an N-point <path>,
-#: quadratic and uncapped: 1k = 0.05 s, 20k = 1.3 s, 40k = 5.2 s, 80k = 23.9 s,
-#: 200k = 493 s. The budget is deliberately ~2.6x below the case that fires it,
-#: so a faster machine cannot silently turn the defect green.
+#: back while the user is still looking at the preview — /outline runs on every
+#: edit. A hang is invisible to a status check, so for these cases the clock is
+#: the assertion.
+#:
+#: Measured before `webapp.MAX_SVG_COMPLEXITY` landed, every one returning 200:
+#: an N-vertex <path> cost 1k = 0.05 s, 20k = 1.3 s, 40k = 5.2 s, 80k = 25.7 s,
+#: 200k = 493 s, and separate cubic-Bezier segments cost ~4 ms each on top
+#: (4 000 of them = 15.5 s at 200 KB). With the cap, the over-limit cases below
+#: are refused — or, when the client sent a `*_raster`, quietly served from it —
+#: in well under 0.2 s, so this budget keeps 10x+ headroom on every passing case
+#: while sitting far under the seconds a regression would cost.
 SVG_BUDGET_S = 2.0
 
 
 # ---------------------------------------------------------------------------
-# Live defects. #1-#11 are ROUND1-DECISIONS.md §2; #12-#14 were added by
-# ROUND2-DECISIONS.md §6. Referenced by strict xfail markers.
+# Live defects, keyed by the id in the decisions-file ledger, referenced by
+# `Case.crashes` and turned into strict xfail markers by `route_cases()`.
 #
-# Every mechanism sentence below was re-verified against a live run, not
-# inferred: see <scratchpad>/round4/agent-4-4-xfail.md §2. Two of them were
-# wrong and are corrected here. A reason nobody has watched fail is a guess.
+# It is empty, and that is the point of the mechanism rather than a sign the
+# mechanism is unused. The five entries it used to hold (#1 novia NameError,
+# #5 uncapped SVG complexity, #6 NaN geometry raised outside every `try`, #12
+# non-object `params`, #13 non-iterable `pins`/`rows`) were all repaired in
+# webapp.py, and every one of the seventeen `crashes=` markers naming them
+# failed the run with `[XPASS(strict)]` the moment the fixes landed — which is
+# exactly the property that stops a marker outliving its defect. The payloads
+# stayed; only the markers went.
+#
+# Add an entry here, and a `crashes=` on the case, when a payload is found to
+# 500 and the fix is not being taken now. Never weaken an assertion instead.
 # ---------------------------------------------------------------------------
 
-DEFECTS: Mapping[str, str] = {
-    "#1": ("defect #1 — NameError: name 'rows' is not defined at webapp.py:1224; "
-           "any via-less LED that cannot route 500s instead of returning the "
-           "friendly 400 written just below it"),
-    "#5": ("defect #5 — unbounded SVG complexity: no timeout, no point cap, "
-           "superlinear cost (272 KB = 5.5 s measured, 1.4 MB = 493 s, all "
-           "returning 200)"),
-    # The `except`-tuple story is true of the code but is NOT what produces
-    # these four failures: all of them raise from lines that sit outside every
-    # `try` in _generate_impl, so no tuple is ever consulted. Verified by
-    # raising a plain ValueError at :782 — also a 500.
-    "#6": ("defect #6 — NaN geometry reaches shapely and raises "
-           "shapely.errors.GEOSException from lines OUTSIDE every `try` in "
-           "_generate_impl (:782 resolve_pad_overlap, :907-959 _led_keepout, "
-           ":994 _text_rect), so it escapes as a 500; and were it inside one, "
-           "GEOSException derives from ShapelyError, not ValueError, so none of "
-           "the `except (OSError, ValueError, TypeError, AttributeError, ...)` "
-           "tuples would catch it either"),
-    # Renumbered from "lane-02 F2/F3 (unnumbered in §2)" to match the ledger in
-    # ROUND2-DECISIONS.md §6. The line number in #12 was route-dependent and is
-    # now stated per route.
-    "#12": ("defect #12 — params that is valid JSON but not an object "
-            "(null/[]/42/\"s\"/true): json.loads succeeds, so the "
-            "JSONDecodeError guard never fires and params.get() raises "
-            "AttributeError — at webapp.py:705 on /generate and /model3d, and "
-            "one call earlier at :519 (_parse_pins, :43) on /outline"),
-    "#13": ("defect #13 — _parse_pins (webapp.py:37-51) is not type-safe and is "
-            "called at :519 and :711 outside every try, so a non-iterable "
-            "`pins`/`rows` escapes as a 500: pins=5 raises TypeError at :45 "
-            "(set(map(str, 5))), rows=5 at :49 (`r in 5`)"),
-}
+DEFECTS: Mapping[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +249,18 @@ def svg_bytes(points: int = 0) -> bytes:
 
 
 @cache
+def cubic_svg(segments: int = 1000) -> bytes:
+    """Separate cubic-Bezier paths — the costliest shape per byte, because each
+    long curve flattens to up to 256 chords."""
+    ps = b"".join(b'<path fill="#000" d="M%d %d C%d %d %d %d %d %d Z"/>'
+                  % (i % 97, (i * 3) % 97, i % 97, (i * 13) % 97,
+                     (i * 7) % 97, (i * 29) % 97, (i * 3) % 97, (i * 11) % 97)
+                  for i in range(segments))
+    return (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+            + ps + b"</svg>")
+
+
+@cache
 def nested_svg(depth: int = 5000) -> bytes:
     return (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
             + b"<g>" * depth
@@ -338,17 +334,12 @@ ENVELOPE = [
     Case("params-empty-string", raw=""),
     Case("params-not-json", raw="not json at all"),
     Case("params-json-null", raw="null",
-         crashes={GENERATE: "#12", OUTLINE: "#12", MODEL3D: "#12"},
          model3d=True),
     Case("params-json-list", raw="[]",
-         crashes={GENERATE: "#12", OUTLINE: "#12", MODEL3D: "#12"},
          model3d=True),
-    Case("params-json-number", raw="42",
-         crashes={GENERATE: "#12", OUTLINE: "#12"}),
-    Case("params-json-string", raw='"hello"',
-         crashes={GENERATE: "#12", OUTLINE: "#12"}),
-    Case("params-json-true", raw="true",
-         crashes={GENERATE: "#12", OUTLINE: "#12"}),
+    Case("params-json-number", raw="42"),
+    Case("params-json-string", raw='"hello"'),
+    Case("params-json-true", raw="true"),
     Case("params-empty-object", params={}),
     Case("params-truncated-json", raw='{"name": "x"'),
     Case("params-nested-50-deep", raw="{\"a\":" * 50 + "1" + "}" * 50),
@@ -358,10 +349,8 @@ ENVELOPE = [
 # -- connector pins (_parse_pins is called outside every try) ----------------
 PINS = [
     Case("pins-int-5", params={"pins": 5},
-         crashes={GENERATE: "#13", OUTLINE: "#13", MODEL3D: "#13"},
          model3d=True),
-    Case("rows-int-5", params={"rows": 5},
-         crashes={GENERATE: "#13", OUTLINE: "#13"}),
+    Case("rows-int-5", params={"rows": 5}),
     Case("pins-string", params={"pins": "abc"}),
     Case("pins-dict", params={"pins": {"1": True}}),
     Case("pins-objects", params={"pins": [{}]}),
@@ -374,16 +363,12 @@ PINS = [
 
 # -- out-of-range numbers, NaN and Infinity ---------------------------------
 NUMERIC = [
-    Case("led-x-nan", raw='{"leds":[{"x":NaN,"y":10,"color":"red"}]}',
-         crashes={GENERATE: "#6"}),
-    Case("led-rot-nan", raw='{"leds":[{"x":10,"y":10,"color":"red","rot":NaN}]}',
-         crashes={GENERATE: "#6"}),
+    Case("led-x-nan", raw='{"leds":[{"x":NaN,"y":10,"color":"red"}]}'),
+    Case("led-rot-nan", raw='{"leds":[{"x":10,"y":10,"color":"red","rot":NaN}]}'),
     Case("led-adv-rrot-nan",
-         raw='{"leds":[{"x":10,"y":10,"color":"red","adv":{"rrot":NaN}}]}',
-         crashes={GENERATE: "#6"}),
+         raw='{"leds":[{"x":10,"y":10,"color":"red","adv":{"rrot":NaN}}]}'),
     Case("text-rot-nan",
-         raw='{"texts":[{"x":10,"y":10,"text":"hi","size":2,"rot":NaN}]}',
-         crashes={GENERATE: "#6"}),
+         raw='{"texts":[{"x":10,"y":10,"text":"hi","size":2,"rot":NaN}]}'),
     Case("shape-circle-nan",
          raw='{"shape":{"mode":"custom","elements":'
              '[{"kind":"circle","cx":NaN,"cy":10,"w":8,"op":"add"}]}}'),
@@ -442,8 +427,7 @@ ARRAYS = [
     Case("art-30-declared", params={"art": [A() for _ in range(30)]},
          files=[art_file(i, f"{i}.png") for i in range(30)]),
     Case("led-nodes-500", params={"leds": [L(novia=True,
-                                             nodes=[[10 + i * 0.01, 10] for i in range(500)])]},
-         crashes={GENERATE: "#1"}),
+                                             nodes=[[10 + i * 0.01, 10] for i in range(500)])]}),
     Case("shape-elements-200",
          params={"shape": {"mode": "custom",
                            "elements": [{"kind": "circle", "cx": 10, "cy": 10,
@@ -527,32 +511,53 @@ SVG = [
          files=[art_file(0, "x.svg", nested_svg)], budget=SVG_BUDGET_S),
     Case("svg-1k-point-art", params={"art": [A()]},
          files=[art_file(0, "p.svg", lambda: svg_bytes(1000))], budget=SVG_BUDGET_S),
-    # The budget IS the assertion, and this is the case that fires it. 40k
-    # points is 266 KB — an ordinary auto-traced logo, well under the 24 MiB
-    # upload cap — and the board-shape path chews on it for ~5.3 s on both
-    # routes with no cap and no timeout. /outline runs on every edit in the
-    # live preview, so this is the hang the user actually meets.
+    # The four cases below are the whole measurement of the complexity cap.
+    # 40k vertices is 272 KB — an ordinary auto-traced logo, far under the
+    # 24 MiB upload cap — and used to chew ~5.3 s on both routes; 60k ran ~12 s
+    # and 200k ran 493 s. The curve case is the shape that costs most per byte.
+    #
+    # Payloads stay under 500 KB deliberately: over that, werkzeug's *test
+    # client* spools the request body to a temp file it never closes, and the
+    # resulting ResourceWarning is raised against whichever test next triggers
+    # a GC. That is a harness artefact, but it makes any test that carries such
+    # a payload a false-positive generator for its neighbours.
     Case("svg-40k-point-shape", params={"shape": IMAGE_SHAPE()},
          files=[shape_file("s.svg", lambda: svg_bytes(40000))],
-         budget=SVG_BUDGET_S, crashes={GENERATE: "#5", OUTLINE: "#5"}, slow=True),
+         budget=SVG_BUDGET_S),
+    Case("svg-60k-point-shape", params={"shape": IMAGE_SHAPE()},
+         files=[shape_file("s.svg", lambda: svg_bytes(60000))],
+         budget=SVG_BUDGET_S),
+    Case("svg-60k-point-art", params={"art": [A()]},
+         files=[art_file(0, "p.svg", lambda: svg_bytes(60000))],
+         budget=SVG_BUDGET_S),
+    # Over the cap AND carrying the raster the UI always sends: the exact
+    # pipeline is skipped and the raster is used, so this must be fast too.
+    Case("svg-60k-point-shape-with-raster", params={"shape": IMAGE_SHAPE()},
+         files=[shape_file("s.svg", lambda: svg_bytes(60000)),
+                ("shape_raster", "s.png", png_bytes)],
+         budget=SVG_BUDGET_S),
+    # Cubic segments, not vertices: 4 000 of them is only 200 KB but flattens
+    # to up to a quarter-million chords, which is why the cap weights curves.
+    Case("svg-4k-cubic-art", params={"art": [A()]},
+         files=[art_file(0, "c.svg", lambda: cubic_svg(4000))],
+         budget=SVG_BUDGET_S),
+    Case("svg-4k-cubic-shape", params={"shape": IMAGE_SHAPE()},
+         files=[shape_file("c.svg", lambda: cubic_svg(4000))],
+         budget=SVG_BUDGET_S),
 ]
 
 # -- via-less LEDs driven to their failure path (defect #1) ----------------
 NOVIA = [
     Case("novia-bent-nodes",
-         params={"leds": [L(novia=True, nodes=[[10.2, 10.2], [10.3, 10.25]])]},
-         crashes={GENERATE: "#1", MODEL3D: "#1"}, model3d=True),
+         params={"leds": [L(novia=True, nodes=[[10.2, 10.2], [10.3, 10.25]])]}, model3d=True),
     Case("novia-crowded-row",
-         params={"leds": [L(x=3 + 3.2 * i, y=10, novia=True) for i in range(6)]},
-         crashes={GENERATE: "#1"}, slow=True),
+         params={"leds": [L(x=3 + 3.2 * i, y=10, novia=True) for i in range(6)]}, slow=True),
     Case("novia-two-rows",
          params={"leds": [L(x=4 + 4 * i, y=5, novia=True) for i in range(4)]
-                         + [L(x=4 + 4 * i, y=15, novia=True) for i in range(4)]},
-         crashes={GENERATE: "#1"}, slow=True),
+                         + [L(x=4 + 4 * i, y=15, novia=True) for i in range(4)]}, slow=True),
     Case("novia-top-pins-only",
          params={"pins": ["1", "2", "7", "8"],
-                 "leds": [L(x=3 + 3.2 * i, y=16, novia=True) for i in range(5)]},
-         crashes={GENERATE: "#1"}, slow=True),
+                 "leds": [L(x=3 + 3.2 * i, y=16, novia=True) for i in range(5)]}, slow=True),
 ]
 
 CORPUS: tuple[Case, ...] = tuple(

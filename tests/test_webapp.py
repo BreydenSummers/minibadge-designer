@@ -338,12 +338,10 @@ _UNROUTABLE_DESIGNS = {
 
 
 @pytest.mark.webapp
-@pytest.mark.xfail(strict=True, reason=(
-    "defect #1 (webapp.py:1224): `rows` is a leftover name from the "
-    "keep-any-pin refactor, so novia_route raises NameError and the user gets "
-    "a 500 instead of the friendly 400 written ten lines below. strict=True "
-    "makes this go red the moment the one-token fix lands, so the marker "
-    "cannot outlive the defect."))
+# Defect #1 is fixed (`rows` -> `pins` at the novia_route call), so this is no
+# longer an xfail: it is the regression guard that keeps the two hand-written
+# 400s below reachable. Both branches were dead code for the whole life of the
+# keep-any-pin refactor because nothing drove them over HTTP.
 @pytest.mark.parametrize("route", ["/generate", "/model3d"])
 @pytest.mark.parametrize("design", [
     "dragged-bend",
@@ -602,6 +600,11 @@ def test_font_file_served_and_unknown_404(client):
     resp = client.get("/fonts/archivo.ttf")
     assert resp.status_code == 200
     assert resp.data[:4] in (b"\x00\x01\x00\x00", b"OTTO", b"true")
+    # send_file hands back a lazily-consumed FileWrapper. A PEP 3333 server
+    # closes the WSGI iterable for you; the werkzeug test client does not, so
+    # without this the TTF descriptor is finalised at some later GC point and
+    # the ResourceWarning is raised against whichever test is running then.
+    resp.close()
     assert client.get("/fonts/../secrets.ttf").status_code in (308, 404)
     assert client.get("/fonts/nope.ttf").status_code == 404
 
@@ -1172,3 +1175,343 @@ def test_glb_layers_tagged_and_opaque():
     assert all(m["pbrMetallicRoughness"]["baseColorFactor"][3] == 1.0
                for m in got["materials"])
     assert not any(m.get("alphaMode") == "BLEND" for m in got["materials"])
+
+
+# ===========================================================================
+# The hostile boundary: what a bad request gets back
+#
+# `tests/hostile.py` already proves these payloads do not crash the server, and
+# `probe()` returns None on purpose so no test over that corpus can say more.
+# What it cannot see is whether the user is left with anything to act on: the
+# client does `throw new Error((await resp.json()).error || resp.statusText)`,
+# so a rejection without a JSON `error` string reaches the badge owner as a
+# bare failure. These tests assert the status *class* and the error *shape* —
+# never a status number and never the prose, both of which are incidental.
+# ===========================================================================
+
+_MALFORMED_DESIGNS = {
+    # defect #12 — valid JSON that is not an object. json.loads succeeds, so
+    # the JSONDecodeError guard never fires and the first params.get() used to
+    # raise from outside every try.
+    "params-json-null": "null",
+    "params-json-list": "[]",
+    "params-json-number": "42",
+    "params-json-string": '"hello"',
+    # defect #13 — a scalar where the connector pin list belongs. _parse_pins
+    # runs before any of the handler's own guards.
+    "pins-scalar": '{"pins": 5}',
+    "rows-scalar": '{"rows": 5}',
+    # defect #6 — NaN geometry. Three separate raise sites, one per parameter
+    # group, all deliberately off the 0805/front/stacked defaults: a
+    # through-hole back-side unit, an inline unit's advanced resistor angle,
+    # and a rotated TTF-less text.
+    "led-x-nan": '{"leds":[{"x":NaN,"y":10,"color":"red","size":"3mm","side":"back"}]}',
+    "led-adv-rrot-nan": ('{"leds":[{"x":10,"y":10,"color":"red","layout":"inline",'
+                         '"size":"0603","adv":{"rrot":NaN}}]}'),
+    "text-rot-nan": '{"texts":[{"x":10,"y":10,"text":"hi","size":2,"rot":NaN}]}',
+}
+
+
+@pytest.mark.webapp
+@pytest.mark.parametrize("route", ["/generate", "/model3d"])
+@pytest.mark.parametrize("design", sorted(_MALFORMED_DESIGNS))
+def test_a_malformed_design_is_refused_with_a_message_the_ui_can_show(
+        client, route, design):
+    """A request the server cannot build a board from comes back as a refusal
+    carrying an error string, on both download routes.
+
+    If this breaks the user clicks Download, waits, and receives Flask's HTML
+    500 page: `resp.json()` throws inside the client's error path, so the UI
+    shows nothing at all and there is no hint that the coordinate they typed,
+    or the pin list a stale saved design carries, is the thing to change.
+
+    `/model3d` is here without a kicad-cli guard on purpose — every one of
+    these is rejected in the shared parse phase, long before `_model_glb` is
+    reached, so the route answers 4xx whether or not the tool is installed.
+    """
+    try:
+        resp = client.post(route, data={"params": _MALFORMED_DESIGNS[design]},
+                           content_type="multipart/form-data")
+    except Exception as exc:  # noqa: BLE001
+        # TESTING=True propagates instead of 500ing; in production this same
+        # escape is the 500 page the browser renders.
+        raise AssertionError(
+            f"{route} crashed on the {design!r} payload instead of refusing "
+            f"it: {type(exc).__name__}: {exc}") from exc
+    invariants.assert_rejected(resp)
+
+
+@pytest.mark.webapp
+@pytest.mark.parametrize("mask_color,reaches_the_fab", [
+    # Payloads that unbalance the stackup's s-expression when interpolated
+    # raw. Measured on the unfixed code: `green")` drives the paren depth
+    # negative, `g" (x` leaves it one too deep, and a trailing backslash runs
+    # the quoted string away. (`green)` and `green") (gr_text "P` happen to
+    # stay balanced, so they are useless as probes.)
+    ('green")', "green"),
+    ('g" (x', "green"),
+    ("g\\", "green"),
+    # Not an attack — just a colour no fab stocks.
+    ("plutonium", "green"),
+    # Legitimate choices, off the "green" default in both value and case. The
+    # whitelist must not flatten a real pick to the fallback.
+    ("Purple", "purple"),
+    ("white", "white"),
+])
+def test_the_soldermask_colour_on_the_board_is_always_one_a_fab_can_build(
+        client, mask_color, reaches_the_fab):
+    """Whatever `mask_color` a request carries, the stackup names a real colour
+    and the board file stays openable.
+
+    Two separate ways for the user to lose here, and the corpus sees neither
+    because both ship a 200. Unbalanced: the zip downloads, looks normal, and
+    KiCad refuses to open the .kicad_pcb with no error the app ever showed.
+    Unknown-but-balanced: KiCad opens it and the 3D view plus the fab order
+    carry a colour that does not exist.
+
+    `mask_color` is the one user string that reaches the board file neither
+    whitelisted nor escaped — `name` is whitelisted by `_slug`, text content
+    is escaped by `pcb._esc`. So this is the only test that can see it.
+    """
+    import types
+
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps(_params(name="mask", art=[], leds=[],
+                                           mask_color=mask_color))},
+        content_type="multipart/form-data",
+    )
+    # assert_project_zip checks the four-member zip and the paren balance.
+    board = invariants.assert_project_zip(resp, "mask")
+    invariants.assert_fab_choices_reach_the_stackup(
+        invariants.assert_parses(board),
+        types.SimpleNamespace(mask_color=reaches_the_fab, finish="enig"))
+
+
+# ===========================================================================
+# Upload complexity: a request that never comes back
+#
+# The exact SVG pipeline's cost is superlinear in the geometry it is handed and
+# used to be uncapped. Measured on this repo before `MAX_SVG_COMPLEXITY`
+# landed, all returning 200: a single <path> of 40 000 line vertices (272 KB)
+# took 5.3 s, 80 000 took 25.7 s and 200 000 took 493 s, and Bezier segments
+# cost ~4 ms each on top. Every one of those is far under the 24 MiB upload cap
+# and lands in the range an auto-traced logo reaches routinely.
+#
+# A hang is invisible to a status check, so the wall clock IS the assertion
+# here. The budget is `hostile.SVG_BUDGET_S` — the same number the corpus uses,
+# and a product statement rather than a benchmark: a logo has to come back
+# while the user is still looking at the preview. /outline runs on every edit.
+# ===========================================================================
+
+def _line_svg(points: int) -> bytes:
+    """A single <path> of `points` straight-line vertices."""
+    d = b" ".join(b"L%d %d" % (i % 100, (i * 7) % 100) for i in range(points))
+    return (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+            b'<path fill="#000" d="M0 0 ' + d + b' Z"/></svg>')
+
+
+def _curve_svg(segments: int) -> bytes:
+    """`segments` separate cubic-Bezier paths — the shape that costs most per
+    byte, because each long curve flattens to up to 256 chords."""
+    ps = b"".join(b'<path fill="#000" d="M%d %d C%d %d %d %d %d %d Z"/>'
+                  % (i % 97, (i * 3) % 97, i % 97, (i * 13) % 97,
+                     (i * 7) % 97, (i * 29) % 97, (i * 3) % 97, (i * 11) % 97)
+                  for i in range(segments))
+    return (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+            + ps + b'</svg>')
+
+
+#: Payloads whose exact geometry is past `MAX_SVG_COMPLEXITY`. Both are held
+#: under 500 KB on purpose — over that, werkzeug's *test client* spools the
+#: request body to a temp file it never closes, and the resulting
+#: ResourceWarning lands on whichever unlucky test triggers the next GC.
+#: 60 000 line vertices measured 12 s uncapped (200 000 measured 493 s, on the
+#: same curve); 4 000 cubic segments measured 15.5 s uncapped.
+_OVERSIZED_SVGS = {
+    "60k-line-vertices": lambda: _line_svg(60_000),
+    "4k-cubic-segments": lambda: _curve_svg(4_000),
+}
+
+#: (label, params, SVG form field, raster form field). The board outline and an
+#: artwork layer are separate entry points into the same exact pipeline, and
+#: /outline reaches only the first — so both have to be covered.
+_SVG_UPLOAD_SITES = {
+    "board-shape": ({"shape": {"mode": "image", "cx": 10.16, "cy": 10.16, "w": 18}},
+                    "shape", "shape_raster"),
+    "art-layer": ({"art": [{"material": "silk", "cx": 10.16, "cy": 10.16, "w": 12}]},
+                  "art0", "art0_raster"),
+}
+
+
+@pytest.mark.webapp
+@pytest.mark.parametrize("site", sorted(_SVG_UPLOAD_SITES))
+@pytest.mark.parametrize("svg", sorted(_OVERSIZED_SVGS))
+def test_an_svg_too_detailed_to_trace_exactly_falls_back_to_the_raster_render(
+        client, site, svg):
+    """An SVG past the detail cap still produces a project, using the browser's
+    raster render of the same file, and comes back promptly.
+
+    This is the ordinary case: the UI ships a `*_raster` alongside every SVG
+    precisely so a file the exact pipeline cannot handle (a gradient fill, and
+    now an unprintable amount of detail) degrades instead of failing. If this
+    breaks, someone who dropped in an auto-traced logo watches the download
+    spin for eight minutes and then gets a board anyway — or is refused work
+    the app can perfectly well do at raster fidelity.
+    """
+    import time
+
+    import hostile
+
+    overrides, field, raster_field = _SVG_UPLOAD_SITES[site]
+    data = {
+        "params": json.dumps(_params(name="big", leds=[], **{"art": [], **overrides})),
+        field: (io.BytesIO(_OVERSIZED_SVGS[svg]()), "x.svg"),
+        raster_field: (io.BytesIO(_logo_bytes()), "x.png"),
+    }
+    started = time.monotonic()
+    resp = client.post("/generate", data=data, content_type="multipart/form-data")
+    elapsed = time.monotonic() - started
+    invariants.assert_project_zip(resp, "big")
+    assert elapsed <= hostile.SVG_BUDGET_S, (
+        f"{site}/{svg} took {elapsed:.1f}s against a {hostile.SVG_BUDGET_S}s "
+        "budget — the fallback is supposed to skip the expensive pipeline, not "
+        "run it first")
+
+
+@pytest.mark.webapp
+@pytest.mark.parametrize("site", sorted(_SVG_UPLOAD_SITES))
+@pytest.mark.parametrize("svg", sorted(_OVERSIZED_SVGS))
+def test_an_svg_too_detailed_to_trace_with_no_raster_is_refused_promptly(
+        client, site, svg):
+    """With no raster to fall back on, the same file is refused quickly rather
+    than processed for minutes.
+
+    A client that sends no `*_raster` (a script, an old build of the UI) has
+    nothing to degrade to, so the honest answer is a refusal — and the refusal
+    has to arrive in a moment, because the whole point of the cap is that the
+    expensive pipeline never starts. If this breaks the request occupies a
+    worker for the better part of ten minutes and the user has no way to tell
+    that simplifying the path is what would fix it.
+    """
+    import time
+
+    import hostile
+
+    overrides, field, _raster = _SVG_UPLOAD_SITES[site]
+    data = {
+        "params": json.dumps(_params(name="big", leds=[], **{"art": [], **overrides})),
+        field: (io.BytesIO(_OVERSIZED_SVGS[svg]()), "x.svg"),
+    }
+    started = time.monotonic()
+    resp = client.post("/generate", data=data, content_type="multipart/form-data")
+    elapsed = time.monotonic() - started
+    invariants.assert_rejected(resp)
+    assert elapsed <= hostile.SVG_BUDGET_S, (
+        f"{site}/{svg} took {elapsed:.1f}s against a {hostile.SVG_BUDGET_S}s "
+        "budget — a hang is invisible to a status check, so the clock is the "
+        "assertion")
+
+
+@pytest.mark.webapp
+@pytest.mark.slow  # ~1.3 s: half the cap is genuinely expensive to trace
+def test_a_logo_with_far_more_detail_than_a_badge_can_print_is_still_traced_exactly(
+        client):
+    """A 20 000-vertex path — half the cap, 136 KB — still goes through the
+    exact vector pipeline and lands on the board.
+
+    This is the false-positive side of the cap, and the reason it is set where
+    it is. A limit tuned low enough to feel safe would silently push ordinary
+    auto-traced artwork onto the raster pipeline (0.18 mm pixel staircase) or
+    refuse it outright. No raster is sent here, so a `gr_poly` on the board is
+    proof the exact path ran: there was nothing else it could have used.
+    """
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps(_params(
+                  name="fine", leds=[],
+                  art=[{"material": "silk", "cx": 10.16, "cy": 10.16, "w": 12}])),
+              "art0": (io.BytesIO(_line_svg(20_000)), "x.svg")},
+        content_type="multipart/form-data",
+    )
+    board = invariants.assert_project_zip(resp, "fine")
+    assert "gr_poly" in board, (
+        "a 20k-vertex logo produced no polygons — the detail cap is rejecting "
+        "artwork the app is supposed to trace exactly")
+
+
+def _cli_stub(tmp_path, real: str, body: str) -> str:
+    """A stand-in kicad-cli. Only the *external tool* is substituted here —
+    the app, its locator and the whole HTTP path stay real."""
+    import os
+
+    stub = tmp_path / "kicad-cli-stub"
+    stub.write_text(f'#!/bin/sh\n{body}\n'.replace("@REAL@", real))
+    os.chmod(stub, 0o755)
+    return str(stub)
+
+
+@pytest.mark.webapp
+@pytest.mark.kicad
+@pytest.mark.slow  # one real GLB export
+@pytest.mark.needs("kicad")
+@pytest.mark.parametrize("size,side", [("1206", "front"), ("3mm", "back")])
+def test_a_3d_export_that_reports_problems_still_shows_the_board(
+        client, kicad_cli, tmp_path, monkeypatch, size, side):
+    """When kicad-cli exits non-zero but has written a complete model, the
+    viewer gets that model, flagged — not a 500.
+
+    `kicad-cli pcb export glb` exits 1 for things that are not fatal to the
+    output: most commonly it cannot substitute one component's 3D shape, says
+    so on stderr, and writes the whole board anyway. Trusting the exit code
+    turns that into "3D preview unavailable" for a badge that is perfectly
+    fine, and the user has no way to tell a missing LED model from a broken
+    board. Degrading honestly means: hand over the model, and say it may be
+    incomplete rather than presenting it as the finished article.
+
+    Both LED packages are off the 0805 default and one sits on the back, so
+    the design carries several substituted component models rather than the
+    minimum.
+    """
+    monkeypatch.setenv("KICAD_CLI", _cli_stub(
+        tmp_path, kicad_cli, '@REAL@ "$@"\nexit 1'))
+    resp = client.post(
+        "/model3d",
+        data={"params": json.dumps(_params(
+            name="glb", art=[],
+            leds=[{"x": 7, "y": 6, "color": "red", "size": size, "side": side}]))},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200, (
+        "a non-zero exit that still produced a model came back as "
+        f"{resp.status_code}: {resp.get_data()[:200]!r}")
+    assert resp.data[:4] == b"glTF", "response is not a binary glTF"
+    assert resp.headers.get("X-Minibadge-Export-Warning"), (
+        "the export reported problems and the response said nothing — a model "
+        "with a part silently missing is presented as complete")
+
+
+@pytest.mark.webapp
+@pytest.mark.kicad
+@pytest.mark.needs("kicad")
+def test_a_3d_export_that_produces_no_model_is_still_reported_as_a_failure(
+        client, kicad_cli, tmp_path, monkeypatch):
+    """The contrast case: tolerating a non-zero exit must not become tolerating
+    an empty response.
+
+    Without this, "degrade honestly" would quietly widen into serving whatever
+    bytes happen to be on disk, and the viewer would be handed nothing with no
+    explanation. A tool that produced no model is a real failure and has to
+    read as one.
+    """
+    monkeypatch.setenv("KICAD_CLI", _cli_stub(tmp_path, kicad_cli, "exit 1"))
+    resp = client.post(
+        "/model3d",
+        data={"params": json.dumps(_params(name="glb", art=[], leds=[]))},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code >= 500, (
+        f"an export that wrote no model answered {resp.status_code}")
+    body = resp.get_json()
+    assert isinstance(body, dict) and body.get("error"), (
+        f"failure carried no error message: {body!r}")
