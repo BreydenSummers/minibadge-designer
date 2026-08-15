@@ -1381,6 +1381,24 @@ function roundHazard(cx, cy, r) {
   return [[cx + r, cy + t], [cx + t, cy + r], [cx - t, cy + r], [cx - r, cy + t],
           [cx - r, cy - t], [cx - t, cy - r], [cx + t, cy - r], [cx + r, cy - t]];
 }
+// Mirrors pcb._via_collar: the window/art keepout round a via barrel, a
+// 16-gon at the 0.2 mm netclass minimum so the surviving patch of plane
+// renders as the round pad it effectively is. Built from square roots alone
+// — sqrt is IEEE-pinned while cos/sin can differ by an ulp from Python's,
+// and these pieces feed the bridge scan where an ulp can flip a route.
+const VIA_COLLAR_CLEAR = 0.2;
+const C16 = Math.sqrt(2 + Math.sqrt(2)) / 2;
+const S16 = Math.sqrt(2 - Math.sqrt(2)) / 2;
+const H45 = Math.sqrt(2) / 2;
+const R16 = 2 / Math.sqrt(2 + Math.sqrt(2 + Math.sqrt(2)));
+const HEXADECAGON = [[1, 0], [C16, S16], [H45, H45], [S16, C16],
+                     [0, 1], [-S16, C16], [-H45, H45], [-C16, S16],
+                     [-1, 0], [-C16, -S16], [-H45, -H45], [-S16, -C16],
+                     [0, -1], [S16, -C16], [H45, -H45], [C16, -S16]];
+function viaCollar(cx, cy) {
+  const r = (VIA_SIZE / 2 + VIA_COLLAR_CLEAR) * R16;
+  return HEXADECAGON.map(([ux, uy]) => [cx + r * ux, cy + r * uy]);
+}
 function knees45(a, b) {
   const dx = b[0] - a[0], dy = b[1] - a[1];
   if (Math.abs(dx) < 1e-9 || Math.abs(dy) < 1e-9
@@ -1701,12 +1719,11 @@ function unitCopperPieces(L, face) {
                 quadSegPts(nvr.pts[i], nvr.pts[i + 1], 1.1)]);
     }
   } else {
-    // Octagon round the barrel, not a square — mirrors pcb.unit_copper_pieces.
-    // A square at VIA_SIZE + 0.9 reached 1.13 mm from the centre of a 0.35 mm
-    // barrel and erased artwork in a region that carries no current; the
-    // octagon reaches 0.76 mm and uses the board's own pour clearance.
-    out.push(["via", roundHazard(...unitPoint(L, vo[0], vo[1]),
-                                 VIA_SIZE / 2 + POUR_CLEARANCE)]);
+    // Round collar round the barrel — mirrors pcb.unit_copper_pieces (see
+    // viaCollar): a 16-gon at the netclass minimum, so the plane a same-net
+    // via keeps reads as the round pad it effectively is, not the oversized
+    // octagon the pour-rule margin used to leave.
+    out.push(["via", viaCollar(...unitPoint(L, vo[0], vo[1]))]);
     out.push(["trace_stub", quadSeg(front ? g.ledK : g.resIn, vo, 1.1)]);
   }
   if (g.hole) out.push(["hole", quadRect(0, 0, g.hole + 1.0, g.hole + 1.0)]);
@@ -1731,8 +1748,7 @@ function unitCopperPieces(L, face) {
     }
     const kept = out.filter(([lb]) => lb !== "pad_led_k" && lb !== "pad_led_a");
     for (const [lb, off] of [["padvia_k", g.ledK], ["padvia_a", g.ledA]]) {
-      kept.push([lb, roundHazard(...unitPoint(L, off[0], off[1]),
-                                 VIA_SIZE / 2 + POUR_CLEARANCE)]);
+      kept.push([lb, viaCollar(...unitPoint(L, off[0], off[1]))]);
     }
     return kept;
   }

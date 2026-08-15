@@ -989,8 +989,11 @@ def test_a_far_side_led_leaves_no_ghost_pads_on_either_face(client):
         "the window left resistor-shaped pour on the LED face — the "
         "resistor never crossed the board")
     # Contrast: the GND collar around the cathode's via-in-pad on the
-    # resistor face is that LED's ground connection and must survive.
-    collar = Point(11.525, 10.0)
+    # resistor face is that LED's ground connection and must survive. The
+    # probe sits 0.38 mm out — just past the 0.35 mm barrel, inside the
+    # collar the keepout leaves (via radius + the 0.2 mm netclass minimum,
+    # less the window's 0.1 mm registration expansion).
+    collar = Point(11.405, 10.0)
     assert any(p.contains(collar) for p in back), (
         "the window ate the pour collar around the cathode's via-in-pad — "
         "the LED ships wired to nothing")
