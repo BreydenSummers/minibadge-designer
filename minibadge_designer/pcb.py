@@ -1126,6 +1126,8 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
             fills[(pour, layer)] = _fill_geometry(pour, layer, spec)
         return fills[(pour, layer)]
 
+    bridges = unit_bridges(spec, safe)
+
     for i, led in enumerate(leds):
         if not led.novia:
             continue
@@ -1147,8 +1149,17 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
         must = [(cx + ox, cy + oy)] + [
             (px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
             if pnet == pour and num in spec.pins]
-        if not any(all(poly.distance(Point(*m)) < 0.7 for m in must)
-                   for poly in islands(pour, layer)):
+        # The unit's perimeter bridge is real same-net copper on this layer
+        # and can be the only thing joining its island to the plane — a
+        # far-side LED's contact is just its via-in-pad collar, tied to the
+        # ring by the bridge, and judging the fill without it refused boards
+        # whose download was DRC-clean (while the 2D preview happily routed).
+        seg = bridges.get(i, {}).get(layer)
+        copper = unary_union(
+            list(islands(pour, layer))
+            + ([LineString(seg).buffer(TRACK_W / 2)] if seg else []))
+        if not any(all(part.distance(Point(*m)) < 0.7 for m in must)
+                   for part in getattr(copper, "geoms", [copper])):
             problems.append(i)
 
     # Then the question that check cannot ask: a channel is cut across a whole
@@ -1157,7 +1168,6 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     # case entirely — two via-less runs can jointly enclose a third unit's
     # ordinary via, and that third unit was never examined at all because it is
     # not via-less. So walk every unit's rail contacts too.
-    bridges = unit_bridges(spec, safe)
     for i, led in enumerate(leds):
         if i in problems:
             continue
@@ -2902,7 +2912,7 @@ its resistor, with a via inside each of the LED's pads carrying the
 connections through the board — so the LED faces out while the resistor hides
 behind it.
 
-Units with "no via" ticked skip the via entirely: the trace runs to a
+Units with "No power via" ticked run power as a trace to a
 connector pad instead, whose plated hole carries the net to the other side.
 A front-side through-hole LED needs no extra copper at all, since its own
 leads are already plated through to the back pour.

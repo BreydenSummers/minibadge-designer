@@ -1488,8 +1488,8 @@ def _generate_impl(render: bool):
             }, 400
         return {
             "error": f"LED {i + 1} cannot reach its power without a via on this "
-                     "board — switch its via back on, move it, or enable the "
-                     "other connector row"
+                     "board — switch its power via back on, move it, or enable "
+                     "the other connector row"
         }, 400
     spec = _dc_replace(spec, leds=resolved)
     slug = _slug(name)

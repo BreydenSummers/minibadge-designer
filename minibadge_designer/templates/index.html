@@ -4023,7 +4023,7 @@ function refreshWarnings() {
           ? "a trace bend runs too close to other copper — drag it clear, or "
             + "double-click it to remove. Downloads are blocked until it is."
           : "can't reach its power without a via from here — move it, switch the "
-            + "via back on, or turn on the other connector row. Downloads are "
+            + "power via back on, or turn on the other connector row. Downloads are "
             + "blocked until it can.", "led", i]);
       }
     }
@@ -4118,7 +4118,7 @@ function renderLedList() {
       ${pairHTML("r", 0, 359, 1, L.rot)}
       <details class="advbox"${L.novia || L.adv || L.farled ? " open" : ""}>
         <summary>Advanced</summary>
-        <div class="check"><input type="checkbox" class="nvia" id="nvia${i}"${L.novia ? " checked" : ""}><label for="nvia${i}">Skip the via</label></div>
+        <div class="check"><input type="checkbox" class="nvia" id="nvia${i}"${L.novia ? " checked" : ""}><label for="nvia${i}">No power via</label></div>
         ${L.novia ? `<div class="sub">${(PKG[L.size] || PKG["0805"]).drill && L.side !== "back" && !L.farled
           ? "Leads already cross the board — nothing to route."
           : "Traces to the nearest " + (L.side === "back" ? "3V3" : "GND") + " connector pad."}</div>` : ""}
