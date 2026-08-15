@@ -813,7 +813,8 @@ def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
 
 
 def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
-                       others=(), outline=None) -> list[tuple[str, list]]:
+                       others=(), outline=None,
+                       face: str | None = None) -> list[tuple[str, list]]:
     """Convex quads covering the unit's copper plus the margin art must clear.
 
     Pads inflated 0.5 mm per side (solder-mask-bridge rule + hand-soldering
@@ -822,6 +823,14 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
     (+0.5). Labeled (board mm, unit-rotated) — the web UI paints identical
     pieces, so art hugs units the same way in the preview and on the board.
     Much tighter than the old bounding-box rectangle.
+
+    ``face`` ("front"/"back") asks for the pieces as they exist on that board
+    face. It only changes a far-side ("LED on the other side") unit, whose
+    copper is genuinely split across the board: the LED face carries just the
+    LED pads, the power via and any routed hole, while on the resistor face
+    the departed LED pads shrink to the two via barrels sunk in them — art
+    and windows reclaim the rest of the old pad room instead of leaving a
+    pad-shaped slab of copper on a face the part is not even on.
     """
     g = led_geometry(led)
     p = PKG[g["pkg"]]
@@ -899,17 +908,35 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
         pieces.append(("silk_body", quad_rect(0.0, 0.0,
                                               max(bw, lens) + 0.8,
                                               max(bh, lens) + 0.8, lrot)))
+    far = bool(led.farled) and not g["hole"] and "drill" not in p
+    if face is not None and far:
+        far_face = "back" if led.side != "back" else "front"
+        if face == far_face:
+            # Only the LED half crossed over: its pads (vias sunk in them),
+            # the power via's barrel and a routed hole exist here — the
+            # resistor, its pads and every trace stayed behind.
+            keep = {"pad_led_k", "pad_led_a", "via", "hole"}
+            pieces = [(lb, q) for lb, q in pieces if lb in keep]
+        else:
+            # The LED left this face: where its pads were there are only the
+            # two via barrels carrying the nets through.
+            pieces = [(lb, q) for lb, q in pieces
+                      if lb not in ("pad_led_k", "pad_led_a")]
+            for lb, off in (("padvia_k", g["led_k"]), ("padvia_a", g["led_a"])):
+                pieces.append(
+                    (lb, _round_hazard(*pt(*off), VIA_SIZE / 2 + POUR_CLEARANCE)))
     return pieces
 
 
 def unit_copper_poly(led: Led, safe=None, pins=ALL_PINS, others=(),
-                     outline=None):
+                     outline=None, face: str | None = None):
     """unit_copper_pieces as one shapely geometry (for art keepouts)."""
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
 
     return unary_union([Polygon(q) for _, q in
-                        unit_copper_pieces(led, safe, pins, others, outline)])
+                        unit_copper_pieces(led, safe, pins, others, outline,
+                                           face)])
 
 
 def th_pad_circles(led: Led, safe=None) -> list[tuple[float, float, float]]:

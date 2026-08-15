@@ -946,6 +946,56 @@ def test_a_window_leaves_only_board_crossing_copper_on_a_units_far_face(client, 
         "face must keep the copper its pads connect through")
 
 
+def test_a_far_side_led_leaves_no_ghost_pads_on_either_face(client):
+    # "LED on the other side" splits the unit's copper across the board, but
+    # the window keepout still claimed the WHOLE footprint on BOTH faces —
+    # so a window left a pad-shaped slab of pour where the LED's pads used
+    # to be on the resistor face (only two via barrels live there), and a
+    # resistor-shaped one on the LED face where no resistor is. The keepout
+    # is per-face now; each face's window reclaims the other half's room.
+    from shapely.geometry import Point
+
+    img = Image.new("L", (200, 200), 0)  # all black: full-coverage window
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    params = _params(
+        name="ghost",
+        leds=[{"x": 10, "y": 10, "color": "red", "side": "back",
+               "layout": "inline", "farled": True}],
+        art=[{"material": "bare", "threshold": 128,
+              "cx": 10.16, "cy": 10.16, "w": 18}],
+    )
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps(params),
+              "art0": (io.BytesIO(buf.getvalue()), "win.png")},
+        content_type="multipart/form-data",
+    )
+    board = invariants.assert_parses(
+        zipfile.ZipFile(io.BytesIO(resp.data))
+        .read("ghost/ghost.kicad_pcb").decode())
+    # Back inline farled unit at (10, 10): LED pads cross to the front,
+    # resistor stays on the back. Probe inside each half's OLD footprint on
+    # the face it left — off the via octagons, so only ghost copper answers.
+    back = list(board.emitted_fills("B.Cu"))
+    front = list(board.emitted_fills("F.Cu"))
+    assert back and front, "a pour vanished entirely — that is a missing plane"
+    ghost_pad = Point(11.025, 10.95)   # led_k pad room, resistor face (B)
+    assert not any(p.contains(ghost_pad) for p in back), (
+        "the window left a pad-shaped slab on the resistor face where the "
+        "LED's pads used to be — only their via barrels live there")
+    ghost_res = Point(4.725, 10.0)     # res_in pad room, LED face (F)
+    assert not any(p.contains(ghost_res) for p in front), (
+        "the window left resistor-shaped pour on the LED face — the "
+        "resistor never crossed the board")
+    # Contrast: the GND collar around the cathode's via-in-pad on the
+    # resistor face is that LED's ground connection and must survive.
+    collar = Point(11.525, 10.0)
+    assert any(p.contains(collar) for p in back), (
+        "the window ate the pour collar around the cathode's via-in-pad — "
+        "the LED ships wired to nothing")
+
+
 def _window_board(client, tenting):
     """A back inline unit under a full-coverage bare window, generated for
     the mask-cover tests: its 3V3 bridge and its via both cross the opening."""

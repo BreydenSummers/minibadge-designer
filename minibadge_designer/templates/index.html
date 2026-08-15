@@ -1664,7 +1664,7 @@ function advConflict(L) {
   }
   return false;
 }
-function unitCopperPieces(L) {
+function unitCopperPieces(L, face) {
   const g = geomOf(L), p = PKG[g.pkg], rp = resPkgOf(g.pkg);
   const front = L.side !== "back";
   const rrot = g.resRot || 0, lrot = g.ledRot || 0;
@@ -1716,6 +1716,25 @@ function unitCopperPieces(L) {
     const lens = p.lens || 0;
     out.push(["silk_body", quadRect(0, 0, Math.max(p.body[0], lens) + 0.8,
                                     Math.max(p.body[1], lens) + 0.8, lrot)]);
+  }
+  // Per-face view of a far-side LED unit (mirrors pcb.unit_copper_pieces):
+  // its copper really is split across the board — the LED face carries just
+  // the LED pads, power via and hole, while on the resistor face the departed
+  // LED pads shrink to the two via barrels sunk in them, so art and windows
+  // reclaim the rest of the old pad room.
+  const farled = !!L.farled && !g.hole && !p.drill;
+  if (face && farled) {
+    const farFace = L.side !== "back" ? "back" : "front";
+    if (face === farFace) {
+      const keep = new Set(["pad_led_k", "pad_led_a", "via", "hole"]);
+      return out.filter(([lb]) => keep.has(lb));
+    }
+    const kept = out.filter(([lb]) => lb !== "pad_led_k" && lb !== "pad_led_a");
+    for (const [lb, off] of [["padvia_k", g.ledK], ["padvia_a", g.ledA]]) {
+      kept.push([lb, roundHazard(...unitPoint(L, off[0], off[1]),
+                                 VIA_SIZE / 2 + POUR_CLEARANCE)]);
+    }
+    return kept;
   }
   return out;
 }
@@ -2459,8 +2478,9 @@ function eraseArtKeepouts(oc, forWindows, unitSide) {
       continue;
     }
     // Hug the unit's actual copper, not its bounding rectangle — art can
-    // flow right up to the pads/traces plus their clearance margins.
-    for (const [, q] of unitCopperPieces(L)) {
+    // flow right up to the pads/traces plus their clearance margins. The
+    // face matters for a far-side LED, whose copper differs per face.
+    for (const [, q] of unitCopperPieces(L, unitSide || "front")) {
       oc.beginPath();
       q.forEach(([x, y], i) =>
         i ? oc.lineTo(mm2px(x), mm2px(y)) : oc.moveTo(mm2px(x), mm2px(y)));
