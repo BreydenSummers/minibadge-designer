@@ -405,6 +405,12 @@
   .advbox > summary::before { content: "▸ "; }
   .advbox[open] > summary::before { content: "▾ "; }
   .advbox > summary:hover { color: var(--accent); }
+  /* The summary advertises what's inside: a dim content preview while
+     collapsed and idle, or the features currently switched on. Both vanish
+     once open — the checkboxes speak for themselves there. */
+  .advbox > summary .advsum { text-transform: none; letter-spacing: .02em; opacity: .75; }
+  .advbox > summary .advon { text-transform: none; letter-spacing: .02em; color: var(--accent); }
+  .advbox[open] > summary .advsum, .advbox[open] > summary .advon { display: none; }
   .counter { color: var(--dim); font-size: 11px; text-align: right; margin-top: 2px; }
   input[type=file] { display: none; }
   @media (max-width: 1280px) {
@@ -4369,13 +4375,20 @@ function renderLedList() {
       </div>
       ${L.side === "back" && !L.reverse && !L.farled ? `<div class="sub">Faces the host badge — only shows from behind.</div>` : ""}
       ${(PKG[L.size] || PKG["0805"]).drill && !L.reverse ? `<div class="sub">Leads pass through; solder on the far face. Short lead toward the bar.</div>` : ""}
-      <div class="check" style="margin-top:6px"><input type="checkbox" class="rev" id="rev${i}"${L.reverse ? " checked" : ""}><label for="rev${i}">Reverse mount (shines through the board)</label></div>
-      ${L.reverse ? `<div class="sub">Solder upside-down over the hole; glows out the ${L.side === "back" ? "front" : "back"}. 1206 only.</div>` : ""}
       <div class="sub">Rotation (&deg;) — double-click the unit for +90</div>
       ${pairHTML("r", 0, 359, 1, L.rot)}
-      <details class="advbox"${L.novia || L.adv || L.farled ? " open" : ""}>
-        <summary>Advanced</summary>
-        <div class="check"><input type="checkbox" class="nvia" id="nvia${i}"${L.novia ? " checked" : ""}><label for="nvia${i}">No power via</label></div>
+      <details class="advbox"${L.reverse || L.novia || L.adv || L.farled ? " open" : ""}>
+        <summary>Advanced${(() => {
+          const on = [L.reverse && "reverse mount", L.novia && "no via",
+                      L.farled && "far-side LED", L.adv && "free placement"]
+            .filter(Boolean);
+          return on.length
+            ? ` <span class="advon">· ${on.join(" · ")}</span>`
+            : ` <span class="advsum">· reverse mount, routing, placement</span>`;
+        })()}</summary>
+        <div class="check"><input type="checkbox" class="rev" id="rev${i}"${L.reverse ? " checked" : ""}><label for="rev${i}">Reverse mount (shines through the board)</label></div>
+        ${L.reverse ? `<div class="sub">Solder upside-down over the hole; glows out the ${L.side === "back" ? "front" : "back"}. 1206 only.</div>` : ""}
+        <div class="check" style="margin-top:6px"><input type="checkbox" class="nvia" id="nvia${i}"${L.novia ? " checked" : ""}><label for="nvia${i}">No power via</label></div>
         ${L.novia ? `<div class="sub">${(PKG[L.size] || PKG["0805"]).drill && L.side !== "back" && !L.farled
           ? "Leads already cross the board — nothing to route."
           : "Traces to " + (() => {
