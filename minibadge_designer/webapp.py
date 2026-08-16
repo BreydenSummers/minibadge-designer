@@ -1077,6 +1077,17 @@ def _generate_impl(render: bool):
                 (max(0.0, min(20.32, float(n[0]))), max(0.0, min(20.32, float(n[1]))))
                 for n in list(raw.get("nodes") or [])[:8]
                 if isinstance(n, (list, tuple)) and len(n) >= 2)
+            # Where the via-less run ends: a chosen connector pad or another
+            # unit's pad. Shape-checked only — net, kept-pin, face and chain
+            # validity are pcb.novia_term's call, which treats a bad choice
+            # as "no choice" like every other sanitized parameter here.
+            term = None
+            raw_term = raw.get("term")
+            if isinstance(raw_term, dict):
+                if str(raw_term.get("pad", "")) in pcb.PIN_LABELS:
+                    term = ("pad", str(raw_term["pad"]))
+                elif isinstance(raw_term.get("unit"), (int, float)):
+                    term = ("unit", int(raw_term["unit"]))
             adv = None
             raw_adv = raw.get("adv")
             if isinstance(raw_adv, dict):
@@ -1090,11 +1101,12 @@ def _generate_impl(render: bool):
             led = pcb.Led(x=float(raw.get("x", 10)), y=float(raw.get("y", 7)),
                           color=color, side=side, rot=rot, layout=layout,
                           size=size, reverse=reverse, novia=novia,
-                          nodes=nodes, farled=farled, adv=adv)
+                          nodes=nodes, term=term, farled=farled, adv=adv)
             x, y = pcb.clamp_led_obj(led, safe)
             leds.append(pcb.Led(x=x, y=y, color=color, side=side, rot=rot,
                                 layout=layout, size=size, reverse=reverse,
-                                novia=novia, nodes=nodes, farled=farled, adv=adv))
+                                novia=novia, nodes=nodes, term=term,
+                                farled=farled, adv=adv))
     except (TypeError, ValueError, AttributeError):
         return {"error": "invalid led parameters"}, 400
     # Placing the units is pure geometry over user-supplied numbers, so a
@@ -1596,13 +1608,24 @@ def _generate_impl(render: bool):
     resolved, unroutable = pcb.resolve_novia(spec, safe)
     if unroutable:
         i = unroutable[0]
-        route = pcb.novia_route(leds[i], pins, safe, leds, outline=outline_rings)
+        route = pcb.novia_route(
+            leds[i], pins, safe, leds, outline=outline_rings,
+            term=pcb.novia_term(leds[i], leds, pins, safe))
         if route and route.get("manual") and route.get("tight"):
             # Their own bends are the problem, so say that rather than blaming
             # the via setting they deliberately turned off.
             return {
                 "error": f"LED {i + 1}: a trace bend runs too close to other "
                          "copper — drag it clear, or double-click it to remove"
+            }, 400
+        if route and route.get("term"):
+            # Same idea for a hand-picked destination: whether the run cannot
+            # reach it or reaches it only by fencing the pour apart, the
+            # choice is the problem — name it instead of the via setting.
+            return {
+                "error": f"LED {i + 1}: no clear path to the chosen trace end — "
+                         "drag the endpoint somewhere else, or double-click "
+                         "it to go back to the nearest pad"
             }, 400
         return {
             "error": f"LED {i + 1} cannot reach its power without a via on this "

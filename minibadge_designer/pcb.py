@@ -338,6 +338,13 @@ class Led:
     # Board-mm bends the via-less run must pass through, in order. Set by
     # dragging handles on the canvas; empty means route automatically.
     nodes: tuple = ()
+    # Where the via-less run ends. None = the nearest connector pad carrying
+    # the net (the classic choice). ("pad", "16") = that specific connector
+    # pad; ("unit", 3) = the same-net pad of another unit on this face, so
+    # several runs can share one path to the rail. An invalid choice (wrong
+    # net, dropped pin, other face, or a chain that loops back on itself)
+    # falls back to None rather than refusing — see novia_term().
+    term: tuple | None = None
     # Put just the LED on the opposite face, with a via inside each of its
     # pads carrying the connections through — the via-in-pad style other
     # minibadge designers use. Not combinable with reverse mount.
@@ -665,8 +672,63 @@ def mitre45(pts, ok):
     return keep
 
 
+def novia_term(led: Led, leds=(), pins=ALL_PINS, safe=None):
+    """Resolve led.term to ((x, y), target_led | None), or None for auto.
+
+    None means "route to the nearest pad" — both when no terminal was chosen
+    and when the chosen one is invalid: a pad on the wrong net or a dropped
+    pin, a unit on the other face (its SMD pads have no copper on this
+    layer), or a unit chain that loops back on itself and so never reaches a
+    plated hole. Falling back matches how every other bad parameter is
+    handled here, and the canvas never offers those choices in the first
+    place.
+    """
+    if not led.novia or not led.term:
+        return None
+    net = "GND" if led.side != "back" else "3V3"
+    kind, ref = led.term[0], led.term[1]
+    if kind == "pad":
+        for num, px, py, pnet, _row in CONNECTOR_PADS:
+            if num == ref and pnet == net and num in pins:
+                return (px, py), None
+        return None
+    if kind != "unit":
+        return None
+    leds = list(leds)
+    try:
+        k = int(ref)
+        target = leds[k]
+    except (TypeError, ValueError, IndexError):
+        return None
+    if k < 0 or target is led or target.side != led.side:
+        return None
+    # A chain has to bottom out at a plated hole. Every link that is itself
+    # invalid falls back to a connector pad (this same function), so the only
+    # way a chain never lands is a true cycle — follow the links and refuse
+    # those. Everything else (a link that turns out unroutable, a stranded
+    # pour) stays resolve_novia's judgement, exactly as without a terminal.
+    seen = {id(led), id(target)}
+    cur = target
+    while cur.novia and cur.term and cur.term[0] == "unit":
+        try:
+            nxt = leds[int(cur.term[1])]
+        except (TypeError, ValueError, IndexError):
+            break  # invalid link: that unit will route to a pad instead
+        if int(cur.term[1]) < 0 or nxt is cur or nxt.side != cur.side:
+            break
+        if id(nxt) in seen:
+            return None  # a loop feeds nothing
+        seen.add(id(nxt))
+        cur = nxt
+    g = led_geometry(target)
+    tx, ty = clamp_led_obj(target, safe)
+    off = g["led_k"] if net == "GND" else g["res_in"]
+    ox, oy = _r(off[0], off[1], target.rot)
+    return (tx + ox, ty + oy), target
+
+
 def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
-                outline=None):
+                outline=None, term=None):
     """Where a via-less unit runs its power trace, or None.
 
     A unit sits in one pour and needs the other net. Normally it drops
@@ -678,6 +740,13 @@ def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
     Front units chase GND from the cathode, back units chase 3V3 from the
     resistor's input — the same net the via used to fetch. Ties break on
     CONNECTOR_PADS order so the web preview picks the same pad.
+
+    `term` (from novia_term) overrides the destination: the run goes to that
+    exact point — a chosen connector pad, or another unit's same-net pad so
+    several runs can share one path. A chosen destination is never traded
+    for a reachable one; an unreachable choice comes back flagged "tight"
+    so the UI can say so, because silently landing somewhere else would make
+    the preview lie about the board.
 
     Returns {"pts": [board mm, ...], "net": str, "pad": (x, y)}. The run is a
     straight shot where that clears the unit's own copper, and doglegs across
@@ -706,21 +775,26 @@ def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
     # resistor, so it gets a trace.)
     if front and "drill" in PKG[g["pkg"]]:
         return {"pts": [start], "net": net, "pad": None, "direct": True}
-    targets = sorted(
-        ((px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
-         if pnet == net and num in pins),
-        key=lambda t: (t[0] - start[0]) ** 2 + (t[1] - start[1]) ** 2)
-    if not targets:
-        return None  # no kept pin carries this net; the caller warns
+    if term is not None:
+        targets = [term[0]]
+    else:
+        targets = sorted(
+            ((px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
+             if pnet == net and num in pins),
+            key=lambda t: (t[0] - start[0]) ** 2 + (t[1] - start[1]) ** 2)
+        if not targets:
+            return None  # no kept pin carries this net; the caller warns
 
     # Everything the run has to stay clear of: this unit's own copper bar the
     # pad it leaves from, every other unit sharing this layer, and any
     # connector pad on a different net (VBATT and CLK/NC included — landing
-    # on those would be worse than a short).
+    # on those would be worse than a short). A chained-to unit's same-net pad
+    # is the destination, so it is dropped the same way the start pad is.
+    term_led = term[1] if term else None
     hazards = _unit_copper_quads(led, safe, skip_start=True)
     siblings = [o for o in others if o is not led and o.side == led.side]
     for o in siblings:
-        hazards += _unit_copper_quads(o, safe, skip_start=False)
+        hazards += _unit_copper_quads(o, safe, skip_start=o is term_led)
     # A unit on the far side still lands copper on this layer wherever its
     # pads are plated through, and a routed hole is a hole on every layer.
     for o in others:
@@ -779,6 +853,8 @@ def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
         # The bends stay exactly where they were put; only the corners between
         # them are softened into 45s.
         out = {"pts": mitre45(pts, clear), "net": net, "pad": pad, "manual": True}
+        if term is not None:
+            out["term"] = True
         if bad:
             out["tight"] = True
         return out
@@ -842,10 +918,16 @@ def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
         pts = route_to(pad)
         if pts is None:
             continue
-        return {"pts": mitre45(pts, clear), "net": net, "pad": pad}
+        out = {"pts": mitre45(pts, clear), "net": net, "pad": pad}
+        if term is not None:
+            out["term"] = True
+        return out
     # Nothing legal reaches any pad — flag it so the UI can warn rather than
     # ship a board whose LED never lights.
-    return {"pts": [start, targets[0]], "net": net, "pad": targets[0], "tight": True}
+    out = {"pts": [start, targets[0]], "net": net, "pad": targets[0], "tight": True}
+    if term is not None:
+        out["term"] = True
+    return out
 
 
 def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
@@ -908,7 +990,8 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
         ("pad_res_out", quad_rect(*g["res_out"], rw, rh, rrot)),
         ("trace_a", quad_seg(g["res_out"], g["led_a"], 1.1)),
     ]
-    route = novia_route(led, pins, safe, others, outline=outline)
+    route = novia_route(led, pins, safe, others, outline=outline,
+                        term=novia_term(led, others, pins, safe))
     if route:
         # No via to clear, but a long run to the connector pad that artwork
         # must keep off just the same — copper art touching it would short
@@ -1131,7 +1214,8 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     for i, led in enumerate(leds):
         if not led.novia:
             continue
-        route = novia_route(led, spec.pins, safe, leds, outline=spec.outline)
+        route = novia_route(led, spec.pins, safe, leds, outline=spec.outline,
+                            term=novia_term(led, leds, spec.pins, safe))
         if route is None or route.get("direct"):
             continue  # nothing routed, so nothing can cut the pour
         if route.get("tight"):
@@ -2051,7 +2135,8 @@ def _led_unit(
     far = (bool(led.farled) and not g["hole"]
            and "drill" not in PKG[g["pkg"]])
     led_side = ("back" if led.side != "back" else "front") if far else led.side
-    route = novia_route(led, pins, safe, others, outline=outline)
+    route = novia_route(led, pins, safe, others, outline=outline,
+                        term=novia_term(led, others, pins, safe))
     avoid_led: tuple = ()
     avoid_res: tuple = ()
     if not tenting and route is None:
@@ -2197,7 +2282,8 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
 
         # The via barrel exists on both copper layers. A via-less unit has
         # none: its power run is a trace on its own layer, handled below.
-        route = novia_route(led, spec.pins, safe, spec.leds, outline=spec.outline)
+        route = novia_route(led, spec.pins, safe, spec.leds, outline=spec.outline,
+                            term=novia_term(led, spec.leds, spec.pins, safe))
         if route is None:
             if via_net != zone_net:
                 obstacles.append(
@@ -2847,7 +2933,10 @@ def generate_bom(spec: BadgeSpec) -> str:
             far = "front" if side == "back" else "back"
             note += f"; mounts on the {far} face — via in each pad"
         if led.novia:
-            note += "; no via — wired to a connector pad"
+            if led.term and led.term[0] == "unit":
+                note += f"; no via — chained onto LED D{int(led.term[1]) + 1}'s pad"
+            else:
+                note += "; no via — wired to a connector pad"
         led_side = ("front" if side == "back" else "back") if led.farled else side
         lines.append(f"D{i + 1},LED {led.color},{fp},{led_side},1,{note}")
         r = LED_COLORS.get(led.color, "220")

@@ -905,7 +905,9 @@ function undoDelete() {
   // whole editor down with no toast, no DOM change and no failed request.
   if (item === undefined || item === null) return false;
   if (kind === "led") {
-    state.leds.splice(Math.min(index, state.leds.length), 0, item);
+    const at = Math.min(index, state.leds.length);
+    remapTerms(at, +1);
+    state.leds.splice(at, 0, item);
     renderLedList();
   } else if (kind === "text") {
     state.texts.splice(Math.min(index, state.texts.length), 0, item);
@@ -1483,6 +1485,58 @@ function mitre45(pts, ok, owners) {
   }
   return { pts: keep, owners: keepOwn };
 }
+// Mirror of pcb.novia_term: resolve L.term ({pad:"16"} or {unit:3}) to
+// {pt:[x,y], unit: led|null}, or null for auto. A chosen-but-invalid
+// terminal — wrong net, dropped pin, other face, or a unit chain that loops
+// back on itself — falls back to auto exactly like the server, so the two
+// routers can never disagree about where a run ends.
+function noviaTerm(L) {
+  if (!L.novia || !L.term) return null;
+  const net = L.side !== "back" ? "GND" : "3V3";
+  if (L.term.pad != null) {
+    const q = PADS.find(p => p[4] === L.term.pad);
+    if (!q || padNetOf(q[2]) !== net || !pinOn(q[4])) return null;
+    return { pt: [q[0], q[1]], unit: null };
+  }
+  if (L.term.unit == null) return null;
+  const k = Math.trunc(+L.term.unit), target = state.leds[k];
+  if (!(k >= 0) || !target || target === L || target.side !== L.side) return null;
+  const seen = new Set([L, target]);
+  let cur = target;
+  while (cur.novia && cur.term && cur.term.unit != null) {
+    const j = Math.trunc(+cur.term.unit), nxt = state.leds[j];
+    if (!(j >= 0) || !nxt || nxt === cur || nxt.side !== cur.side) break;
+    if (seen.has(nxt)) return null; // a loop feeds nothing
+    seen.add(nxt);
+    cur = nxt;
+  }
+  const tg = geomOf(target);
+  const off = net === "GND" ? tg.ledK : tg.resIn;
+  return { pt: unitPoint(target, off[0], off[1]), unit: target };
+}
+// Every place this unit's trace may legally end: same-net kept connector
+// pads, plus the same-net pad of every same-face unit whose chain bottoms
+// out. Each candidate is probed with the real validator (temporarily set,
+// identity intact), so a choice that would loop is never even offered —
+// the dragged endpoint can only land somewhere valid.
+function noviaTermTargets(L) {
+  const net = L.side !== "back" ? "GND" : "3V3";
+  const out = [];
+  for (const q of PADS) {
+    if (padNetOf(q[2]) === net && pinOn(q[4])) {
+      out.push({ term: { pad: q[4] }, x: q[0], y: q[1] });
+    }
+  }
+  const had = "term" in L, prev = L.term;
+  state.leds.forEach((o, k) => {
+    if (o === L || o.side !== L.side) return;
+    L.term = { unit: k };
+    const probe = noviaTerm(L);
+    if (probe) out.push({ term: { unit: k }, x: probe.pt[0], y: probe.pt[1] });
+  });
+  if (had) L.term = prev; else delete L.term;
+  return out;
+}
 function noviaRouteRaw(L) {
   if (!L.novia) return null;
   const g = geomOf(L), p = PKG[g.pkg];
@@ -1491,16 +1545,25 @@ function noviaRouteRaw(L) {
   const sOff = front ? g.ledK : g.resIn;
   const start = unitPoint(L, sOff[0], sOff[1]);
   if (front && p.drill) return { pts: [start], net, pad: null, direct: true };
-  const targets = PADS
-    .filter(q => padNetOf(q[2]) === net && pinOn(q[4]))
-    .map(q => [q[0], q[1]])
-    .sort((u, v) => ((u[0] - start[0]) ** 2 + (u[1] - start[1]) ** 2)
-                  - ((v[0] - start[0]) ** 2 + (v[1] - start[1]) ** 2));
-  if (!targets.length) return null;
+  const term = noviaTerm(L);
+  let targets;
+  if (term) {
+    targets = [term.pt];
+  } else {
+    targets = PADS
+      .filter(q => padNetOf(q[2]) === net && pinOn(q[4]))
+      .map(q => [q[0], q[1]])
+      .sort((u, v) => ((u[0] - start[0]) ** 2 + (u[1] - start[1]) ** 2)
+                    - ((v[0] - start[0]) ** 2 + (v[1] - start[1]) ** 2));
+    if (!targets.length) return null;
+  }
 
+  // A chained-to unit's same-net pad is the destination, so it is dropped
+  // from the hazards the same way the start pad is.
+  const termLed = term ? term.unit : null;
   const hazards = unitCopperQuads(L, true);
   const siblings = state.leds.filter(o => o !== L && o.side === L.side);
-  for (const o of siblings) hazards.push(...unitCopperQuads(o, false));
+  for (const o of siblings) hazards.push(...unitCopperQuads(o, o === termLed));
   for (const o of state.leds) {
     if (o === L || o.side === L.side) continue;
     const og = geomOf(o), op = PKG[og.pkg];
@@ -1558,11 +1621,16 @@ function noviaRouteRaw(L) {
     // them are softened into 45s.
     const m = mitre45(raw, clear, raw.map((_p, i) => i));
     const out = { pts: m.pts, owners: m.owners, net, pad, manual: true };
+    if (term) out.term = true;
     if (bad) out.tight = true;
     return out;
   }
   for (const pad of targets) {
-    if (clear(start, pad)) return { ...mitre45([start, pad], clear), net, pad };
+    if (clear(start, pad)) {
+      const out = { ...mitre45([start, pad], clear), net, pad };
+      if (term) out.term = true;
+      return out;
+    }
     // Dijkstra over the visibility graph; same node order and tie-breaks as
     // the server so both pick the identical path.
     const nodes = [start, pad, ...waypoints], n = nodes.length;
@@ -1585,10 +1653,14 @@ function noviaRouteRaw(L) {
       const chain = [];
       for (let at = 1; at !== -1; at = prev[at]) chain.push(nodes[at]);
       chain.reverse();
-      return { ...mitre45(chain, clear), net, pad };
+      const out = { ...mitre45(chain, clear), net, pad };
+      if (term) out.term = true;
+      return out;
     }
   }
-  return { pts: [start, targets[0]], net, pad: targets[0], tight: true };
+  const out = { pts: [start, targets[0]], net, pad: targets[0], tight: true };
+  if (term) out.term = true;
+  return out;
 }
 // Routing is far too heavy for every mousemove, so results are cached per
 // unit and only recomputed when something that could move the trace changes.
@@ -1596,8 +1668,11 @@ function noviaRouteRaw(L) {
 // is drawn until it settles, then the exact path replaces it.
 let _noviaCache = new Map(), _noviaPrev = new Map();
 function noviaKey(L) {
+  // term is part of the key; a chained target's own geometry is covered by
+  // that unit's key inside noviaSig, so moving it flushes the whole cache.
   return [L.x, L.y, L.rot, L.side, L.size, L.layout, !!L.reverse, !!L.novia,
           !!L.farled, JSON.stringify(L.nodes || []),
+          JSON.stringify(L.term || null),
           L.adv ? JSON.stringify(L.adv) : ""].join("|");
 }
 function noviaSig() {
@@ -2816,6 +2891,38 @@ function drawUnitGeometry(c, led, parts = "all") {
       c.strokeStyle = "#6fb2ff"; c.stroke();
     }
   }
+  // The trace's end is a handle for every via-less unit (no advanced mode
+  // needed): drag it to any highlighted spot — a same-net connector pad, or
+  // another unit's same-net pad to share a run. Diamond, so it never reads
+  // as one more bend dot.
+  if (parts !== "led" && led.novia && nvr && !nvr.direct && nvr.pts.length > 1) {
+    const [ex, ey] = nvr.pts[nvr.pts.length - 1];
+    const [px3, py3] = [mm2px(ex), mm2px(ey)];
+    const r3 = 0.52 * SCALE;
+    c.beginPath();
+    c.moveTo(px3, py3 - r3); c.lineTo(px3 + r3, py3);
+    c.lineTo(px3, py3 + r3); c.lineTo(px3 - r3, py3);
+    c.closePath();
+    c.fillStyle = led.term ? "#6fb2ff" : "rgba(10,16,24,.85)"; c.fill();
+    c.lineWidth = Math.max(1, 0.09 * SCALE);
+    c.strokeStyle = led.term ? "rgba(255,255,255,.9)" : "#6fb2ff"; c.stroke();
+    if (drag && drag.kind === "ledterm" && state.leds[drag.index] === led
+        && drag.cands) {
+      // Every legal destination glows while the endpoint is in hand; the
+      // one the drop would pick right now is filled. The endpoint can only
+      // land on one of these, never in open space.
+      for (const cand of drag.cands) {
+        const [qx, qy] = [mm2px(cand.x), mm2px(cand.y)];
+        const cur = led.term && JSON.stringify(led.term) === JSON.stringify(cand.term);
+        c.beginPath(); c.arc(qx, qy, (cur ? 1.35 : 1.1) * SCALE, 0, 7);
+        if (cur) { c.fillStyle = "rgba(111,178,255,.25)"; c.fill(); }
+        c.lineWidth = Math.max(1, (cur ? 0.16 : 0.09) * SCALE);
+        c.setLineDash(cur ? [] : [4, 3]);
+        c.strokeStyle = "#6fb2ff"; c.stroke();
+        c.setLineDash([]);
+      }
+    }
+  }
   if (g.hole) {
     // Reverse-mount: the routed hole under the LED.
     const [hx, hy] = P(0, 0);
@@ -3258,9 +3365,34 @@ function attachPointer(cv, side) {
       return null;
     };
     const ledHit = sameSide => {
+      // Two units' trace ends can sit on the same connector pad; the
+      // selected unit's endpoint wins the grab there, or the top one would
+      // shadow the other forever.
+      if (sameSide && selectedRef && state.leds.includes(selectedRef)) {
+        const L = selectedRef;
+        if (L.side === side && L.novia) {
+          const nvr = noviaRoute(L);
+          if (nvr && !nvr.direct && nvr.pts.length > 1) {
+            const [ex, ey] = nvr.pts[nvr.pts.length - 1];
+            if (Math.hypot(mx - ex, my - ey) < 0.9) {
+              return { kind: "ledterm", index: state.leds.indexOf(L),
+                       x: ex, y: ey, side: L.side };
+            }
+          }
+        }
+      }
       for (let i = state.leds.length - 1; i >= 0; i--) {
         const L = state.leds[i];
         if ((L.side === side) !== sameSide) continue;
+        if (L.novia && sameSide) { // the trace's draggable endpoint
+          const nvr = noviaRoute(L);
+          if (nvr && !nvr.direct && nvr.pts.length > 1) {
+            const [ex, ey] = nvr.pts[nvr.pts.length - 1];
+            if (Math.hypot(mx - ex, my - ey) < 0.9) {
+              return { kind: "ledterm", index: i, x: ex, y: ey, side: L.side };
+            }
+          }
+        }
         if (L.adv && L.novia && sameSide) { // hand-placed trace bends
           for (let n = (L.nodes || []).length - 1; n >= 0; n--) {
             const [nx, ny] = L.nodes[n];
@@ -3424,6 +3556,11 @@ function attachPointer(cv, side) {
     if (hit) {
       drag = { kind: hit.kind, index: hit.index, node: hit.node,
                dx: hit.x - mx, dy: hit.y - my };
+      if (hit.kind === "ledterm") {
+        // Enumerate the legal destinations once, at pick-up: the move
+        // handler snaps to the nearest of these and nothing else.
+        drag.cands = noviaTermTargets(state.leds[hit.index]);
+      }
       cv.setPointerCapture(e.pointerId);
       cv.style.cursor = "grabbing";
       showPanel(PANEL_OF_KIND[hit.kind]); // the rail follows the selection
@@ -3478,6 +3615,19 @@ function attachPointer(cv, side) {
         for (const [txx, tyy] of [[nx, ny], [nx, L.y], [L.x, ny]]) {
           if (ledPosOk({...L, x: txx, y: tyy}, drag.index)) { L.x = txx; L.y = tyy; break; }
         }
+      }
+    } else if (drag.kind === "ledterm") {
+      // The endpoint follows the cursor by snapping to the nearest legal
+      // destination — it can never be dropped in open space, so the trace
+      // always ends somewhere real.
+      const L = state.leds[drag.index];
+      if (L && drag.cands && drag.cands.length) {
+        let best = null, bd = Infinity;
+        for (const cand of drag.cands) {
+          const d2 = (cand.x - mx) ** 2 + (cand.y - my) ** 2;
+          if (d2 < bd) { bd = d2; best = cand; }
+        }
+        if (best) L.term = { ...best.term };
       }
     } else if (drag.kind === "lednode") {
       const L = state.leds[drag.index];
@@ -3606,8 +3756,10 @@ function attachPointer(cv, side) {
       || drag.kind === "resize" && drag.tkind === "text";
     const wasArt = (drag.kind === "resize" || drag.kind === "rotate") && drag.tkind === "art";
     const wasLedRotate = drag.kind === "rotate" && drag.tkind === "led";
+    const wasTerm = drag.kind === "ledterm";
     const idx = drag.index;
     drag = null;
+    if (wasTerm) renderLedList(); // the card names the chosen destination
     if (wasArt) {
       const a = state.art[idx];
       if (a) rebuildArt(a); // final exact rebuild after throttled rotation
@@ -3641,6 +3793,12 @@ function attachPointer(cv, side) {
       const L = state.leds[hit.index];
       L.nodes = (L.nodes || []).filter((_n, k) => k !== hit.node);
       if (!L.nodes.length) delete L.nodes;
+      renderLedList(); draw();
+      return;
+    }
+    if (hit.kind === "ledterm") {
+      // Back to the automatic choice: the nearest same-net connector pad.
+      delete state.leds[hit.index].term;
       renderLedList(); draw();
       return;
     }
@@ -3714,7 +3872,8 @@ let selected = null; // {kind, index, side} — last clicked object, for keyboar
 let selectedRef = null;
 const SEL_LIST = { text: () => state.texts, art: () => state.art,
                    shapeel: () => state.shape.elements };
-// led / ledres / ledvia / ledbody / lednode are all parts of one LED unit.
+// led / ledres / ledvia / ledbody / lednode / ledterm are all parts of one
+// LED unit.
 const selList = kind => (SEL_LIST[kind] || (() => state.leds))();
 function setSelection(kind, index, side) {
   const item = kind ? selList(kind)[index] : null;
@@ -3738,12 +3897,28 @@ function reconcileSelection() {
 // the undo buffer and the selection honest: an empty slot is never recorded
 // as a deletion (undo would splice `undefined` back in and every later draw
 // would throw), and the selection never outlives the object it named.
+// Unit-terminal references are indices into state.leds, so removing or
+// restoring a unit has to renumber them — otherwise deleting LED 2 silently
+// rewires every trace that ended on LED 3.
+function remapTerms(at, delta) {
+  for (const L of state.leds) {
+    if (!L.term || L.term.unit == null) continue;
+    const k = L.term.unit;
+    if (delta < 0) {
+      if (k === at) delete L.term;        // its destination is gone: auto
+      else if (k > at) L.term = { unit: k - 1 };
+    } else if (k >= at) {
+      L.term = { unit: k + 1 };
+    }
+  }
+}
 function removeItem(kind, i, label) {
   const list = selList(kind);
   const item = list[i];
   if (!item) return false;
   noteDeleted(kind, i, item, label);
   list.splice(i, 1);
+  if (kind === "led") remapTerms(i, -1);
   if (selectedRef === item) clearSelection();
   else reconcileSelection();
   return true;
@@ -4034,7 +4209,8 @@ function blockingProblems() {
     const r = L.novia ? noviaRoute(L) : null;
     if (r && r.tight) {
       out.push([r.manual ? `LED ${i + 1} has a trace bend too close to other copper`
-                        : `LED ${i + 1} can't reach its power without a via`, "led", i]);
+                : r.term ? `LED ${i + 1} has no clear path to its chosen trace end`
+                : `LED ${i + 1} can't reach its power without a via`, "led", i]);
     }
   });
   state.texts.forEach((t, i) => {
@@ -4070,6 +4246,10 @@ function refreshWarnings() {
         want.push([`w:led-novia-${i}`, `LED ${i + 1}`, r.manual
           ? "a trace bend runs too close to other copper — drag it clear, or "
             + "double-click it to remove. Downloads are blocked until it is."
+          : r.term
+          ? "no clear path to the chosen trace end — drag the endpoint "
+            + "somewhere else, or double-click it to go back to the nearest "
+            + "pad. Downloads are blocked until it routes."
           : "can't reach its power without a via from here — move it, switch the "
             + "power via back on, or turn on the other connector row. Downloads are "
             + "blocked until it can.", "led", i]);
@@ -4169,7 +4349,16 @@ function renderLedList() {
         <div class="check"><input type="checkbox" class="nvia" id="nvia${i}"${L.novia ? " checked" : ""}><label for="nvia${i}">No power via</label></div>
         ${L.novia ? `<div class="sub">${(PKG[L.size] || PKG["0805"]).drill && L.side !== "back" && !L.farled
           ? "Leads already cross the board — nothing to route."
-          : "Traces to the nearest " + (L.side === "back" ? "3V3" : "GND") + " connector pad."}</div>` : ""}
+          : "Traces to " + (() => {
+              if (!L.term) return "the nearest " + (L.side === "back" ? "3V3" : "GND")
+                + " connector pad";
+              if (L.term.pad != null) {
+                const q = PADS.find(p => p[4] === L.term.pad);
+                if (q) return "the " + q[2] + " pad (" + q[3] + " row)";
+              }
+              if (L.term.unit != null) return "LED " + (L.term.unit + 1) + "'s pad";
+              return "the nearest " + (L.side === "back" ? "3V3" : "GND") + " connector pad";
+            })() + " — drag the &#9670; endpoint to any highlighted spot; double-click it for the nearest pad."}</div>` : ""}
         <div class="check" style="margin-top:6px"><input type="checkbox" class="farled" id="farled${i}"${L.farled && farOK(L) ? " checked" : ""}${farOK(L) ? "" : " disabled"}><label for="farled${i}">LED on the other side</label></div>
         ${L.farled && farOK(L) ? `<div class="sub">LED sits on the ${L.side === "back" ? "front" : "back"}; a via in each of its pads carries the connections through.</div>`
           : L.reverse ? `<div class="sub">Not with reverse mount — that already shines through.</div>`
@@ -4227,7 +4416,7 @@ function renderLedList() {
     };
     div.querySelector(".nvia").onchange = e => {
       L.novia = e.target.checked;
-      if (!L.novia) delete L.nodes;   // bends belong to the routed trace
+      if (!L.novia) { delete L.nodes; delete L.term; } // both belong to the trace
       renderLedList(); reposition(); draw(); m3dStale("via routing changed");
     };
     div.querySelector(".farled").onchange = e => {
@@ -5167,6 +5356,7 @@ const TIPS = {
     <li><b>In line</b> = thin strip (fits behind the visor), <b>Stacked</b> = compact block,  <b>Reverse mount</b> is the badgelife trick: a 1206 soldered upside-down over a routed hole so it glows out the other face (works with either layout). Double-click for +90°, drag the knob for any angle — tilted units only claim the room they really need.</li>
     <li><b>Size</b> picks the part package: 0603 is compact but fiddly to hand-solder, 0805 is the minibadge standard, 1206 is bigger, brighter, and easiest to solder. The <b>TH</b> entries are through-hole LEDs that stand off the board — 1.8 mm (tiny dome, barely bigger than a 1206), 3 mm (the classic), and the 5×2 mm rectangular bar (great for eyes, mouths, and light strips). Their series resistor stays an 0805.</li>
     <li><b>Advanced placement</b> unlocks the whole unit: the LED, resistor, and via each drag on their own (double-click a part for +90&deg;, or type offsets and angles) when the standard layouts don't fit around your art. The card warns if a placement would short copper.</li>
+    <li><b>No power via</b> runs a trace to a connector pad instead — and its ◆ endpoint is draggable: every legal destination lights up (any same-net pad, or another unit's pad to share one run), the drop snaps to the nearest one, and double-clicking goes back to the automatic choice.</li>
   </ul>` },
   text: { title: "Step 5 — your handle on the back", img: "text.webp", html: `<ul>
     <li>Sign your work: "made by half" in <b>Black Ops One</b>, with Side set to <b>Back</b> — the bundled typefaces become exact polygons and can use any material; KiCad's own stroke font is silkscreen-only.</li>
@@ -5242,7 +5432,8 @@ for (const [k, tabId] of Object.entries(PANEL_TABS)) {
 }
 // Selecting something on the board opens its panel — the rail follows you.
 const PANEL_OF_KIND = { led: "leds", ledres: "leds", ledvia: "leds", lednode: "leds",
-                        ledbody: "leds", text: "text", art: "art", shapeel: "shape" };
+                        ledterm: "leds", ledbody: "leds", text: "text",
+                        art: "art", shapeel: "shape" };
 
 let view = "both";
 function setView(v) {
