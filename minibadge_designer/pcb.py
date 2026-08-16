@@ -672,6 +672,57 @@ def mitre45(pts, ok):
     return keep
 
 
+def soften45(pts, ok):
+    """Ease every corner turning more than 45 degrees. ok(a, b) vets legs.
+
+    mitre45 shapes each leg but says nothing about the joint between legs,
+    so a route forced to approach its pad from the far side can fold back
+    on itself there. A fold-back sharper than a hairpin is pure stub copper
+    and is cut outright; any other sharp corner is chamfered along its
+    bisector, which halves the turn, so repeated sweeps bring even a
+    near-reversal under 45. A chamfer ok() rejects is retried shorter and
+    then kept as it was: like mitre45 this can only improve a route.
+
+    Mirrored by soften45 in index.html; sqrt-only maths on purpose, exactly
+    like the polygon tables above, so the two stay bit-identical.
+    """
+    pts = list(pts)
+    for _sweep in range(6):
+        changed = False
+        i = 1
+        while i + 1 < len(pts):
+            a, c, b = pts[i - 1], pts[i], pts[i + 1]
+            v1x, v1y = c[0] - a[0], c[1] - a[1]
+            v2x, v2y = b[0] - c[0], b[1] - c[1]
+            l1 = (v1x * v1x + v1y * v1y) ** 0.5
+            l2 = (v2x * v2x + v2y * v2y) ** 0.5
+            dot = v1x * v2x + v1y * v2y
+            # Zero-length legs and hairpins both collapse to dropping the
+            # corner: the trace already covers the straight remainder.
+            if l1 < 1e-9 or l2 < 1e-9 or dot <= -(1 - 1e-6) * l1 * l2:
+                del pts[i]
+                changed = True
+                continue
+            if dot >= (_H45 - 1e-6) * l1 * l2:
+                i += 1  # already 45 or gentler
+                continue
+            for f in (1.0, 0.5, 0.25):
+                t = f * min(0.6, l1 / 2, l2 / 2)
+                p = (c[0] - v1x / l1 * t, c[1] - v1y / l1 * t)
+                q = (c[0] + v2x / l2 * t, c[1] + v2y / l2 * t)
+                # a-p and q-b are subsegments of vetted legs, so only the
+                # bridge needs checking.
+                if ok(p, q):
+                    pts[i:i + 1] = [p, q]
+                    changed = True
+                    i += 1
+                    break
+            i += 1
+        if not changed:
+            break
+    return pts
+
+
 def novia_term(led: Led, leds=(), pins=ALL_PINS, safe=None):
     """Resolve led.term to ((x, y), target_led | None), or None for auto.
 
@@ -918,7 +969,8 @@ def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
         pts = route_to(pad)
         if pts is None:
             continue
-        out = {"pts": mitre45(pts, clear), "net": net, "pad": pad}
+        out = {"pts": soften45(mitre45(pts, clear), clear),
+               "net": net, "pad": pad}
         if term is not None:
             out["term"] = True
         return out

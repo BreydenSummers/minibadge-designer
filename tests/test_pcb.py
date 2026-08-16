@@ -963,6 +963,78 @@ def test_auto_routes_come_out_as_45s_too():
     assert r["tight"] and r["manual"]
 
 
+def _worst_turn_deg(pts) -> float:
+    """Largest direction change at any joint of the polyline, in degrees.
+
+    A coincident-point pair reads as the worst possible turn: it is the
+    residue of a hairpin, which is exactly the copper this measures for.
+    """
+    import math
+    worst = 0.0
+    for i in range(1, len(pts) - 1):
+        a, c, b = pts[i - 1], pts[i], pts[i + 1]
+        v1 = (c[0] - a[0], c[1] - a[1])
+        v2 = (b[0] - c[0], b[1] - c[1])
+        l1 = math.hypot(*v1)
+        l2 = math.hypot(*v2)
+        if l1 < 1e-9 or l2 < 1e-9:
+            return 180.0
+        dot = (v1[0] * v2[0] + v1[1] * v2[1]) / (l1 * l2)
+        worst = max(worst, math.degrees(math.acos(max(-1.0, min(1.0, dot)))))
+    return worst
+
+
+@pytest.mark.slow
+def test_routes_squeezed_around_an_obstacle_never_turn_sharper_than_45():
+    """No joint of a via-less run changes direction by more than 45 degrees.
+
+    _all_45 above vets each leg, but the fold happens BETWEEN legs: mitre45
+    shapes legs independently, so a run forced to approach its pad from the
+    far side of an obstacle used to ship a hairpin built from two
+    individually perfect legs. That acute wedge of copper is an acid trap a
+    fab flags, and in the preview it reads as machine-mangled routing. The
+    canvas mirror is pinned to this same geometry by the router-parity
+    browser test, so proving the board proves the preview.
+
+    Every placement here keeps a 0.5 mm gap to the obstacle and clears the
+    connector pads, i.e. the app itself would allow it; each turned 64 to
+    135 degrees before soften45.
+    """
+    obstacle = pcb.Led(10.0, 10.0, "red", size="1206")
+    cases = [  # size, side, rot, x, y -- all off the 0805/front/0 default
+        ("3mm", "back", 0, 11.0, 17.0),
+        ("1206", "back", 0, 10.0, 17.0),
+        ("1206", "back", 0, 9.0, 17.0),
+        ("0805", "front", 270, 11.0, 3.0),
+    ]
+    bent = 0
+    for size, side, rot, x, y in cases:
+        led = pcb.Led(x, y, "red", rot=rot, size=size, side=side, novia=True)
+        r = pcb.novia_route(led, others=[led, obstacle])
+        assert r and not r.get("tight"), \
+            f"{size}/{side}/rot{rot} at ({x},{y}) should route cleanly"
+        if len(r["pts"]) >= 3:
+            bent += 1
+        assert _worst_turn_deg(r["pts"]) <= 45.0 + 1e-6, \
+            (size, side, rot, x, y, r["pts"])
+    # A run chained into another unit's pad bends around copper the same way.
+    chained = pcb.Led(7.0, 3.0, "red", rot=90, size="0805", novia=True,
+                      term=("unit", 1))
+    hub = pcb.Led(15.0, 13.0, "red", size="1206", novia=True)
+    blocker = pcb.Led(8.0, 10.0, "red", size="0805")
+    leds = [chained, hub, blocker]
+    term = pcb.novia_term(chained, leds=leds)
+    r = pcb.novia_route(chained, others=leds, term=term)
+    assert r and r.get("term") and not r.get("tight"), r
+    if len(r["pts"]) >= 3:
+        bent += 1
+    assert _worst_turn_deg(r["pts"]) <= 45.0 + 1e-6, r["pts"]
+    # The guard that keeps this from passing vacuously: if a smarter router
+    # ever straightens every case, nothing above measured a joint at all.
+    assert bent >= 3, \
+        "the obstacle no longer bends these routes; move the placements"
+
+
 def test_a_chosen_pad_wins_over_the_nearest_one():
     """A hand-picked trace end sends the run there — never to the closer pad
     the auto-router would use.
