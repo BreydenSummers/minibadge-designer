@@ -1073,10 +1073,18 @@ def _generate_impl(render: bool):
             # LED across would only co-locate a via with a drilled pad.
             farled = (bool(raw.get("farled")) and not reverse
                       and "drill" not in pcb.PKG.get(size, {}))
-            nodes = tuple(
-                (max(0.0, min(20.32, float(n[0]))), max(0.0, min(20.32, float(n[1]))))
-                for n in list(raw.get("nodes") or [])[:8]
-                if isinstance(n, (list, tuple)) and len(n) >= 2)
+            def _bends(key: str) -> tuple:
+                return tuple(
+                    (max(0.0, min(20.32, float(n[0]))),
+                     max(0.0, min(20.32, float(n[1]))))
+                    for n in list(raw.get(key) or [])[:8]
+                    if isinstance(n, (list, tuple)) and len(n) >= 2)
+
+            # nodes bend the via-less run; anodes/vnodes bend the unit's two
+            # internal traces (resistor-to-anode link, pad-to-via stub).
+            nodes = _bends("nodes")
+            anodes = _bends("anodes")
+            vnodes = _bends("vnodes")
             # Where the via-less run ends: a chosen connector pad or another
             # unit's pad. Shape-checked only — net, kept-pin, face and chain
             # validity are pcb.novia_term's call, which treats a bad choice
@@ -1101,11 +1109,13 @@ def _generate_impl(render: bool):
             led = pcb.Led(x=float(raw.get("x", 10)), y=float(raw.get("y", 7)),
                           color=color, side=side, rot=rot, layout=layout,
                           size=size, reverse=reverse, novia=novia,
-                          nodes=nodes, term=term, farled=farled, adv=adv)
+                          nodes=nodes, anodes=anodes, vnodes=vnodes,
+                          term=term, farled=farled, adv=adv)
             x, y = pcb.clamp_led_obj(led, safe)
             leds.append(pcb.Led(x=x, y=y, color=color, side=side, rot=rot,
                                 layout=layout, size=size, reverse=reverse,
-                                novia=novia, nodes=nodes, term=term,
+                                novia=novia, nodes=nodes, anodes=anodes,
+                                vnodes=vnodes, term=term,
                                 farled=farled, adv=adv))
     except (TypeError, ValueError, AttributeError):
         return {"error": "invalid led parameters"}, 400

@@ -1396,7 +1396,11 @@ function unitCopperQuads(L, skipStart) {
   const g = geomOf(L), p = PKG[g.pkg], rp = resPkgOf(g.pkg);
   const front = L.side !== "back";
   const tb = (dx, dy) => unitPoint(L, dx, dy);
-  const out = [quadSegPts(tb(...g.resOut), tb(...g.ledA), 0.3)];
+  const apts = unitTracePts(L, "a").pts;
+  const out = [];
+  for (let i = 0; i + 1 < apts.length; i++) {
+    out.push(quadSegPts(apts[i], apts[i + 1], 0.3));
+  }
   const rows = [[g.ledK, p.pw, p.ph, g.ledRot || 0, front],
                 [g.ledA, p.pw, p.ph, g.ledRot || 0, false],
                 [g.resIn, rp.pw, rp.ph, g.resRot || 0, !front],
@@ -1547,6 +1551,24 @@ function soften45(pts, ok, owners) {
     if (!changed) break;
   }
   return own ? { pts, owners: own } : { pts };
+}
+// Which Led field holds each trace's hand-placed bends: the via-less run
+// ("run"), the resistor-to-anode link ("a"), the pad-to-via stub ("v").
+const NODE_KEYS = { run: "nodes", a: "anodes", v: "vnodes" };
+// Mirror of pcb.unit_trace_pts: board-mm polyline of a unit's internal
+// trace through its bends. Bends stay exactly where they were put; only
+// the corners between them soften into 45s, like the via-less run's nodes.
+// owners follows mitre45's contract so the "+" can name an insert slot.
+function unitTracePts(L, which) {
+  const g = geomOf(L), front = L.side !== "back";
+  const a = which === "a" ? unitPoint(L, ...g.resOut)
+                          : unitPoint(L, ...(front ? g.ledK : g.resIn));
+  const b = which === "a" ? unitPoint(L, ...g.ledA)
+                          : unitPoint(L, ...(front ? g.viaF : g.viaB));
+  const bends = L[NODE_KEYS[which]] || [];
+  if (!bends.length) return { pts: [a, b], owners: [0] };
+  const raw = [a, ...bends.map(n => [+n[0], +n[1]]), b];
+  return mitre45(raw, () => true, raw.map((_p, i) => i));
 }
 // Mirror of pcb.novia_term: resolve L.term ({pad:"16"} or {unit:3}) to
 // {pt:[x,y], unit: led|null}, or null for auto. A chosen-but-invalid
@@ -1737,6 +1759,7 @@ function noviaKey(L) {
   // that unit's key inside noviaSig, so moving it flushes the whole cache.
   return [L.x, L.y, L.rot, L.side, L.size, L.layout, !!L.reverse, !!L.novia,
           !!L.farled, JSON.stringify(L.nodes || []),
+          JSON.stringify(L.anodes || []), JSON.stringify(L.vnodes || []),
           JSON.stringify(L.term || null),
           L.adv ? JSON.stringify(L.adv) : ""].join("|");
 }
@@ -1833,27 +1856,28 @@ function advConflict(L) {
     const [ox, oy] = extra ? rotOff(qx, qy, extra) : [qx, qy];
     return unitPoint(L, cx + ox, cy + oy);
   });
-  const seg = (a, b, w) => {
-    const A = unitPoint(L, a[0], a[1]), B = unitPoint(L, b[0], b[1]);
-    let nx = -(B[1] - A[1]), ny = B[0] - A[0];
-    const ln = Math.hypot(nx, ny) || 1;
-    nx = nx / ln * w / 2; ny = ny / ln * w / 2;
-    return [[A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny],
-            [B[0] - nx, B[1] - ny], [A[0] - nx, A[1] - ny]];
-  };
   const viaNet = front ? "gnd" : "v33";
   const items = [
     { n: "led_k", net: "gnd", q: quad(g.ledK[0], g.ledK[1], p.pw, p.ph, lrot) },
     { n: "led_a", net: "a", q: quad(g.ledA[0], g.ledA[1], p.pw, p.ph, lrot) },
     { n: "res_in", net: "v33", q: quad(g.resIn[0], g.resIn[1], rp.pw, rp.ph, rrot) },
     { n: "res_out", net: "a", q: quad(g.resOut[0], g.resOut[1], rp.pw, rp.ph, rrot) },
-    { n: "trace_a", net: "a", q: seg(g.resOut, g.ledA, 0.3),
-      touches: ["res_out", "led_a"] },
   ];
+  // Every leg of a bent trace is one item; legs share a net so the scan
+  // skips leg-vs-leg, and a bend routed across the other net's pad is
+  // exactly what this exists to flag.
+  const apts = unitTracePts(L, "a").pts;
+  for (let i = 0; i + 1 < apts.length; i++) {
+    items.push({ n: "trace_a", net: "a", q: quadSegPts(apts[i], apts[i + 1], 0.3),
+                 touches: ["res_out", "led_a"] });
+  }
   if (!L.novia) {
     items.push({ n: "via", net: viaNet, q: quad(g.viaF[0], g.viaF[1], VIA_SIZE, VIA_SIZE, 0) });
-    items.push({ n: "trace_stub", net: viaNet, q: seg(front ? g.ledK : g.resIn, g.viaF, 0.3),
-                 touches: [front ? "led_k" : "res_in", "via"] });
+    const vpts = unitTracePts(L, "v").pts;
+    for (let i = 0; i + 1 < vpts.length; i++) {
+      items.push({ n: "trace_stub", net: viaNet, q: quadSegPts(vpts[i], vpts[i + 1], 0.3),
+                   touches: [front ? "led_k" : "res_in", "via"] });
+    }
   }
   if (g.hole) {
     // The routed hole sits under the LED body by design — its own pads are
@@ -1881,14 +1905,6 @@ function unitCopperPieces(L, face) {
     const [ox, oy] = extra ? rotOff(qx, qy, extra) : [qx, qy];
     return unitPoint(L, cx + ox, cy + oy);
   });
-  const quadSeg = (a, b, w) => {
-    const A = unitPoint(L, a[0], a[1]), B = unitPoint(L, b[0], b[1]);
-    let nx = -(B[1] - A[1]), ny = B[0] - A[0];
-    const ln = Math.hypot(nx, ny) || 1;
-    nx = nx / ln * w / 2; ny = ny / ln * w / 2;
-    return [[A[0] + nx, A[1] + ny], [B[0] + nx, B[1] + ny],
-            [B[0] - nx, B[1] - ny], [A[0] - nx, A[1] - ny]];
-  };
   const pw = p.pw + 1.0, ph = p.ph + 1.0;
   const rw = rp.pw + 1.0, rh = rp.ph + 1.0;
   const vo = front ? g.viaF : g.viaB;
@@ -1897,8 +1913,13 @@ function unitCopperPieces(L, face) {
     ["pad_led_a", quadRect(g.ledA[0], g.ledA[1], pw, ph, lrot)],
     ["pad_res_in", quadRect(g.resIn[0], g.resIn[1], rw, rh, rrot)],
     ["pad_res_out", quadRect(g.resOut[0], g.resOut[1], rw, rh, rrot)],
-    ["trace_a", quadSeg(g.resOut, g.ledA, 1.1)],
   ];
+  // One label per leg: consumers test membership, never count (mirrors
+  // pcb.unit_copper_pieces).
+  const apts = unitTracePts(L, "a").pts;
+  for (let i = 0; i + 1 < apts.length; i++) {
+    out.push(["trace_a", quadSegPts(apts[i], apts[i + 1], 1.1)]);
+  }
   const nvr = noviaRoute(L);
   if (nvr) {
     // No via to keep clear, but the run to the connector pad has to be kept
@@ -1914,7 +1935,10 @@ function unitCopperPieces(L, face) {
     // via keeps reads as the round pad it effectively is, not the oversized
     // octagon the pour-rule margin used to leave.
     out.push(["via", viaCollar(...unitPoint(L, vo[0], vo[1]))]);
-    out.push(["trace_stub", quadSeg(front ? g.ledK : g.resIn, vo, 1.1)]);
+    const vpts = unitTracePts(L, "v").pts;
+    for (let i = 0; i + 1 < vpts.length; i++) {
+      out.push(["trace_stub", quadSegPts(vpts[i], vpts[i + 1], 1.1)]);
+    }
   }
   if (g.hole) out.push(["hole", quadRect(0, 0, g.hole + 1.0, g.hole + 1.0)]);
   if (p.drill) {
@@ -2014,7 +2038,8 @@ let _bridgeCache = { key: "", map: [] };
 function allBridges() { // {F: seg|null, B: seg|null} per LED, memoized
   const key = JSON.stringify([
     state.leds.map(L => [L.x, L.y, L.rot, L.layout, L.size, !!L.reverse, L.side,
-                         !!L.novia, L.adv]),
+                         !!L.novia, L.adv, L.nodes || null, L.anodes || null,
+                         L.vnodes || null, L.term || null]),
     state.shape.ringsRev || 0,
   ]);
   if (_bridgeCache.key === key) return _bridgeCache.map;
@@ -2875,9 +2900,6 @@ function drawUnitGeometry(c, led, parts = "all") {
     c.fillRect(-w / 2 * SCALE, -h / 2 * SCALE, w * SCALE, h * SCALE);
     c.restore();
   };
-  const trace = (a, b) => {
-    c.beginPath(); c.moveTo(...P(...a)); c.lineTo(...P(...b)); c.stroke();
-  };
   const vo = viaOffset(led);
   const pk = PKG[g.pkg], rpk = resPkgOf(g.pkg);
   const th = !!pk.drill;
@@ -2902,11 +2924,11 @@ function drawUnitGeometry(c, led, parts = "all") {
   c.lineWidth = (0.3 + 0.7) * SCALE;
   c.lineCap = "round";
   if (parts !== "led") {
-    trace(g.resOut, g.ledA);
+    runPath(unitTracePts(led, "a").pts);
     if (nvr) {
       if (nvr.pts.length > 1) runPath(nvr.pts);
     } else {
-      trace(front ? g.ledK : g.resIn, vo);
+      runPath(unitTracePts(led, "v").pts);
       const [hvx, hvy] = P(...viaOffset(led));
       c.beginPath(); c.arc(hvx, hvy, (VIA_SIZE / 2 + 0.35) * SCALE, 0, 7);
       c.fillStyle = halo; c.fill();
@@ -2923,25 +2945,34 @@ function drawUnitGeometry(c, led, parts = "all") {
   c.strokeStyle = state.mask === "white" ? "rgba(60,60,60,.25)" : "rgba(255,255,255,.18)";
   c.lineWidth = 0.3 * SCALE;
   if (parts !== "led") {
-    trace(g.resOut, g.ledA);
+    runPath(unitTracePts(led, "a").pts);
     if (nvr) {
       if (nvr.pts.length > 1) runPath(nvr.pts);
     } else {
-      trace(front ? g.ledK : g.resIn, vo);
+      runPath(unitTracePts(led, "v").pts);
       const [vx, vy] = P(...vo);
       c.beginPath(); c.arc(vx, vy, VIA_SIZE / 2 * SCALE, 0, 7);
       c.fillStyle = padCol(); c.fill();
     }
   }
   // Hand-placed trace bends: draggable handles, plus the "+" that appears
-  // when the pointer is near the middle of a leg.
-  if (parts !== "led" && led.adv && nvr && !nvr.direct && nvr.pts.length > 1) {
-    for (const [bx, by] of (led.nodes || [])) {
-      const [hx2, hy2] = [mm2px(bx), mm2px(by)];
-      c.beginPath(); c.arc(hx2, hy2, 0.42 * SCALE, 0, 7);
-      c.fillStyle = padCol(); c.fill();
-      c.lineWidth = Math.max(1, 0.08 * SCALE);
-      c.strokeStyle = "rgba(255,255,255,.85)"; c.stroke();
+  // when the pointer is near the middle of a leg. Every free-place trace
+  // gets them, not just the via-less run; the selected one wears the
+  // accent ring so Delete has a visible target.
+  if (parts !== "led" && led.adv) {
+    for (const key of ["run", "a", "v"]) {
+      const list = led[NODE_KEYS[key]] || [];
+      for (let k = 0; k < list.length; k++) {
+        const [bx, by] = list[k];
+        const sel = selected && selected.kind === "lednode"
+          && selectedRef === led && (selected.trace || "run") === key
+          && selected.node === k;
+        const [hx2, hy2] = [mm2px(bx), mm2px(by)];
+        c.beginPath(); c.arc(hx2, hy2, (sel ? 0.5 : 0.42) * SCALE, 0, 7);
+        c.fillStyle = padCol(); c.fill();
+        c.lineWidth = Math.max(1, (sel ? 0.14 : 0.08) * SCALE);
+        c.strokeStyle = sel ? "#6fb2ff" : "rgba(255,255,255,.85)"; c.stroke();
+      }
     }
     if (nodeHint && state.leds[nodeHint.index] === led) {
       const [px2, py2] = [mm2px(nodeHint.x), mm2px(nodeHint.y)];
@@ -3304,22 +3335,38 @@ const NODE_HINT_R = 1.6;
 function traceNodeHint(mx, my) {
   for (let i = state.leds.length - 1; i >= 0; i--) {
     const L = state.leds[i];
-    if (!L.adv || !L.novia) continue;
-    const r = noviaRoute(L);
-    if (!r || r.direct || r.pts.length < 2) continue;
-    // An existing handle wins over the "+": mitring makes segments short
-    // enough that a midpoint can land under a handle, and offering to insert
-    // there would fight dragging or removing the bend that is already there.
-    if ((L.nodes || []).some(([nx, ny]) =>
-        Math.sqrt((mx - nx) ** 2 + (my - ny) ** 2) < 0.9)) continue;
-    for (let k = 0; k + 1 < r.pts.length; k++) {
-      const a = r.pts[k], b = r.pts[k + 1];
-      const cx = (a[0] + b[0]) / 2, cy = (a[1] + b[1]) / 2;
-      if (Math.hypot(mx - cx, my - cy) < NODE_HINT_R) {
-        // Mitring adds corners the user never placed, so translate the
-        // segment back to a slot in L.nodes before offering to insert there.
-        const slot = r.owners ? r.owners[k] : k;
-        return { index: i, leg: slot, x: cx, y: cy, side: L.side };
+    if (!L.adv) continue;
+    // Every trace this free-place unit owns: the via-less run, the
+    // resistor-to-anode link, and (with the via kept) the pad-to-via stub.
+    const traces = [];
+    if (L.novia) {
+      const r = noviaRoute(L);
+      if (r && !r.direct && r.pts.length > 1) {
+        traces.push(["run", r.pts, r.owners]);
+      }
+    } else {
+      const v = unitTracePts(L, "v");
+      traces.push(["v", v.pts, v.owners]);
+    }
+    const a = unitTracePts(L, "a");
+    traces.push(["a", a.pts, a.owners]);
+    for (const [key, pts, owners] of traces) {
+      const bends = L[NODE_KEYS[key]] || [];
+      if (bends.length >= 8) continue; // the server keeps at most 8
+      // An existing handle wins over the "+": mitring makes segments short
+      // enough that a midpoint can land under a handle, and offering to
+      // insert there would fight the bend that is already there.
+      if (bends.some(([nx, ny]) =>
+          Math.sqrt((mx - nx) ** 2 + (my - ny) ** 2) < 0.9)) continue;
+      for (let k = 0; k + 1 < pts.length; k++) {
+        const s0 = pts[k], s1 = pts[k + 1];
+        const cx = (s0[0] + s1[0]) / 2, cy = (s0[1] + s1[1]) / 2;
+        if (Math.hypot(mx - cx, my - cy) < NODE_HINT_R) {
+          // Mitring adds corners the user never placed, so translate the
+          // segment back to a slot in the bend list before offering there.
+          const slot = owners ? owners[k] : k;
+          return { index: i, trace: key, leg: slot, x: cx, y: cy, side: L.side };
+        }
       }
     }
   }
@@ -3458,11 +3505,15 @@ function attachPointer(cv, side) {
             }
           }
         }
-        if (L.adv && L.novia && sameSide) { // hand-placed trace bends
-          for (let n = (L.nodes || []).length - 1; n >= 0; n--) {
-            const [nx, ny] = L.nodes[n];
-            if (Math.hypot(mx - nx, my - ny) < 0.9) {
-              return { kind: "lednode", index: i, node: n, x: nx, y: ny, side: L.side };
+        if (L.adv && sameSide) { // hand-placed trace bends, on any trace
+          for (const key of ["run", "a", "v"]) {
+            const list = L[NODE_KEYS[key]] || [];
+            for (let n = list.length - 1; n >= 0; n--) {
+              const [nx, ny] = list[n];
+              if (Math.hypot(mx - nx, my - ny) < 0.9) {
+                return { kind: "lednode", index: i, trace: key, node: n,
+                         x: nx, y: ny, side: L.side };
+              }
             }
           }
         }
@@ -3601,15 +3652,18 @@ function attachPointer(cv, side) {
       return;
     }
     const onHandle = hitAt(mx, my);
-    const plus = onHandle && onHandle.kind === "lednode" ? null
+    const plus = onHandle && onHandle.kind !== "led" ? null
       : (nodeHint && nodeHint.side === (mirror ? "back" : "front")
          ? nodeHint : (nodeHint && traceNodeHint(mx, my)));
     if (plus && Math.sqrt((mx - plus.x) ** 2 + (my - plus.y) ** 2) < NODE_HINT_R) {
       const L = state.leds[plus.index];
-      L.nodes = [...(L.nodes || [])];
-      L.nodes.splice(plus.leg, 0, [plus.x, plus.y]);
+      const kk = NODE_KEYS[plus.trace || "run"];
+      L[kk] = [...(L[kk] || [])];
+      L[kk].splice(plus.leg, 0, [plus.x, plus.y]);
       setSelection("lednode", plus.index, L.side);
-      drag = { kind: "lednode", index: plus.index, node: plus.leg, dx: 0, dy: 0 };
+      if (selected) { selected.trace = plus.trace || "run"; selected.node = plus.leg; }
+      drag = { kind: "lednode", index: plus.index, trace: plus.trace,
+               node: plus.leg, dx: 0, dy: 0 };
       nodeHint = null;
       cv.setPointerCapture(e.pointerId);
       cv.style.cursor = "grabbing";
@@ -3618,9 +3672,15 @@ function attachPointer(cv, side) {
     }
     const hit = hitAt(mx, my);
     if (hit) setSelection(hit.kind, hit.index, hit.side); else clearSelection();
+    if (hit && hit.kind === "lednode" && selected) {
+      // A bend is selected as itself, not as its whole unit: the accent
+      // ring and the Delete key need to name ONE dot.
+      selected.trace = hit.trace || "run";
+      selected.node = hit.node;
+    }
     if (hit) {
-      drag = { kind: hit.kind, index: hit.index, node: hit.node,
-               dx: hit.x - mx, dy: hit.y - my };
+      drag = { kind: hit.kind, index: hit.index, trace: hit.trace,
+               node: hit.node, dx: hit.x - mx, dy: hit.y - my };
       if (hit.kind === "ledterm") {
         // Enumerate the legal destinations once, at pick-up: the move
         // handler snaps to the nearest of these and nothing else.
@@ -3655,14 +3715,18 @@ function attachPointer(cv, side) {
         const [hx, hy] = boardCoords(cv, e, mirror);
         const h = handleAt(hx, hy);
         const wantSide = mirror ? "back" : "front";
-        const nh = traceNodeHint(hx, hy);
+        // The "+" yields to anything individually grabbable (a bend, a
+        // part, the endpoint): the internal traces run right between the
+        // parts a free-place user is there to drag.
+        const under = hitAt(hx, hy);
+        const nh = (!under || under.kind === "led") ? traceNodeHint(hx, hy) : null;
         const shown = nh && nh.side === wantSide ? nh : null;
         if ((shown && shown.x) !== (nodeHint && nodeHint.x)
             || (shown && shown.index) !== (nodeHint && nodeHint.index)) {
           nodeHint = shown; draw();
         }
         cv.style.cursor = h ? (h.type === "rotate" ? "grab" : "nwse-resize")
-                            : hitAt(hx, hy) ? "grab"
+                            : under ? "grab"
                             : shown ? "copy" : "";
       }
       return;
@@ -3696,8 +3760,9 @@ function attachPointer(cv, side) {
       }
     } else if (drag.kind === "lednode") {
       const L = state.leds[drag.index];
-      if (L && L.nodes && L.nodes[drag.node]) {
-        L.nodes = L.nodes.map((n, k) => k === drag.node
+      const kk = NODE_KEYS[drag.trace || "run"];
+      if (L && L[kk] && L[kk][drag.node]) {
+        L[kk] = L[kk].map((n, k) => k === drag.node
           ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, mx + drag.dx)),
              Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, my + drag.dy))]
           : n);
@@ -3856,8 +3921,12 @@ function attachPointer(cv, side) {
     if (!hit) return;
     if (hit.kind === "lednode") {
       const L = state.leds[hit.index];
-      L.nodes = (L.nodes || []).filter((_n, k) => k !== hit.node);
-      if (!L.nodes.length) delete L.nodes;
+      const kk = NODE_KEYS[hit.trace || "run"];
+      L[kk] = (L[kk] || []).filter((_n, k) => k !== hit.node);
+      if (!L[kk].length) delete L[kk];
+      if (selected && selected.kind === "lednode" && selectedRef === L) {
+        clearSelection(); // the dot it named is gone or renumbered
+      }
       renderLedList(); draw();
       return;
     }
@@ -3968,10 +4037,19 @@ function clearSelection() { selected = null; selectedRef = null; }
 function reconcileSelection() {
   if (!selected) return;
   const list = selList(selected.kind);
-  if (list[selected.index] === selectedRef && selectedRef) return;
-  const i = selectedRef ? list.indexOf(selectedRef) : -1;
-  if (i < 0) clearSelection();
-  else selected = { ...selected, index: i };
+  if (list[selected.index] !== selectedRef || !selectedRef) {
+    const i = selectedRef ? list.indexOf(selectedRef) : -1;
+    if (i < 0) { clearSelection(); return; }
+    selected = { ...selected, index: i };
+  }
+  if (selected.kind === "lednode") {
+    // A bend selection also names a slot in one of the unit's bend lists;
+    // lists shrink out from under it (double-click removal, novia/adv
+    // toggles), and a stale slot would hand Delete a dot never picked.
+    const L = state.leds[selected.index];
+    const bends = L ? (L[NODE_KEYS[selected.trace || "run"]] || []) : [];
+    if (selected.node == null || selected.node >= bends.length) clearSelection();
+  }
 }
 // The single door out of the design arrays. Deleting through it is what keeps
 // the undo buffer and the selection honest: an empty slot is never recorded
@@ -4470,7 +4548,7 @@ function renderLedList() {
             <input type="number" class="avx" min="-20" max="20" step="0.05" value="${(+L.adv.vx).toFixed(2)}">
             <input type="number" class="avy" min="-20" max="20" step="0.05" value="${(+L.adv.vy).toFixed(2)}">
           </div>`}
-          ${L.novia && !((PKG[L.size] || PKG["0805"]).drill && L.side !== "back" && !L.farled) ? `<div class="sub">Trace bends: ${(L.nodes || []).length} — hover the trace on the canvas to add one, drag to move, double-click to remove.</div>` : ""}` : ""}
+          ${`<div class="sub">Trace bends: ${(L.nodes || []).length + (L.anodes || []).length + (L.vnodes || []).length}. Hover any of this unit's traces on the canvas to add one (+), drag to move, click to select, Delete or double-click to remove.</div>`}` : ""}
       </details>
 `;
     const reposition = () => {
@@ -4507,6 +4585,7 @@ function renderLedList() {
     div.querySelector(".nvia").onchange = e => {
       L.novia = e.target.checked;
       if (!L.novia) { delete L.nodes; delete L.term; } // both belong to the trace
+      else delete L.vnodes; // the via stub those bends shaped is gone
       renderLedList(); reposition(); draw(); m3dStale("via routing changed");
     };
     div.querySelector(".farled").onchange = e => {
@@ -4538,6 +4617,10 @@ function renderLedList() {
                   lrot: g.ledK[0] > 0 ? 180 : 0, vx: via[0], vy: via[1] };
       } else {
         L.adv = null;
+        // Standard layout has its own tidy internal traces; free-place
+        // bends would drag them somewhere the parts no longer are.
+        delete L.anodes;
+        delete L.vnodes;
       }
       reposition(); renderLedList(); draw();
     };
@@ -5377,6 +5460,14 @@ window.addEventListener("keydown", e => {
         L.x = nx; L.y = ny;
         renderLedList();
       }
+    } else if (selected.kind === "lednode") {
+      const L = state.leds[selected.index];
+      const kk = NODE_KEYS[selected.trace || "run"];
+      if (!L || !(L[kk] || [])[selected.node]) return;
+      L[kk] = L[kk].map((n, k) => k === selected.node
+        ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, n[0] + dx)),
+           Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, n[1] + dy))]
+        : n);
     } else if (selected.kind === "text") {
       const t = state.texts[selected.index];
       if (!t) return;
@@ -5403,6 +5494,18 @@ window.addEventListener("keydown", e => {
   if (e.key === "Delete" || e.key === "Backspace") {
     e.preventDefault();
     const idx = selected.index;
+    if (selected.kind === "lednode") {
+      // Remove just the selected bend; the trace re-routes through the rest.
+      const L = state.leds[idx];
+      const kk = NODE_KEYS[selected.trace || "run"];
+      if (!L || !(L[kk] || [])[selected.node]) return;
+      L[kk] = L[kk].filter((_n, k) => k !== selected.node);
+      if (!L[kk].length) delete L[kk];
+      clearSelection();
+      renderLedList();
+      draw();
+      return;
+    }
     if (selected.kind === "led") {
       if (removeItem("led", idx, `LED ${idx + 1}`)) renderLedList();
     } else if (selected.kind === "text") {

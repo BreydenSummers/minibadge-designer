@@ -1031,6 +1031,8 @@ def _py_led(d):
                    rot=d["rot"], layout=d["layout"], size=d["size"],
                    reverse=d["reverse"], novia=d["novia"],
                    nodes=tuple(tuple(n) for n in d["nodes"]),
+                   anodes=tuple(tuple(n) for n in d.get("anodes") or ()),
+                   vnodes=tuple(tuple(n) for n in d.get("vnodes") or ()),
                    term=term, farled=d["farled"], adv=d["adv"])
 
 
@@ -1490,6 +1492,86 @@ def test_the_previewed_via_less_trace_takes_the_route_the_board_routes(ui):
         "pcb.novia_route have drifted:\n"
         + "\n".join(off_by[:10]))
     ui.assert_clean("via-less route parity")
+
+
+@pytest.mark.browser
+def test_the_previewed_internal_traces_bend_the_same_copper_the_board_builds(ui):
+    """A free-place unit's internal traces are drawn along the polyline the
+    board emits, hand-placed bends included.
+
+    unitTracePts and pcb.unit_trace_pts are written twice like the via-less
+    router above, and their bends are real copper right between the parts
+    the user just placed: a drift draws a trace across laminate the fab
+    pours over, or hides one that is really there.
+    """
+    from minibadge_designer import pcb
+
+    cases = [  # off the defaults: back side, rotations, non-0805 sizes
+        _js_led(size="1206", rot=90,
+                adv={"rx": -6.0, "ry": -3.0, "rrot": 45, "lrot": 0,
+                     "vx": 3.0, "vy": 6.0},
+                anodes=[[6.0, 6.0]], vnodes=[[7.0, 9.5], [9.0, 12.0]]),
+        _js_led(side="back", size="0603", rot=180, layout="inline",
+                adv={"rx": 5.0, "ry": 4.0, "rrot": 0, "lrot": 90,
+                     "vx": -4.0, "vy": -5.0},
+                anodes=[[14.0, 6.0], [12.0, 5.0]], vnodes=[[6.0, 13.0]]),
+        # No bends: the straight two-point contract must agree too.
+        _js_led(rot=270, adv={"rx": -5.0, "ry": 3.0, "rrot": 90, "lrot": 0,
+                              "vx": 5.0, "vy": -3.0}),
+    ]
+    off_by, compared = [], 0
+    for d in cases:
+        leds = _clamped([d])
+        _set_design(ui, leds)
+        for which in ("a", "v"):
+            js = ui.js("([w]) => unitTracePts(state.leds[0], w).pts", [which])
+            board = pcb.unit_trace_pts(_py_led(leds[0]), which)
+            if len(js) != len(board):
+                off_by.append(f"{_describe(d)} trace {which}: the board bends "
+                              f"it {len(board)} points, the canvas {len(js)}")
+                continue
+            compared += 1
+            gap = _gap(js, board)
+            if gap > _PARITY_TOL:
+                off_by.append(
+                    f"{_describe(d)} trace {which} is {gap:.4f} mm out: board "
+                    f"{[tuple(round(v, 3) for v in p) for p in board]}, canvas "
+                    f"{[tuple(round(v, 3) for v in p) for p in js]}")
+    assert compared, ("no trace compared, so this test proved nothing; "
+                      "check unitTracePts is still reachable")
+    assert not off_by, (
+        f"{len(off_by)} internal traces differ between the copper drawn and "
+        "the copper built; unitTracePts and pcb.unit_trace_pts have "
+        "drifted:\n" + "\n".join(off_by))
+    ui.assert_clean("internal trace parity")
+
+
+@pytest.mark.browser
+def test_a_clicked_trace_bend_shows_selected_and_delete_removes_only_it(ui):
+    """Clicking a bend handle selects that one dot, and Delete removes
+    exactly it, never a neighbour.
+
+    The selection drives the accent ring the user aims at; if Delete acts on
+    a stale or wrong slot, the badge ships a trace the user believes they
+    re-routed. Off the defaults on purpose: a back-side 1206 bending its
+    pad-to-via stub, the trace that only free placement exposes at all.
+    """
+    leds = [_js_led(side="back", size="1206",
+                    adv={"rx": -6.0, "ry": -3.0, "rrot": 0, "lrot": 0,
+                         "vx": 4.0, "vy": 5.0},
+                    vnodes=[[6.0, 13.0], [13.0, 16.0]])]
+    _set_design(ui, leds)
+    ui.click_mm(13.0, 16.0, side="back")
+    sel = ui.selected()
+    assert sel and sel["kind"] == "lednode", f"clicking a bend selected {sel}"
+    assert sel.get("trace") == "v" and sel.get("node") == 1, \
+        f"the wrong dot is selected: {sel}"
+    ui.page.keyboard.press("Delete")
+    vn = ui.js("() => state.leds[0].vnodes")
+    assert vn == [[6.0, 13.0]], \
+        f"Delete should remove only the selected bend, left {vn}"
+    assert ui.selected() is None, "a deleted bend must not stay selected"
+    ui.assert_clean("bend select and delete")
 
 
 @pytest.mark.browser
