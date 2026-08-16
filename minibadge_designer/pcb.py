@@ -338,6 +338,13 @@ class Led:
     # Board-mm bends the via-less run must pass through, in order. Set by
     # dragging handles on the canvas; empty means route automatically.
     nodes: tuple = ()
+    # Board-mm bends for the unit's two internal traces, same contract as
+    # nodes: anodes bends the resistor-output-to-LED-anode link, vnodes bends
+    # the pad-to-power-via stub (which only exists while novia is off). Both
+    # matter once free placement scatters the parts and the straight line
+    # between them starts crossing things the user can see.
+    anodes: tuple = ()
+    vnodes: tuple = ()
     # Where the via-less run ends. None = the nearest connector pad carrying
     # the net (the classic choice). ("pad", "16") = that specific connector
     # pad; ("unit", 3) = the same-net pad of another unit on this face, so
@@ -539,7 +546,8 @@ def _unit_copper_quads(led: Led, safe, skip_start: bool):
         rx, ry = _r(dx, dy, ang)
         return cx + rx, cy + ry
 
-    out = [_quad_seg(tb(*g["res_out"]), tb(*g["led_a"]), TRACK_W)]
+    apts = unit_trace_pts(led, "a", safe)
+    out = [_quad_seg(a, b, TRACK_W) for a, b in zip(apts, apts[1:])]
     for off, w, h, extra, is_start in (
         (g["led_k"], p["pw"], p["ph"], g.get("led_rot", 0.0), front),
         (g["led_a"], p["pw"], p["ph"], g.get("led_rot", 0.0), False),
@@ -721,6 +729,38 @@ def soften45(pts, ok):
         if not changed:
             break
     return pts
+
+
+def unit_trace_pts(led: Led, which: str, safe=None) -> list:
+    """Board-mm polyline of a unit's internal trace, through its bends.
+
+    which = "a" is the resistor-output-to-LED-anode link; "v" is the
+    pad-to-power-via stub (front: cathode to via, back: resistor input to
+    via). Without bends this is the straight two-point segment every
+    consumer used to assume. Hand-placed bends are kept exactly where they
+    were put and only the corners between them are softened into 45s, the
+    same contract as the via-less run's nodes. Mirrored by unitTracePts in
+    index.html.
+    """
+    g = led_geometry(led)
+    cx, cy = clamp_led_obj(led, safe)
+    front = led.side != "back"
+
+    def tb(off):
+        rx, ry = _r(off[0], off[1], led.rot)
+        return (cx + rx, cy + ry)
+
+    if which == "a":
+        a, b = tb(g["res_out"]), tb(g["led_a"])
+        bends = led.anodes
+    else:
+        a = tb(g["led_k"] if front else g["res_in"])
+        b = tb(g["via_front"] if front else g["via_back"])
+        bends = led.vnodes
+    if not bends:
+        return [a, b]
+    pts = [a] + [(float(px), float(py)) for px, py in bends] + [b]
+    return mitre45(pts, lambda _u, _v: True)
 
 
 def novia_term(led: Led, leds=(), pins=ALL_PINS, safe=None):
@@ -1023,15 +1063,6 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
             out.append(pt(cx + ox, cy + oy))
         return out
 
-    def quad_seg(a, b, w: float) -> list:
-        ax, ay = pt(*a)
-        bx, by = pt(*b)
-        nx, ny = -(by - ay), bx - ax
-        ln = (nx * nx + ny * ny) ** 0.5 or 1.0
-        nx, ny = nx / ln * w / 2, ny / ln * w / 2
-        return [(ax + nx, ay + ny), (bx + nx, by + ny),
-                (bx - nx, by - ny), (ax - nx, ay - ny)]
-
     pw, ph = p["pw"] + 1.0, p["ph"] + 1.0
     rw, rh = rp["pw"] + 1.0, rp["ph"] + 1.0
     vo = g["via_front"] if front else g["via_back"]
@@ -1040,8 +1071,10 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
         ("pad_led_a", quad_rect(*g["led_a"], pw, ph, lrot)),
         ("pad_res_in", quad_rect(*g["res_in"], rw, rh, rrot)),
         ("pad_res_out", quad_rect(*g["res_out"], rw, rh, rrot)),
-        ("trace_a", quad_seg(g["res_out"], g["led_a"], 1.1)),
     ]
+    # One label for every leg: the consumers test membership, never count.
+    apts = unit_trace_pts(led, "a", safe)
+    pieces += [("trace_a", _quad_seg(a, b, 1.1)) for a, b in zip(apts, apts[1:])]
     route = novia_route(led, pins, safe, others, outline=outline,
                         term=novia_term(led, others, pins, safe))
     if route:
@@ -1059,10 +1092,10 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
         # plane that read as a mysterious oversized pad through a window).
         # Mirrored by unitCopperPieces in index.html — the preview draws
         # the same carve, and tests/test_browser.py holds the two in parity.
-        pieces += [
-            ("via", _via_collar(*pt(*vo))),
-            ("trace_stub", quad_seg(g["led_k"] if front else g["res_in"], vo, 1.1)),
-        ]
+        pieces.append(("via", _via_collar(*pt(*vo))))
+        vpts = unit_trace_pts(led, "v", safe)
+        pieces += [("trace_stub", _quad_seg(a, b, 1.1))
+                   for a, b in zip(vpts, vpts[1:])]
     if g["hole"]:
         pieces.append(("hole", quad_rect(0.0, 0.0, g["hole"] + 1.0, g["hole"] + 1.0)))
     if "drill" in p:
@@ -2213,9 +2246,12 @@ def _led_unit(
              (ang + g.get("res_rot", 0.0)) % 360, False, rpkg,
              model_path("Resistor_SMD", f"R_{rpkg}_{PKG_METRIC[rpkg]}Metric"),
              silk_avoid=avoid_res),
-        # Resistor pad 2 to LED anode.
-        seg(at(*g["res_out"]), at(*g["led_a"]), cu, nets[anode], f"seg-a{i}"),
     ]
+    # Resistor pad 2 to LED anode, through any hand-placed bends.
+    apts = [(ORIGIN + px, ORIGIN + py)
+            for px, py in unit_trace_pts(led, "a", safe)]
+    parts += [seg(a, b, cu, nets[anode], f"seg-a{i}-{n}" if n else f"seg-a{i}")
+              for n, (a, b) in enumerate(zip(apts, apts[1:]))]
     if far:
         for tag, off, net in (("k", g["led_k"], nets["GND"]),
                               ("a", g["led_a"], nets[anode])):
@@ -2242,25 +2278,23 @@ def _led_unit(
         pts = [(ORIGIN + px, ORIGIN + py) for px, py in route["pts"]]
         for n, (a, b) in enumerate(zip(pts, pts[1:])):
             parts.append(seg(a, b, cu, nets[route["net"]], f"seg-n{i}-{n}"))
-    elif front:
-        # Front unit: R pad 1 sits in the F.Cu 3V3 pour; cathode drops to the
-        # B.Cu GND pour through a via.
-        via = at(*g["via_front"])
-        parts += [
-            seg(at(*g["led_k"]), via, "F.Cu", nets["GND"], f"seg-k{i}"),
-            (f"  (via (at {_n(via[0])} {_n(via[1])}) (size {_n(VIA_SIZE)}) (drill {_n(VIA_DRILL)}) "
-            f'(layers "F.Cu" "B.Cu"){tent} (net {nets["GND"]}) (tstamp {_ts(f"via-{i}")}))'),
-        ]
     else:
-        # Back unit: cathode sits in the B.Cu GND pour; R pad 1 reaches the
-        # F.Cu 3V3 pour through a via at the resistor's input end.
-        via = at(*g["via_back"])
-        parts += [
-            seg(at(*g["res_in"]), via, "B.Cu", nets["3V3"], f"seg-v{i}"),
-            (f"  (via (at {_n(via[0])} {_n(via[1])}) (size {_n(VIA_SIZE)}) "
-            f'(drill {_n(VIA_DRILL)}) (layers "F.Cu" "B.Cu"){tent} (net {nets["3V3"]}) '
-            f"(tstamp {_ts(f'via-{i}')}))"),
-        ]
+        # Front unit: R pad 1 sits in the F.Cu 3V3 pour; cathode drops to the
+        # B.Cu GND pour through a via. Back unit: cathode sits in the B.Cu
+        # GND pour; R pad 1 reaches the F.Cu 3V3 pour through a via at the
+        # resistor's input end. The stub runs through any hand-placed bends.
+        stub_net = nets["GND"] if front else nets["3V3"]
+        stub_tag = "k" if front else "v"
+        vpts = [(ORIGIN + px, ORIGIN + py)
+                for px, py in unit_trace_pts(led, "v", safe)]
+        via = vpts[-1]
+        parts += [seg(a, b, cu, stub_net,
+                      f"seg-{stub_tag}{i}-{n}" if n else f"seg-{stub_tag}{i}")
+                  for n, (a, b) in enumerate(zip(vpts, vpts[1:]))]
+        parts.append(
+            f"  (via (at {_n(via[0])} {_n(via[1])}) (size {_n(VIA_SIZE)}) "
+            f'(drill {_n(VIA_DRILL)}) (layers "F.Cu" "B.Cu"){tent} '
+            f"(net {stub_net}) (tstamp {_ts(f'via-{i}')}))")
     return "\n".join(parts)
 
 
@@ -2374,17 +2408,17 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
         if layer != unit_layer:
             continue  # the unit's traces live on its own side only
         if zone_net != anode:
-            obstacles.append(LineString([at(*g["res_out"]), at(*g["led_a"])]).buffer(track_r))
+            obstacles.append(
+                LineString(unit_trace_pts(led, "a", safe)).buffer(track_r))
         # Power stub from the pad to the via — or, for a via-less unit, the
         # long run to the connector pad. Either way the other net's pour on
         # this layer opens a channel around it.
         if route is not None:
             if zone_net != route["net"] and len(route["pts"]) > 1:
                 obstacles.append(LineString(route["pts"]).buffer(track_r))
-        elif front and zone_net != "GND":
-            obstacles.append(LineString([at(*g["led_k"]), (vx, vy)]).buffer(track_r))
-        elif not front and zone_net != "3V3":
-            obstacles.append(LineString([at(*g["res_in"]), (vx, vy)]).buffer(track_r))
+        elif zone_net != via_net:
+            obstacles.append(
+                LineString(unit_trace_pts(led, "v", safe)).buffer(track_r))
 
     # Window art strips copper so the laminate shows through. A window layer
     # cuts the face(s) its `window` field names: the webapp splits a glow (or

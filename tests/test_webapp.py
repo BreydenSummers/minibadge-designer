@@ -446,6 +446,51 @@ def test_a_chosen_trace_end_rides_the_request_and_garbage_ones_are_sanitized(
         assert r.status_code == 200, (garbage, r.get_data()[:200])
 
 
+@pytest.mark.webapp
+def test_internal_trace_bends_ride_the_request_into_the_shipped_copper(client):
+    """anodes/vnodes cross HTTP intact: the board's internal traces really
+    pass through every hand-placed bend, while garbage bend payloads degrade
+    to the straight trace with a sane board, never a 500.
+
+    A dropped bend is silent intent loss: the user dragged the trace clear
+    of something, the preview shows the detour, and the fab would get the
+    straight line back through it. Off the defaults: a back-side rotated
+    1206 in free placement, whose stub trace only free placement exposes.
+    """
+    from minibadge_designer import pcb as _pcb
+
+    bends = {"anodes": [[6.0, 6.0]], "vnodes": [[7.0, 9.5]]}
+    led = {"x": 10, "y": 8, "color": "red", "side": "back", "rot": 90,
+           "size": "1206",
+           "adv": {"rx": -6.0, "ry": -3.0, "rrot": 0, "lrot": 0,
+                   "vx": 3.0, "vy": 7.0}, **bends}
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps({"name": "bends", "leds": [led]})},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200, resp.get_data()[:200]
+    board = zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "bends/bends.kicad_pcb").decode()
+    flat = [(key, bx, by) for key, pts in bends.items() for bx, by in pts]
+    assert len(flat) == 2, "the fixture lost its bends; this proves nothing"
+    for key, bx, by in flat:
+        at = f"{_pcb._n(_pcb.ORIGIN + bx)} {_pcb._n(_pcb.ORIGIN + by)}"
+        assert at in board, \
+            f"the emitted copper does not pass through the {key} bend ({bx}, {by})"
+    for garbage in ({"anodes": "x"}, {"anodes": [[1]]}, {"vnodes": 5},
+                    {"vnodes": [["a", "b"]]},
+                    {"anodes": [[float("nan")]] * 40}):
+        r = client.post(
+            "/generate",
+            data={"params": json.dumps(
+                {"name": "g", "leds": [dict(led, **garbage)]})},
+            content_type="multipart/form-data",
+        )
+        assert r.status_code in (200, 400), (garbage, r.get_data()[:200])
+        assert r.status_code == 200 or b"invalid led" in r.data, garbage
+
+
 def test_smoothing_strength_and_off(client):
     # Full-bleed disc (Ø = width = 20 mm) so it reaches all four pad plates —
     # no bridges, whose round caps would add diagonal edges of their own.
