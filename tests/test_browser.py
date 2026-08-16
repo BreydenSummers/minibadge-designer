@@ -366,11 +366,11 @@ class UI:
         )
 
     def custom_square_board(self, mm):
-        """Switch to a custom outline holding one `mm` x `mm` rectangle, and
+        """Give the board a custom outline of one `mm` x `mm` rectangle, and
         wait for the server to answer.  This is how a test moves off the
-        default 20.32 mm square, which is where every placement bug has hid."""
+        default 20.32 mm square, which is where every placement bug has hid.
+        There is no mode switch to flip: adding the part IS the switch."""
         self.show_panel("shape")
-        self.page.select_option("#shapemode", "custom", timeout=ELEMENT_TIMEOUT)
         self.page.select_option("#eladdkind", "rect", timeout=ELEMENT_TIMEOUT)
         self.page.click("#eladdshape", timeout=ELEMENT_TIMEOUT)
         self.wait_state("state.shape.elements.length === 1")
@@ -560,9 +560,8 @@ def test_custom_outline_survives_slider_spam(ui, logo):
     page = ui.page
     ui.show_panel("shape")
 
-    page.select_option("#shapemode", "custom", timeout=ELEMENT_TIMEOUT)
-    # An empty custom composition is not active: the board stays square and
-    # nothing is fetched.
+    # With no outline parts the board is the standard square and nothing is
+    # fetched — there is no mode dropdown, parts alone drive the outline.
     assert ui.js("() => customActive()") is False
     ui.wait_outline()
 
@@ -586,8 +585,10 @@ def test_custom_outline_survives_slider_spam(ui, logo):
     assert ui.js("() => state.shape.rings.length") >= 1
     assert ui.js("() => state.shape.outlineEmpty") is False
 
-    # Back to square: rings dropped, nothing outstanding.
-    page.select_option("#shapemode", "square", timeout=ELEMENT_TIMEOUT)
+    # Back to square by removing the only part: rings dropped, nothing
+    # outstanding — deleting the last part is the "switch back".
+    page.locator("#shapeopts .item .del").first.click(timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.shape.elements.length === 0")
     ui.wait_outline()
     assert ui.js("() => customActive()") is False
 
