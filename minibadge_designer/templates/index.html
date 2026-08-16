@@ -1502,6 +1502,52 @@ function mitre45(pts, ok, owners) {
   }
   return { pts: keep, owners: keepOwn };
 }
+// Mirrors pcb.soften45: ease every corner turning more than 45 degrees.
+// mitre45 shapes each leg but says nothing about the joint between legs, so
+// a route forced to approach its pad from the far side can fold back on
+// itself there. Hairpins are cut as pure stub copper; other sharp corners
+// get a bisector chamfer, halving the turn each sweep. sqrt-only maths, so
+// this stays bit-identical with Python. owners follows mitre45's contract.
+function soften45(pts, ok, owners) {
+  pts = pts.slice();
+  const own = owners ? owners.slice() : null;
+  for (let sweep = 0; sweep < 6; sweep++) {
+    let changed = false;
+    let i = 1;
+    while (i + 1 < pts.length) {
+      const a = pts[i - 1], c = pts[i], b = pts[i + 1];
+      const v1x = c[0] - a[0], v1y = c[1] - a[1];
+      const v2x = b[0] - c[0], v2y = b[1] - c[1];
+      const l1 = Math.sqrt(v1x * v1x + v1y * v1y);
+      const l2 = Math.sqrt(v2x * v2x + v2y * v2y);
+      const dot = v1x * v2x + v1y * v2y;
+      if (l1 < 1e-9 || l2 < 1e-9 || dot <= -(1 - 1e-6) * l1 * l2) {
+        pts.splice(i, 1);
+        if (own) own.splice(i - 1, 2, own[i - 1]);
+        changed = true;
+        continue;
+      }
+      if (dot >= (H45 - 1e-6) * l1 * l2) { i++; continue; }
+      for (const f of [1.0, 0.5, 0.25]) {
+        const t = f * Math.min(0.6, l1 / 2, l2 / 2);
+        const p = [c[0] - v1x / l1 * t, c[1] - v1y / l1 * t];
+        const q = [c[0] + v2x / l2 * t, c[1] + v2y / l2 * t];
+        // a-p and q-b are subsegments of vetted legs; only the bridge
+        // needs checking.
+        if (ok(p, q)) {
+          pts.splice(i, 1, p, q);
+          if (own) own.splice(i, 0, own[i]);
+          changed = true;
+          i++;
+          break;
+        }
+      }
+      i++;
+    }
+    if (!changed) break;
+  }
+  return own ? { pts, owners: own } : { pts };
+}
 // Mirror of pcb.novia_term: resolve L.term ({pad:"16"} or {unit:3}) to
 // {pt:[x,y], unit: led|null}, or null for auto. A chosen-but-invalid
 // terminal — wrong net, dropped pin, other face, or a unit chain that loops
@@ -1644,7 +1690,8 @@ function noviaRouteRaw(L) {
   }
   for (const pad of targets) {
     if (clear(start, pad)) {
-      const out = { ...mitre45([start, pad], clear), net, pad };
+      const m = mitre45([start, pad], clear);
+      const out = { ...soften45(m.pts, clear, m.owners), net, pad };
       if (term) out.term = true;
       return out;
     }
@@ -1670,7 +1717,8 @@ function noviaRouteRaw(L) {
       const chain = [];
       for (let at = 1; at !== -1; at = prev[at]) chain.push(nodes[at]);
       chain.reverse();
-      const out = { ...mitre45(chain, clear), net, pad };
+      const m = mitre45(chain, clear);
+      const out = { ...soften45(m.pts, clear, m.owners), net, pad };
       if (term) out.term = true;
       return out;
     }
