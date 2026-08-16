@@ -503,11 +503,7 @@
             <option value="exposed">Exposed metal</option>
           </select></div>
       </div>
-      <div class="sub" style="margin-top:0">Shape</div>
-      <select id="shapemode">
-        <option value="square" selected>Standard square (20 × 20)</option>
-        <option value="custom">Custom outline (images &amp; shapes)</option>
-      </select>
+      <div class="sub" style="margin-top:0">Board shape</div>
       <input type="file" id="shapefile" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml,.svg">
       <div id="shapeopts"></div>
       <label class="field">Connector pins</label>
@@ -950,7 +946,10 @@ const state = {
   tenting: true,   // vias covered with soldermask (every fab's default)
   pins: [...ALL_PINS],
   shape: {
-    mode: "square", smooth: 0.12,
+    // There is no square/custom switch: the board IS the standard square
+    // until an outline part with geometry exists (customActive), and the
+    // mode field stays "custom" purely for the server payload's benefit.
+    mode: "custom", smooth: 0.12,
     // Custom-outline parts, composed in order: adds union, then cuts punch
     // holes. Image elements also carry {file, raster, isSvg, fname, orig,
     // ow, oh, grid} once a picture is loaded.
@@ -963,11 +962,11 @@ const SHAPE_KIND_LABELS = {
   hex: "Polygon", star: "Star",
 };
 const MAX_SHAPE_ELS = 12;
-// The board only leaves the standard square once a custom part has geometry
-// (image parts count after their picture loads). Cut-only compositions
-// carve the standard square, so cuts activate the custom outline too.
+// The board only leaves the standard square once an outline part has
+// geometry (image parts count after their picture loads) — there is no
+// mode switch, adding a part IS the switch. Cut-only compositions carve
+// the standard square, so cuts activate the custom outline too.
 const customActive = () =>
-  state.shape.mode === "custom" &&
   state.shape.elements.some(el => el.kind !== "image" || el.orig);
 // Whether any part adds material; without one, cuts carve the standard square.
 const customHasAdd = () =>
@@ -1308,7 +1307,7 @@ function bboxOffsets(rot, layout, size, reverse) {
 // outline's bounding box (inset), not the standard square. Solid-board
 // containment is checked separately (unitInsideBoard).
 function unitSafe() {
-  if (state.shape.mode === "square") return UNIT_SAFE;
+  if (!customActive()) return UNIT_SAFE;
   const ob = outlineBounds();
   // 0.56: strictly more than the generator's 0.55 solid-board margin, so a
   // unit clamped to this rect is never relocated server-side.
@@ -3299,14 +3298,12 @@ function attachPointer(cv, side) {
         return { kind: "art", index: i, x: a.cx, y: a.cy, side: "front" };
       }
     }
-    if (state.shape.mode === "custom") {
-      for (let i = state.shape.elements.length - 1; i >= 0; i--) {
-        const el = state.shape.elements[i];
-        const inEl = el.kind === "image"
-          ? (b => b && inBBox(b, mx, my))(elBounds(el))
-          : hitCtx.isPointInPath(elementPath(el), mm2px(mx), mm2px(my));
-        if (inEl) return { kind: "shapeel", index: i, x: el.cx, y: el.cy, side: "front" };
-      }
+    for (let i = state.shape.elements.length - 1; i >= 0; i--) {
+      const el = state.shape.elements[i];
+      const inEl = el.kind === "image"
+        ? (b => b && inBBox(b, mx, my))(elBounds(el))
+        : hitCtx.isPointInPath(elementPath(el), mm2px(mx), mm2px(my));
+      if (inEl) return { kind: "shapeel", index: i, x: el.cx, y: el.cy, side: "front" };
     }
     return ledHit(false); // other-side ghost units last
   };
@@ -4478,7 +4475,6 @@ let shapeFileTarget = null; // element index the file dialog fills ("new" append
 function renderShapeOpts() {
   const s = state.shape, wrap = $("shapeopts");
   wrap.innerHTML = "";
-  if (s.mode !== "custom") return;
   const bar = document.createElement("div");
   bar.className = "row";
   bar.style.marginTop = "8px";
@@ -4490,9 +4486,10 @@ function renderShapeOpts() {
   if (!s.elements.length) {
     const d = document.createElement("div");
     d.className = "sub";
-    d.textContent = "Add images and shapes — they merge into one board, and any part "
-      + "can be switched to cut a hole instead. Cuts with no added parts "
-      + "carve the standard square.";
+    d.textContent = "The board is the standard 20 × 20 square. Reshape it by "
+      + "adding images and shapes — they merge into one board, any part can "
+      + "be switched to cut a hole instead, and removing every part brings "
+      + "the square back.";
     wrap.appendChild(d);
   }
   s.elements.forEach((el, i) => {
@@ -4582,12 +4579,6 @@ function renderShapeOpts() {
     requestOutline(true);
   };
 }
-$("shapemode").addEventListener("change", () => {
-  state.shape.mode = $("shapemode").value;
-  clearSelection();
-  renderShapeOpts();
-  requestOutline(true);
-});
 $("shapefile").addEventListener("change", () => {
   const f = $("shapefile").files[0];
   $("shapefile").value = "";
@@ -5149,7 +5140,7 @@ const TIPS = {
     <li><b>Double-click</b> an LED or artwork layer for a quick +90°.</li>
   </ul>` },
   shape: { title: "Step 1 — a helmet-shaped board", img: "parts.webp", html: `<ul>
-    <li>Switch to <b>Custom outline</b> and add the helmet PNG as a part: dark pixels become the board, so the badge IS the helmet (raise the threshold if bright details get punched out).</li>
+    <li>Add the helmet PNG as an outline part (<b>+ Image…</b> under Board shape): dark pixels become the board, so the badge IS the helmet (raise the threshold if bright details get punched out). No parts = the standard square.</li>
     <li>Each connector row carries 3V3 + GND, so one row alone powers the badge — <b>uncheck the top row</b> and the helmet's crown stays clean; the kept row's tabs are bridged in automatically.</li>
     <li>Parts compose: any part can also be switched to <b>Cuts a hole</b> to punch openings.</li>
     <li>SVG silhouettes trace exactly; <b>Edge smoothing</b> melts raster pixel stairs.</li>
@@ -5390,11 +5381,15 @@ async function restoreDesign(d) {
   });
   state.texts = (d.texts || []).map(t => ({ ...t }));
   state.texts.forEach(t => ensureFont(t.font));
-  state.shape.mode = (d.shape && d.shape.mode) || "square";
-  $("shapemode").value = state.shape.mode;
+  // The square/custom dropdown is gone: a board is square exactly when it
+  // has no outline parts. Saves from the dropdown era could carry leftover
+  // parts while set to "square" (switching back kept them, invisibly) —
+  // honor what that save showed on screen by dropping the parts.
+  const savedMode = (d.shape && d.shape.mode) || "square";
+  state.shape.mode = "custom";
   state.shape.smooth = (d.shape && d.shape.smooth != null) ? d.shape.smooth : 0.12;
   state.shape.elements = [];
-  for (const e of (d.shape && d.shape.elements) || []) {
+  for (const e of (savedMode === "custom" && d.shape.elements) || []) {
     const el = { kind: e.kind, op: e.op, cx: e.cx, cy: e.cy, w: e.w, h: e.h,
                  rot: e.rot || 0, sides: e.sides || 6,
                  threshold: e.threshold, invert: e.invert };
