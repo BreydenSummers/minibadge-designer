@@ -162,6 +162,10 @@
   }
   .row { display: flex; gap: 8px; }
   .row > div { flex: 1; }
+  /* Mask/Finish/Vias: weight the columns by their longest value so the
+     chosen option is never clipped mid-word (equal thirds cut "Silver
+     HASL" and "Tented" off at the panel's width). */
+  .row.fabrow { display: grid; grid-template-columns: 0.9fr 1.2fr 1fr; }
   .check { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
   .sect {
     display: flex; justify-content: space-between; align-items: center;
@@ -485,7 +489,7 @@
     <div id="panelscroll">
     <div class="panel" id="panel-shape">
       <h3>Board characteristics <button class="qm" tabindex="-1" data-tip="shape" title="How board shapes work">?</button></h3>
-      <div class="row" style="margin-bottom:8px">
+      <div class="row fabrow" style="margin-bottom:8px">
         <div><div class="sub" style="margin-top:0">Mask color</div>
           <select id="mask" title="Soldermask color">
             <option value="green" selected>Green</option><option value="purple">Purple</option>
@@ -494,13 +498,13 @@
           </select></div>
         <div><div class="sub" style="margin-top:0">Finish</div>
           <select id="finish" title="Surface finish — the color of all exposed metal">
-            <option value="enig" selected>Gold (ENIG)</option>
-            <option value="hasl">Silver (HASL)</option>
+            <option value="enig" selected>Gold ENIG</option>
+            <option value="hasl">Silver HASL</option>
           </select></div>
         <div><div class="sub" style="margin-top:0">Vias</div>
           <select id="tenting" title="Via tenting — whether the fab covers via barrels with soldermask (tented is every manufacturer's default)">
-            <option value="tented" selected>Tented (mask)</option>
-            <option value="exposed">Exposed metal</option>
+            <option value="tented" selected>Tented</option>
+            <option value="exposed">Exposed</option>
           </select></div>
       </div>
       <div class="sub" style="margin-top:0">Board shape</div>
@@ -883,9 +887,12 @@ function setStatus(msg, isError) {
   clearTimeout(statusTimer);
   if (!msg) return clearStatus();
   putToast("status", msg, isError ? "err" : "info");
-  // Errors stay until the next status: a failed Download must not fade
-  // into "the button did nothing" while the user glances away.
-  if (!isError) statusTimer = setTimeout(clearStatus, 6000);
+  // Errors linger long enough to survive a glance away — a failed Download
+  // must not fade into "the button did nothing" — but they do expire: many
+  // actions never post a status, so "stays until the next status" left a
+  // red refusal on screen through minutes of later successful work, and a
+  // stale red teaches users to ignore red.
+  statusTimer = setTimeout(clearStatus, isError ? 15000 : 6000);
 }
 
 // One-level undo for deletions: removing an LED/text/art layer/outline
@@ -941,7 +948,11 @@ window.addEventListener("beforeunload", e => {
 
 const state = {
   art: [],   // {file, img, iw, ih, cx, cy, wmm, threshold, invert, material, cache}
-  leds: [{x: 7.5, y: 6.5, color: "red", side: "back", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null}],
+  // The starter LED is front-side on purpose: the first thing on screen
+  // should be visible from the side the viewer is looking at. Back-side
+  // (the glow-through-a-window classic) is one click away, and its card
+  // says plainly that it only shows from behind.
+  leds: [{x: 7.5, y: 6.5, color: "red", side: "front", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null}],
   texts: [], // {x, y, text, size, side, rot}
   mask: "green",
   finish: "enig",  // surface finish: what color the exposed metal plates
@@ -3832,6 +3843,21 @@ function attachPointer(cv, side) {
       rebuildArt(a);
       renderArtList();
       draw();
+    } else if (hit.kind === "text") {
+      // Same gesture as every other rotatable thing on the canvas.
+      const t = state.texts[hit.index];
+      if (t) {
+        t.rot = (Math.round(t.rot || 0) + 90) % 360;
+        renderTextList();
+        draw();
+      }
+    } else if (hit.kind === "shapeel") {
+      const el = state.shape.elements[hit.index];
+      if (el && el.kind !== "circle") {
+        el.rot = (Math.round(el.rot || 0) + 90) % 360;
+        renderShapeOpts();
+        requestOutline(true);
+      }
     }
   });
 }
@@ -4016,14 +4042,14 @@ function renderArtList() {
         <div><select class="mode" title="Mode">${opt("palette", "By color (assign materials)", a.mode)}${opt("threshold", "Threshold (single material)", a.mode)}</select></div>
         <div style="flex:0 0 96px">${sideSelectHTML(a)}</div>
       </div>
-      ${a.mode === "palette" ? paletteRows + `<div class="sub">Tiny colors merge into the nearest swatch — use the wand to retarget.</div>` : `
+      ${a.mode === "palette" ? paletteRows + `<div class="sub">The ${MAX_PAL} strongest colors are kept; everything else merges into the nearest swatch — use the wand to retarget.</div>` : `
         <div style="margin-top:6px"><select class="m" title="Material">${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, a.material)).join("")}</select></div>
         <div class="sub">Threshold <span class="tv">${a.threshold}</span></div>
         <input type="range" class="th" min="1" max="254" value="${a.threshold}">
         <div class="check"><input type="checkbox" class="inv" id="inv${i}"${a.invert ? " checked" : ""}><label for="inv${i}">Invert</label></div>`}
       <div class="sub">Width (mm)</div>
       ${pairHTML("wd", 3, 119, 0.5, a.wmm)}
-      <div class="sub">Rotation (&deg;, clockwise)</div>
+      <div class="sub">Rotation (&deg;, clockwise) — double-click the layer for +90</div>
       ${pairHTML("rots", 0, 359, 1, a.rot)}
       <div class="row" style="margin-top:6px">
         <div><button class="tool flipb">${a.flip ? "Unmirror" : "Mirror"}</button></div>
@@ -4176,16 +4202,16 @@ function textWarnings(t) {
     // its own fallback, so without this warning the preview shows something
     // that never reaches the board.
     msgs.push(!t.font || t.font === "kicad"
-      ? "some characters may not exist in KiCad's board font and can print as □."
-      : "some characters are missing from this typeface and will be left off the "
+      ? "Some characters may not exist in KiCad's board font and can print as □."
+      : "Some characters are missing from this typeface and will be left off the "
         + "board entirely, even though the preview shows them.");
   }
   if (t.text.trim() && textOverParts(t)) {
-    msgs.push("this text overlaps a part or pad — the fab clips that area, and "
+    msgs.push("This text overlaps a part or pad — the fab clips that area, and "
       + "KiCad's DRC reports it as a silkscreen warning.");
   }
   if (t.text.trim() && !textOnSolidBoard(t)) {
-    msgs.push("part of this text hangs over the board edge or a hole, where "
+    msgs.push("Part of this text hangs over the board edge or a hole, where "
       + "nothing gets printed. Downloads are blocked until it fits.");
   }
   return msgs;
@@ -4324,6 +4350,9 @@ function farOK(L) {
 function renderLedList() {
   const wrap = $("ledlist");
   wrap.innerHTML = "";
+  if (!state.leds.length) {
+    wrap.innerHTML = `<div class="sub">Add an LED — each brings its series resistor, pre-wired through the power pours.</div>`;
+  }
   state.leds.forEach((L, i) => {
     const div = document.createElement("div");
     div.className = "item";
@@ -4504,7 +4533,7 @@ function renderTextList() {
           ${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, t.material)).join("")}
         </select></div>
       </div>
-      <div class="sub">Rotation (&deg;, clockwise)</div>
+      <div class="sub">Rotation (&deg;, clockwise) — double-click the text for +90</div>
       ${pairHTML("trot", 0, 359, 1, t.rot || 0)}
       ${t.font === "kicad" ? `<div class="sub">KiCad's stroke font is silkscreen-only — pick another font to use copper, glow, or bare.</div>` : ""}`;
     div.querySelector(".tx").value = t.text;
@@ -4854,9 +4883,11 @@ $("addled").addEventListener("click", () => {
       + "Remove one before adding another.", true);
     return;
   }
-  // Back is the default: back-side LEDs glow through windows in the board,
-  // the classic minibadge look (and they face you on a badge you're wearing).
-  const led = {x: 10, y: 10, color: "red", side: "back", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null};
+  // Front is the default: a new LED should be visible from the side the
+  // user is looking at. Back-side (glowing through a window, facing the
+  // host badge) is a deliberate choice, one click away — the old back
+  // default meant the first thing a newcomer ever placed was invisible.
+  const led = {x: 10, y: 10, color: "red", side: "front", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null};
   const spot = spotForNewLed(led);
   if (!spot) {
     setStatus(`No room for another LED — ${state.leds.length} unit`
@@ -4878,17 +4909,27 @@ $("addtext").addEventListener("click", () => {
   const n = state.texts.length;
   const t = {x: 10.16, y: 10.16 + (n % 5) * 2.2 - 4.4, text: "", size: 1.5,
              side: "front", font: "kicad", material: "silk", rot: 0};
-  // Custom outlines may have no board at the default spot — scan a few
-  // candidates (default first, then center-out) for one on solid material.
-  if (customActive() && state.shape.rings) {
+  // New text must land somewhere sensible, like a new LED does: scan a few
+  // candidates (the staggered default first) for a spot that is on solid
+  // board AND clear of parts and pads — spawning onto a unit used to greet
+  // the user with an overlap warning for something the app did to itself.
+  // Settle for merely-solid, then for the default, rather than refusing.
+  {
     const ob = outlineBounds();
-    const cands = [[t.x, t.y], [10.16, 10.16], [(ob[0] + ob[2]) / 2, (ob[1] + ob[3]) / 2],
-                   [10.16, 12.5], [10.16, 8.0], [(ob[0] + ob[2]) / 2, (ob[1] + ob[3]) / 2 + 3]];
+    const cx = (ob[0] + ob[2]) / 2, cy = (ob[1] + ob[3]) / 2;
+    const cands = [[t.x, t.y], [10.16, 15.5], [10.16, 4.8], [5.4, 15.5],
+                   [15.0, 15.5], [5.4, 4.8], [15.0, 4.8],
+                   [cx, cy + 3.5], [cx, cy - 3.5], [cx, cy]];
     const probe = { ...t, text: "text" };
+    let clear = null, solid = null;
     for (const [x, y] of cands) {
       probe.x = x; probe.y = y;
-      if (textOnSolidBoard(probe)) { t.x = x; t.y = y; break; }
+      if (!textOnSolidBoard(probe)) continue;
+      if (!textOverParts(probe)) { clear = [x, y]; break; }
+      if (!solid) solid = [x, y];
     }
+    if (clear) [t.x, t.y] = clear;
+    else if (solid) [t.x, t.y] = solid;
   }
   state.texts.push(t);
   renderTextList();

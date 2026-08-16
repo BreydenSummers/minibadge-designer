@@ -421,12 +421,15 @@ def test_flow_upload_assign_material_drag_add_led_and_download(ui, logo):
     assert ui.panel() == "art"
 
     # --- add an LED and split the two across both faces -----------------
+    # New units default to the front (visible side); this flow needs one on
+    # each face, so the second is switched to back explicitly.
     ui.show_panel("leds")
     assert ui.add_led() is True
     ui.wait_state("state.leds.length === 2")
     ui.card("ledlist", 0).locator("select.s").select_option("front", timeout=ELEMENT_TIMEOUT)
     ui.wait_state("state.leds[0].side === 'front'")
-    assert ui.leds()[1]["side"] == "back"
+    ui.card("ledlist", 1).locator("select.s").select_option("back", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.leds[1].side === 'back'")
 
     # --- drag the back LED on the mirrored BACK canvas ------------------
     back_led = ui.leds()[1]
@@ -1747,3 +1750,51 @@ def test_the_trace_endpoint_drags_only_onto_valid_targets(ui):
     page.mouse.dblclick(cx, cy)
     assert ui.js("() => state.leds[0].term ?? null") is None
     ui.assert_clean("trace endpoint drag")
+
+
+# ===========================================================================
+# First-session defaults (dogfood findings F1/F2/F5/F6)
+# ===========================================================================
+def test_the_first_session_defaults_never_greet_the_user_with_a_warning(ui):
+    """A fresh design's defaults compose cleanly: the starter LED is on the
+    face the viewer is looking at, a newly added text lands clear of parts
+    instead of on top of them, an emptied LED panel says what to do next,
+    and text answers the same double-click-to-rotate gesture as everything
+    else on the canvas.
+
+    These were the top dogfood findings: the old defaults meant the first
+    thing a newcomer ever saw was an invisible back-side part, and the first
+    thing adding text produced was an overlap warning the app caused itself.
+    """
+    page = ui.page
+    # The starter LED faces the viewer.
+    assert ui.js("() => state.leds[0].side") == "front", (
+        "the very first part on screen is on the invisible side")
+
+    # A new text lands on solid board AND clear of the starter LED — no
+    # self-inflicted warning. The app's own predicates are the oracle.
+    ui.show_panel("text")
+    page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    page.locator("#textlist .item input.tx").first.fill("hello badge")
+    page.wait_for_timeout(300)
+    assert ui.js("() => textOverParts(state.texts[0])") is False, (
+        "new text spawned on top of an existing part — the first thing the "
+        "user sees after typing is a warning the app caused itself")
+    assert ui.js("() => textOnSolidBoard(state.texts[0])") is True
+
+    # Text rotates with the same gesture as LEDs and art.
+    t = ui.js("() => [state.texts[0].x, state.texts[0].y]")
+    x, y = ui.board_to_client(t[0], t[1], "front")
+    page.mouse.dblclick(x, y)
+    page.wait_for_timeout(200)
+    assert ui.js("() => state.texts[0].rot") == 90, (
+        "double-click rotates LEDs and art but not text")
+
+    # An emptied LED panel guides instead of going blank.
+    ui.show_panel("leds")
+    ui.remove_card("ledlist", 0)
+    ui.wait_state("state.leds.length === 0")
+    hint = ui.js("() => document.getElementById('ledlist').innerText.trim()")
+    assert hint, "the emptied LED panel is a blank void with no next step"
+    ui.assert_clean("first-session defaults")
