@@ -963,7 +963,81 @@ def test_auto_routes_come_out_as_45s_too():
     assert r["tight"] and r["manual"]
 
 
-def test_pins_can_be_dropped_individually():
+def test_a_chosen_pad_wins_over_the_nearest_one():
+    """A hand-picked trace end sends the run there — never to the closer pad
+    the auto-router would use.
+
+    The endpoint is the user's routing decision on the physical board: a run
+    silently rerouted to a nearer pad crosses regions they deliberately kept
+    clear, and the preview would be showing copper the fab never builds.
+    """
+    pads = {num: (x, y) for num, x, y, _n, _r in pcb.CONNECTOR_PADS}
+    # Off the defaults: a back-side inline 0603 at an oblique angle, choosing
+    # the top-row 3V3 pad when the bottom-row one is closer.
+    led = pcb.Led(13.0, 15.0, "green", side="back", layout="inline",
+                  size="0603", rot=37, novia=True, term=("pad", "7"))
+    spec = pcb.BadgeSpec(leds=[led])
+    safe = pcb.unit_safe(spec)
+    term = pcb.novia_term(led, spec.leds, spec.pins, safe)
+    route = pcb.novia_route(led, spec.pins, safe, spec.leds, term=term)
+    assert route["pad"] == pads["7"], route["pad"]
+    assert route.get("term") and not route.get("tight"), route
+    # The contrast that keeps this from passing vacuously: without the choice
+    # the router really does go to the nearer bottom-row pad.
+    auto = pcb.novia_route(led, spec.pins, safe, spec.leds)
+    assert auto["pad"] == pads["15"], auto["pad"]
+
+
+def test_a_run_chained_onto_another_unit_lands_on_its_pad_and_ships_no_via():
+    """term=("unit", k) ends the run on that unit's same-net pad, so several
+    via-less units can share one path to the rail instead of each cutting its
+    own channel across the pour. The chained board still ships via-free and
+    resolve_novia accepts it."""
+    from dataclasses import replace
+
+    a = pcb.Led(6.0, 6.0, "red", novia=True, term=("unit", 1))
+    b = pcb.Led(13.5, 12.5, "blue", novia=True, term=("pad", "16"))
+    spec = pcb.BadgeSpec(leds=[a, b])
+    safe = pcb.unit_safe(spec)
+    term = pcb.novia_term(a, spec.leds, spec.pins, safe)
+    assert term is not None and term[1] is b, "the chain target did not resolve"
+    route = pcb.novia_route(a, spec.pins, safe, spec.leds, term=term)
+    assert not route.get("tight"), route
+    # The run ends exactly on b's cathode pad — the GND pad of a front unit.
+    g = pcb.led_geometry(b)
+    bx, by = pcb.clamp_led_obj(b, safe)
+    ox, oy = pcb._r(*g["led_k"], b.rot)
+    assert route["pts"][-1] == (bx + ox, by + oy), route["pts"]
+    resolved, bad = pcb.resolve_novia(spec, safe)
+    assert bad == [], "a routable chain was refused"
+    assert "(via " not in pcb.generate_pcb(replace(spec, leds=list(resolved)))
+
+
+@pytest.mark.parametrize("term,leds_extra,why", [
+    (("pad", "7"), [], "a 3V3 pad cannot end a front unit's GND run"),
+    (("pad", "1"), [], "VBAT carries no net a trace may land on"),
+    (("pad", "42"), [], "not a connector pad at all"),
+    (("unit", 0), [], "a unit cannot chain to itself"),
+    (("unit", 5), [], "no such unit"),
+    (("unit", 1), [pcb.Led(13.0, 13.0, "blue", side="back")],
+     "the target's SMD pads have no copper on this unit's layer"),
+    (("unit", 1), [pcb.Led(13.0, 13.0, "blue", novia=True, term=("unit", 0))],
+     "a two-unit loop never reaches a plated hole"),
+])
+def test_an_invalid_terminal_choice_falls_back_to_the_nearest_pad(
+        term, leds_extra, why):
+    """Every invalid choice resolves to None — the automatic nearest-pad
+    route — instead of refusing the board or, worse, landing the run on
+    copper that cannot power it. Hand-crafted requests are sanitized, and
+    the canvas never offers these choices in the first place."""
+    led = pcb.Led(6.0, 6.0, "red", novia=True, term=term)
+    leds = [led] + leds_extra
+    assert pcb.novia_term(led, leds, pcb.ALL_PINS, None) is None, why
+    # The dropped-pin variant needs a valid-net pad to prove `pins` gates it.
+    kept = ("2", "7", "8", "15")  # pad 16 dropped
+    gone = pcb.Led(6.0, 6.0, "red", novia=True, term=("pad", "16"))
+    assert pcb.novia_term(gone, [gone], kept, None) is None, \
+        "a dropped pin stayed a legal destination"
     import re
 
     # Keeping one corner leaves exactly its two pads, its tab and its header.

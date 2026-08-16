@@ -102,6 +102,11 @@ CORPUS = [
     # than trusting that a call means a check ran.
     ("far-side-led", _spec(leds=[pcb.Led(10.0, 10.0, "red", farled=True)])),
     ("via-less-unit", _spec(leds=[pcb.Led(10.0, 6.0, "red", novia=True)])),
+    # Chosen trace terminals: one run to a hand-picked far pad, one chained
+    # onto a sibling's cathode pad so the two share a single path to GND.
+    ("via-less-chained", _spec(leds=[
+        pcb.Led(6.0, 6.0, "red", novia=True, term=("unit", 1)),
+        pcb.Led(13.5, 12.5, "blue", novia=True, term=("pad", "16"))])),
     ("text-front-and-back", _spec(
         leds=[pcb.Led(6.0, 6.0, "red")], art=[],
         texts=[pcb.Text(10.0, 15.0, "SAINTCON", size=1.5),

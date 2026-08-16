@@ -1017,11 +1017,18 @@ def _py_led(d):
     """The same unit as `pcb.Led`, so one design drives both implementations."""
     from minibadge_designer import pcb
 
+    term = None
+    t = d.get("term")
+    if isinstance(t, dict):
+        if "pad" in t:
+            term = ("pad", str(t["pad"]))
+        elif "unit" in t:
+            term = ("unit", int(t["unit"]))
     return pcb.Led(x=d["x"], y=d["y"], color=d["color"], side=d["side"],
                    rot=d["rot"], layout=d["layout"], size=d["size"],
                    reverse=d["reverse"], novia=d["novia"],
                    nodes=tuple(tuple(n) for n in d["nodes"]),
-                   farled=d["farled"], adv=d["adv"])
+                   term=term, farled=d["farled"], adv=d["adv"])
 
 
 def _unit_matrix(sides=("front",), rots=_ROTS, advs=_ADV):
@@ -1411,6 +1418,24 @@ def test_the_previewed_via_less_trace_takes_the_route_the_board_routes(ui):
     ]
     cases += [(crowded, pins) for pins in (None, ("1", "2", "9", "10"))]
     cases += [([_js_led(novia=True, nodes=[[5.0, 5.0], [3.0, 3.0]])], None)]
+    # A chosen destination must be honoured identically on both sides: a far
+    # pad instead of the nearest, a chain onto another unit's same-net pad, a
+    # loop (both must refuse it by falling back to auto), and a wrong-net pad
+    # (both must ignore it). A drift here ships a run to a pad the preview
+    # never showed.
+    cases += [
+        ([_js_led(x=6.0, y=6.0, novia=True, term={"pad": "16"})], None),
+        ([_js_led(x=6.0, y=6.0, novia=True, term={"unit": 1}),
+          _js_led(x=14.0, y=13.0, novia=True)], None),
+        ([_js_led(x=6.0, y=6.0, novia=True, term={"unit": 1}),
+          _js_led(x=14.0, y=13.0, novia=True, term={"unit": 0})], None),
+        ([_js_led(x=10.0, y=13.0, side="back", novia=True,
+                  term={"pad": "7"})], None),
+        ([_js_led(x=6.0, y=6.0, novia=True, term={"pad": "7"})], None),
+        ([_js_led(x=6.0, y=6.0, novia=True, term={"unit": 1},
+                  nodes=[[10.0, 10.0]]),
+          _js_led(x=14.0, y=13.0, novia=True)], None),
+    ]
 
     off_by, routed = [], 0
     for design, pins in cases:
@@ -1420,9 +1445,10 @@ def test_the_previewed_via_less_trace_takes_the_route_the_board_routes(ui):
                       " noviaRouteRaw(state.leds[i]))", leds)
         units = [_py_led(d) for d in leds]
         for i, d in enumerate(leds):
+            keep = pcb.ALL_PINS if pins is None else pins
             board = pcb.novia_route(
-                units[i], pcb.ALL_PINS if pins is None else pins, None,
-                units)
+                units[i], keep, None, units,
+                term=pcb.novia_term(units[i], units, keep, None))
             js = drawn[i]
             if (board is None) != (js is None):
                 off_by.append(
@@ -1654,3 +1680,70 @@ def test_fab_download_waits_for_the_authors_warning_to_be_acknowledged(ui):
         f"one acknowledgement must release exactly one export, saw "
         f"{len(gerber_posts)} POSTs to /gerbers")
     ui.assert_clean("fab gerber gate flow")
+
+
+@pytest.mark.browser
+def test_the_trace_endpoint_drags_only_onto_valid_targets(ui):
+    """Dragging a via-less trace's endpoint can only land it somewhere legal
+    — a same-net connector pad or another unit's same-net pad — and
+    double-clicking it returns the run to the automatic nearest pad.
+
+    The endpoint is real copper: a drop in open space, on a wrong-net pad,
+    or into a chain loop would ship a trace that powers nothing. The move
+    handler snaps to the nearest of a pre-validated candidate list, so the
+    invariant to hold is "term is always exactly one of the candidates the
+    validator offered".
+    """
+    page = ui.page
+    leds = [_js_led(x=7.0, y=7.0, novia=True),
+            _js_led(x=14.0, y=14.0, color="blue", novia=True)]
+    _set_design(ui, leds)
+
+    def endpoint(i):
+        return ui.js(f"() => noviaRoute(state.leds[{i}]).pts.at(-1)")
+
+    def drag_endpoint(frm, to):
+        sx, sy = ui.board_to_client(frm[0], frm[1], "front")
+        dx, dy = ui.board_to_client(to[0], to[1], "front")
+        page.mouse.move(sx, sy)
+        page.mouse.down()
+        page.mouse.move(dx, dy, steps=6)
+        mid = ui.js("() => drag && drag.cands ? drag.cands.length : 0")
+        page.mouse.up()
+        return mid
+
+    # Drop near the far GND pad (16): the endpoint snaps to that pad, and the
+    # candidate list existed while the drag was live (that is what the user
+    # sees highlighted).
+    n_cands = drag_endpoint(endpoint(0), (19.05, 19.05))
+    assert n_cands >= 4, (
+        f"only {n_cands} destinations were on offer mid-drag — the same-net "
+        "pads or the sibling unit are missing from the highlight set")
+    assert ui.js("() => state.leds[0].term") == {"pad": "16"}
+    assert endpoint(0) == [19.05, 19.05]
+
+    # Drop onto LED 2's cathode pad: the run chains onto the sibling.
+    target = ui.js("""() => {
+      const t = geomOf(state.leds[1]);
+      return unitPoint(state.leds[1], t.ledK[0], t.ledK[1]);
+    }""")
+    drag_endpoint(endpoint(0), target)
+    assert ui.js("() => state.leds[0].term") == {"unit": 1}
+    assert not ui.js("() => noviaRoute(state.leds[0]).tight"), (
+        "the chained run should route clear — the target pad must not count "
+        "as a hazard")
+
+    # While LED 1 ends on LED 2, LED 2 must not be offered LED 1 back: a
+    # loop feeds nothing, so it never appears among the candidates. Its three
+    # same-net connector pads must still be there — an empty list here would
+    # mean the validator broke, not that the loop was excluded.
+    cands = ui.js("() => noviaTermTargets(state.leds[1]).map(c => c.term)")
+    assert len(cands) >= 3, f"LED 2 lost its connector-pad destinations: {cands}"
+    assert not any(c.get("unit") == 0 for c in cands), cands
+
+    # Double-click the endpoint: back to the automatic nearest pad.
+    ex, ey = endpoint(0)
+    cx, cy = ui.board_to_client(ex, ey, "front")
+    page.mouse.dblclick(cx, cy)
+    assert ui.js("() => state.leds[0].term ?? null") is None
+    ui.assert_clean("trace endpoint drag")

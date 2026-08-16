@@ -309,9 +309,9 @@ def test_stranded_led_rejected_with_message(client):
 
 # A via-less unit gives up its via and instead runs a trace across its own
 # layer to a connector pad carrying the net it needs. Some placements have no
-# such run, and `_generate_impl` answers those with one of two hand-written
-# 400s (webapp.py:1221-1236). These are the two designs that reach them --
-# one per branch, so a repair of only one of the two messages still goes red.
+# such run, and `_generate_impl` answers those with one of three hand-written
+# 400s. These are the designs that reach them -- one per branch, so a repair
+# of only one of the messages still goes red.
 #
 # Both are deliberately off the defaults. Every other LED payload in this file
 # is a front-side, stacked, 0805 unit with the via left on, and that is exactly
@@ -334,6 +334,16 @@ _UNROUTABLE_DESIGNS = {
          "size": "1206", "layout": "inline"}
         for i in range(3)
     ],
+    # (c) The same boxed row, but the first unit's trace end was hand-picked.
+    #     Branch: "no clear path to the chosen trace end" — the refusal has
+    #     to blame the choice, not the via setting the user turned off on
+    #     purpose.
+    "chosen-end-blocked": [
+        dict({"x": 6.0 + 4.0 * i, "y": 17.6, "color": "red", "novia": True,
+              "size": "1206", "layout": "inline"},
+             **({"term": {"pad": "16"}} if i == 0 else {}))
+        for i in range(3)
+    ],
 }
 
 
@@ -348,6 +358,7 @@ _UNROUTABLE_DESIGNS = {
     # ~0.3 s a call: the pour has to be filled before the router can be told
     # the channel is fenced off.
     pytest.param("boxed-in-row", marks=pytest.mark.slow),
+    pytest.param("chosen-end-blocked", marks=pytest.mark.slow),
 ])
 def test_a_via_less_led_that_cannot_route_is_refused_and_not_crashed(
         client, route, design):
@@ -399,6 +410,40 @@ def test_switching_the_via_back_on_makes_the_same_design_downloadable(
         content_type="multipart/form-data",
     )
     invariants.assert_project_zip(resp, "viaon")
+
+
+@pytest.mark.webapp
+def test_a_chosen_trace_end_rides_the_request_and_garbage_ones_are_sanitized(
+        client):
+    """The term field crosses HTTP intact — the board's run really ends on
+    the chosen pad — while malformed or forbidden choices degrade to the
+    automatic route: a hostile payload gets a sane board, never a 500 and
+    never a trace landed on copper that cannot power it."""
+    from minibadge_designer import pcb as _pcb
+
+    led = {"x": 6, "y": 6, "color": "red", "novia": True,
+           "size": "0603", "layout": "inline", "term": {"pad": "16"}}
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps({"name": "term", "leds": [led]})},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200, resp.get_data()[:200]
+    board = zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "term/term.kicad_pcb").decode()
+    pads = {num: (x, y) for num, x, y, _n, _r in _pcb.CONNECTOR_PADS}
+    px, py = pads["16"]
+    assert f"{_pcb._n(_pcb.ORIGIN + px)} {_pcb._n(_pcb.ORIGIN + py)}" in board, \
+        "the emitted run does not end on the chosen pad"
+    for garbage in ({"pad": [1]}, {"unit": "x"}, 5, {"pad": "1"},
+                    {"unit": -3}, {"unit": 99}):
+        r = client.post(
+            "/generate",
+            data={"params": json.dumps(
+                {"name": "g", "leds": [dict(led, term=garbage)]})},
+            content_type="multipart/form-data",
+        )
+        assert r.status_code == 200, (garbage, r.get_data()[:200])
 
 
 def test_smoothing_strength_and_off(client):
