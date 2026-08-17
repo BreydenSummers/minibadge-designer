@@ -455,7 +455,8 @@
   }
   .qm:hover { color: var(--accent); border-color: var(--accent); }
   #tippop {
-    position: fixed; z-index: 50; width: 360px; max-width: calc(100vw - 24px);
+    position: fixed; z-index: 50; width: 560px; max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 16px); overflow-y: auto;
     background: var(--panel); border: 1px solid var(--edge); border-radius: 6px;
     padding: 12px 14px; box-shadow: var(--shadow); display: none;
   }
@@ -6770,7 +6771,7 @@ document.addEventListener("click", e => {
     + (t.img ? `<img src="/static/help/${t.img}" alt="">` : "") + t.html;
   tipPop.style.display = "block";
   const r = btn.getBoundingClientRect();
-  const w = Math.min(360, innerWidth - 24);
+  const w = Math.min(560, innerWidth - 24);
   tipPop.style.left = Math.max(12, Math.min(r.right + 10, innerWidth - w - 12)) + "px";
   const place = () => {
     tipPop.style.top = Math.max(8, Math.min(r.top - 8, innerHeight - tipPop.offsetHeight - 12)) + "px";
