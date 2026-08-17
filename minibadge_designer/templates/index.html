@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>minibadge designer — fab-ready SAINTCON badges</title>
+<title>minibadge designer: fab-ready SAINTCON badges</title>
 <script type="module" src="/static/vendor/model-viewer.min.js"></script>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%234b2a7b'/><circle cx='4' cy='4' r='1.6' fill='%23ffb454'/><circle cx='12' cy='4' r='1.6' fill='%23ffb454'/><circle cx='4' cy='12' r='1.6' fill='%23ffb454'/><circle cx='12' cy='12' r='1.6' fill='%23ffb454'/><circle cx='8' cy='8' r='2.2' fill='%23ff3b30'/></svg>">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><rect width='24' height='24' rx='6' fill='%230d7c3f'/><circle cx='4.2' cy='4.2' r='1.6' fill='%23eebf55'/><circle cx='8.2' cy='4.2' r='1.6' fill='%23eebf55'/><circle cx='15.8' cy='4.2' r='1.6' fill='%23eebf55'/><circle cx='19.8' cy='4.2' r='1.6' fill='%23eebf55'/><circle cx='4.2' cy='19.8' r='1.6' fill='%23eebf55'/><circle cx='8.2' cy='19.8' r='1.6' fill='%23eebf55'/><circle cx='15.8' cy='19.8' r='1.6' fill='%23eebf55'/><circle cx='19.8' cy='19.8' r='1.6' fill='%23eebf55'/><rect x='7.7' y='7.4' width='8.6' height='3.8' rx='0.7' fill='%23c9ced6'/><rect x='9.7' y='7.4' width='4.6' height='3.8' fill='%2323272d'/><rect x='8.3' y='13.1' width='7.4' height='3.6' rx='0.7' fill='%23c9ced6'/><rect x='10.2' y='13.1' width='3.6' height='3.6' fill='%23ff5147'/></svg>">
 <style>
   /* Cyanotype Blueprint Workbench. Dark is the exposed print (default);
      [data-theme="light"] is the drafting paper before exposure. Both come
@@ -36,17 +36,15 @@
     display: flex; align-items: center; gap: 12px; padding: 0 16px;
     background: var(--panel); border-bottom: 1px solid var(--edge);
   }
-  #topbar .brand { font-weight: 800; font-size: 15px; letter-spacing: .02em; white-space: nowrap; }
+  #topbar .brand {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 800; font-size: 16px; letter-spacing: -.01em; white-space: nowrap;
+  }
   #topbar .brand em { color: var(--accent); font-style: normal; }
-  #topbar .tagline { font-size: 9.5px; color: var(--dim); letter-spacing: .04em; margin-top: -2px; white-space: nowrap; }
-  #topbar input#name {
+  #topbar .brandmark { width: 22px; height: 22px; flex: 0 0 auto; display: block; }  #topbar input#name {
     width: 180px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px;
   }
   #topbar select#mask { width: 110px; }
-  #revchip {
-    font-size: 10.5px; letter-spacing: .12em; color: var(--dim);
-    border: 1px solid var(--edge); padding: 4px 10px; border-radius: 4px; white-space: nowrap;
-  }
   #themebtn {
     margin-left: auto; background: none; border: 1px solid var(--edge); color: var(--dim);
     border-radius: 4px; width: 30px; height: 30px; cursor: pointer; font-size: 14px;
@@ -70,7 +68,7 @@
   .rico.on { border-color: var(--accent); color: var(--accent); background: var(--bg); }
   /* The rail is a column: the controls scroll, the message dock is pinned
      under them. Both have their own box, so neither can ever cover the
-     other — or anything in the work area. */
+     other, or anything in the work area. */
   #listpanel {
     background: var(--panel); border-right: 1px solid var(--edge);
     display: flex; flex-direction: column; min-height: 0; overflow: hidden;
@@ -117,8 +115,8 @@
     letter-spacing: .1em; cursor: pointer;
   }
   #viewtabs .on { background: var(--accent); color: var(--panel); font-weight: 700; }
-  /* The 3D toggle rides in the same control as the flat views — it picks a
-     view too — but sits past a divider: it swaps the whole stage, not just
+  /* The 3D toggle rides in the same control as the flat views (it picks a
+     view too) but sits past a divider: it swaps the whole stage, not just
      which face you're looking at. */
   #viewtabs .vtsep {
     width: 1px; background: var(--edge); margin: 2px 5px; align-self: stretch;
@@ -132,6 +130,15 @@
   #tab-3d svg { width: 13px; height: 13px; }
   #tab-3d:hover { color: var(--accent); }
   #tab-3d.on { background: var(--accent); color: var(--panel); font-weight: 700; }
+  /* Nudge toward FIG. 2 when BOTH is on but the window is too short to show
+     it: the work area scrolls internally, and nothing else says so. */
+  #foldcue {
+    display: none; position: absolute; left: 50%; transform: translateX(-50%);
+    z-index: 4; background: var(--panel); border: 1px solid var(--edge);
+    border-radius: 4px; padding: 4px 12px; color: var(--dim); cursor: pointer;
+    font: 11px/1.5 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .1em;
+  }
+  #foldcue:hover { color: var(--accent); border-color: var(--accent); }
   #views { display: flex; flex-wrap: wrap; justify-content: center; gap: 44px; padding: 56px 30px 46px; }
   #views figure { margin: 0; width: 100%; max-width: 440px; position: relative; }
   #views figcaption {
@@ -229,7 +236,7 @@
   button#download:disabled, button#gerberbtn:disabled { opacity: .5; cursor: default; }
   /* The author's caveat, as a gate: the fab zip goes straight to a board
      house, so nothing downloads until "I understand" is clicked. z-index
-     outranks the help popover (50) — this is the one thing that may never
+     outranks the help popover (50); this is the one thing that may never
      sit under anything else. */
   #fabwarn {
     display: none; position: fixed; inset: 0; z-index: 60;
@@ -257,20 +264,25 @@
   #fabwarn #fabok { border: 0; background: var(--hot); color: var(--hot-ink); font-weight: 800; }
   #fabwarn #fabcancel { background: none; border: 1px solid var(--edge); color: var(--text); }
   #fabwarn #fabcancel:hover { color: var(--accent); border-color: var(--accent); }
-  /* Message dock at the foot of the rail: transient status messages and the
-     standing warnings about problems with the design (a part off the board,
-     text over a pad, ...). It is IN FLOW, not floating over the work area:
-     the standing warnings are re-raised on every draw and so live as long as
-     the problem does, and a permanent overlay is a permanent hole in whatever
-     it covers — here it covered the view selector and made FRONT unclickable.
-     Newest at the bottom, nearest the eye; the stack scrolls rather than
-     eating the rail, and vanishes entirely when there is nothing to say. */
+  /* Message stack at the top-left of the work area: transient status
+     messages and the standing warnings about problems with the design (a
+     part off the board, text over a pad, ...). An earlier overlay version
+     sat over the centred view selector and swallowed its clicks, so this
+     one is pinned to the corner AND the container is pointer-transparent —
+     only the toast cards themselves take clicks, never the box around them. */
   #toasts {
-    flex: 0 0 auto; max-height: 45%; overflow-y: auto;
+    position: absolute; top: 12px; left: 12px; z-index: 4;
+    width: 320px; max-width: calc(100% - 24px); max-height: 45%; overflow-y: auto;
     display: flex; flex-direction: column; gap: 6px;
-    padding: 10px 12px; border-top: 1px solid var(--edge); background: var(--bg);
+    pointer-events: none;
+  }
+  /* Below ~1450px the centred view selector reaches into the stack's column;
+     drop the stack under the selector row so a card can never sit on it. */
+  @media (max-width: 1450px) {
+    #toasts { top: 56px; }
   }
   #toasts:empty { display: none; }
+  .toast { pointer-events: auto; }
   .toast {
     color: var(--dim); font: 500 11px/1.55 ui-monospace, "SF Mono", Menlo, monospace;
     background: var(--panel); border: 1px solid var(--edge);
@@ -354,7 +366,7 @@
   #d3layers b { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; }
   #d3mv { width: 100%; height: 100%; --poster-color: transparent; }
   /* A failed export leaves the previous model on screen. Say so in the view
-     itself — a toast can be replaced by the next status message, and then the
+     itself: a toast can be replaced by the next status message, and then the
      board just looks wrong for no visible reason. */
   #d3stale {
     display: none; position: absolute; bottom: 38px; left: 50%;
@@ -407,15 +419,12 @@
   .advbox > summary:hover { color: var(--accent); }
   /* The summary advertises what's inside: a dim content preview while
      collapsed and idle, or the features currently switched on. Both vanish
-     once open — the checkboxes speak for themselves there. */
+     once open; the checkboxes speak for themselves there. */
   .advbox > summary .advsum { text-transform: none; letter-spacing: .02em; opacity: .75; }
   .advbox > summary .advon { text-transform: none; letter-spacing: .02em; color: var(--accent); }
   .advbox[open] > summary .advsum, .advbox[open] > summary .advon { display: none; }
   .counter { color: var(--dim); font-size: 11px; text-align: right; margin-top: 2px; }
   input[type=file] { display: none; }
-  @media (max-width: 1280px) {
-    #revchip { display: none; }
-  }
   @media (max-width: 1120px) {
     #shell { grid-template-columns: 54px 280px 1fr; }
     #topbar input#name { width: 120px; }
@@ -437,7 +446,6 @@
   @media (max-width: 960px) {
     #topbar select#mask { width: 86px; }
     #topbar select#finish { width: 96px; }
-    #topbar .tagline { display: none; }
   }
   .qm {
     display: inline-flex; align-items: center; justify-content: center;
@@ -460,13 +468,25 @@
 </head>
 <body>
 <div id="topbar">
-  <div><div class="brand">minibadge<em>·designer</em></div>
-    <div class="tagline">PCB art → fab-ready KiCad</div></div>
+  <div class="brand"><svg class="brandmark" viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="2" y="2" width="20" height="20" rx="5" fill="#0d7c3f"/>
+      <circle cx="5.5" cy="5.5" r="1.3" fill="#eebf55"/>
+      <circle cx="8.8" cy="5.5" r="1.3" fill="#eebf55"/>
+      <circle cx="15.2" cy="5.5" r="1.3" fill="#eebf55"/>
+      <circle cx="18.5" cy="5.5" r="1.3" fill="#eebf55"/>
+      <circle cx="5.5" cy="18.5" r="1.3" fill="#eebf55"/>
+      <circle cx="8.8" cy="18.5" r="1.3" fill="#eebf55"/>
+      <circle cx="15.2" cy="18.5" r="1.3" fill="#eebf55"/>
+      <circle cx="18.5" cy="18.5" r="1.3" fill="#eebf55"/>
+      <rect x="8.4" y="8.2" width="7.2" height="3.2" rx="0.6" fill="#c9ced6"/>
+      <rect x="10.1" y="8.2" width="3.8" height="3.2" fill="#23272d"/>
+      <rect x="8.9" y="12.9" width="6.2" height="3" rx="0.6" fill="#c9ced6"/>
+      <rect x="10.5" y="12.9" width="3" height="3" fill="#ff5147"/>
+    </svg><span>minibadge&thinsp;<em>designer</em></span></div>
   <input type="text" id="name" value="my-minibadge" maxlength="40" title="Project name (used for the zip and its files)">
-  <div id="revchip" class="mono">SHEET 1/1 · 20.32 × 20.32 MM</div>
   <button class="qm" tabindex="-1" data-tip="basics" title="Getting around">?</button>
   <button id="themebtn" title="Toggle light/dark">◐</button>
-  <button id="gerberbtn" title="Plot the Gerber fab package — a zip you upload straight to JLCPCB or PCBWay">⬇ Gerbers<span class="dlx"> for fab</span></button>
+  <button id="gerberbtn" title="Plot the Gerber fab package: a zip you upload straight to JLCPCB or PCBWay">⬇ Gerbers<span class="dlx"> for fab</span></button>
   <button id="download">⬇ Download<span class="dlx"> KiCad project</span></button>
   <button class="qm" tabindex="-1" data-tip="download" title="What you get">?</button>
 </div>
@@ -503,12 +523,12 @@
             <option value="blue">Blue</option><option value="white">White</option>
           </select></div>
         <div><div class="sub" style="margin-top:0">Finish</div>
-          <select id="finish" title="Surface finish — the color of all exposed metal">
+          <select id="finish" title="Surface finish: the color of all exposed metal">
             <option value="enig" selected>Gold ENIG</option>
             <option value="hasl">Silver HASL</option>
           </select></div>
         <div><div class="sub" style="margin-top:0">Vias</div>
-          <select id="tenting" title="Via tenting — whether the fab covers via barrels with soldermask (tented is every manufacturer's default)">
+          <select id="tenting" title="Via tenting: whether the fab covers via barrels with soldermask (tented is every manufacturer's default)">
             <option value="tented" selected>Tented</option>
             <option value="exposed">Exposed</option>
           </select></div>
@@ -535,21 +555,16 @@
     <div class="panel" id="panel-leds">
       <h3>LEDs <button class="qm" tabindex="-1" data-tip="leds" title="How LEDs work">?</button><button id="addled" class="add">+ Add LED</button></h3>
       <div id="ledlist"></div>
+      <div id="clkopts"></div>
     </div>
     <div class="panel" id="panel-text">
       <h3>Text <button class="qm" tabindex="-1" data-tip="text" title="Fonts and materials">?</button><button id="addtext" class="add">+ Add text</button></h3>
       <div id="textlist"></div>
     </div>
     </div>
-    <!-- Messages dock at the foot of the rail, in normal flow. They used to
-         float over the top-left of the work area, where the standing warnings
-         — re-raised on every draw, so effectively permanent — sat on top of
-         the centred FRONT/BACK/BOTH selector and swallowed its clicks. A
-         notification must never be able to cover a control, and the only way
-         to promise that is to give it a box of its own. -->
-    <div id="toasts" aria-live="polite"></div>
   </aside>
   <div id="canvaszone">
+    <div id="toasts" aria-live="polite"></div>
     <div id="restorebar" class="mono">Found an autosaved design.
       <button id="restorebtn">Restore</button><button id="dismissbtn" title="Dismiss">✕</button></div>
     <div id="viewtabs" class="mono">
@@ -557,22 +572,23 @@
       <div data-view="back">BACK</div>
       <div data-view="both" class="on">BOTH</div>
       <span class="vtsep" aria-hidden="true"></span>
-      <button id="tab-3d" title="Interactive 3D view of the populated board — keep editing and it rebuilds itself" aria-label="3D view"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M8 1.8 L14 5 V11 L8 14.2 L2 11 V5 Z"/><path d="M2 5 L8 8.2 L14 5"/><path d="M8 8.2 V14.2"/></svg>3D</button>
+      <button id="tab-3d" title="Interactive 3D view of the populated board; keep editing and it rebuilds itself" aria-label="3D view"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M8 1.8 L14 5 V11 L8 14.2 L2 11 V5 Z"/><path d="M2 5 L8 8.2 L14 5"/><path d="M8 8.2 V14.2"/></svg>3D</button>
     </div>
+    <button id="foldcue" title="Scroll to the back of the board">FIG. 2: BACK ↓</button>
     <div id="views">
       <figure id="figF">
         <div class="corner c1"></div><div class="corner c2"></div>
         <div class="corner c3"></div><div class="corner c4"></div>
-        <figcaption><span><b>FIG. 1</b> — FRONT</span><span>1:1</span></figcaption>
+        <figcaption><span><b>FIG. 1</b>: FRONT</span><span>1:1</span></figcaption>
         <canvas id="cvF" width="440" height="660" role="img" aria-label="Front of the badge: drag artwork, LEDs and text to place them"></canvas>
-        <div class="dimmark" id="dimF">←—— 20.32 MM ——→</div>
+        <div class="dimmark" id="dimF">←── 20.32 MM ──→</div>
       </figure>
       <figure id="figB">
         <div class="corner c1"></div><div class="corner c2"></div>
         <div class="corner c3"></div><div class="corner c4"></div>
-        <figcaption><span><b>FIG. 2</b> — BACK (FLIPPED)</span><span>1:1</span></figcaption>
+        <figcaption><span><b>FIG. 2</b>: BACK (FLIPPED)</span><span>1:1</span></figcaption>
         <canvas id="cvB" width="440" height="660" role="img" aria-label="Back of the badge, mirrored: drag parts and text to place them"></canvas>
-        <div class="dimmark" id="dimB">←—— 20.32 MM ——→</div>
+        <div class="dimmark" id="dimB">←── 20.32 MM ──→</div>
       </figure>
     </div>
     <div id="stage3d">
@@ -590,7 +606,7 @@
         exposure="1.1" shadow-intensity="0.4" camera-orbit="20deg 65deg 105%"
         max-camera-orbit="auto 180deg auto" alt="3D board model"></model-viewer>
       <div id="d3stale" class="mono"><b>3D view is out of date</b><span id="d3stalewhy"></span></div>
-      <div id="d3hidden" class="mono">Every layer is hidden — raise a slider to bring the board back.</div>
+      <div id="d3hidden" class="mono">Every layer is hidden; raise a slider to bring the board back.</div>
       <div id="d3hint" class="mono">DRAG TO ORBIT · SCROLL TO ZOOM · TWO-FINGER DRAG TO PAN</div>
       <div id="d3spin">building model…</div>
     </div>
@@ -610,7 +626,7 @@
 "use strict";
 // ---- board constants (must match minibadge_designer/pcb.py + logo.py) ----
 const OUT = [0.16, 0.16, 20.16, 20.16];
-// Mirrors pcb.VIA_SIZE / pcb.VIA_DRILL — 0.7 mm pad on a 0.3 mm drill: the
+// Mirrors pcb.VIA_SIZE / pcb.VIA_DRILL, 0.7 mm pad on a 0.3 mm drill: the
 // no-surcharge drill everywhere badge people order, with a 0.2 mm annular
 // ring to spare.
 const VIA_SIZE = 0.7, VIA_DRILL = 0.3;
@@ -649,10 +665,10 @@ const powerMissing = () => ["3V3", "GND"].filter(
 const PIXEL_MM = 0.18, MAX_COLS = 192, EDGE = 0.5;
 const UNIT_SAFE = [0.7, 0.7, 19.62, 19.62]; // standard square, inset from edge
 // Keepouts around each connector pad pair (pad copper + pour clearance).
-// Units may use the rest of the strip — including between the two pairs.
+// Units may use the rest of the strip, including between the two pairs.
 
 const MAX_LEDS = 64, MAX_TEXTS = 24, MAX_ART = 8, MAX_PAL = 6;
-// Package parameters — mirrors pcb.PKG exactly. The through-hole entries
+// Package parameters: mirrors pcb.PKG exactly. The through-hole entries
 // (2.54 mm pitch, round 1.8 mm pads, 0.9 mm drill) are the sizes badgelife
 // folks actually use: 1.8/3 mm domes and the 5x2 mm rectangular bar; their
 // series resistor stays an SMD ("res"). "lens" is the dome diameter
@@ -674,7 +690,7 @@ const PKG = {
 // ahead of "0603"/"0805" (whose leading zero makes them plain string keys).
 const LED_SIZE_ORDER = ["0603", "0805", "1206", "1.8mm", "3mm", "5x2mm"];
 const resPkgOf = size => PKG[(PKG[size] || PKG["0805"]).res || size] || PKG[size];
-// Unit geometry per layout+package — mirrors pcb._layout (incl. rounding).
+// Unit geometry per layout+package: mirrors pcb._layout (incl. rounding).
 const _layoutCache = {};
 function layoutOf(name, size, reverse) {
   if (name === "reverse") { name = "stacked"; reverse = true; } // legacy spelling
@@ -759,7 +775,7 @@ const MASKS = { green:"#0d5c38", purple:"#4b2a7b", black:"#1b1d21", red:"#7c1622
 const LEDC = { red:"#ff3b30", orange:"#ff9500", yellow:"#ffe14d", green:"#3dff6e", blue:"#3f8cff", white:"#ffffff" };
 const MATERIALS = { silk: "Silkscreen", copper: "Exposed copper", glow: "Glow window", bare: "Bare board" };
 // Exposed metal (pads, vias, copper art) plates gold under ENIG, silver
-// under lead-free HASL — a board-wide fab choice, so it's one picker.
+// under lead-free HASL: a board-wide fab choice, so it's one picker.
 const FINISH_PAD = { enig: "#cfa435", hasl: "#c6ccd6" };
 const padCol = () => FINISH_PAD[state.finish] || FINISH_PAD.enig;
 const FONTS = {{ fonts|tojson }}; // bundled TTFs the server renders to exact polygons
@@ -805,8 +821,8 @@ const bareOpenOn = (a, viewSide) => {
 const inkSide = a => (a.side === "back" ? "back" : "front");
 // Which faces a window layer actually opens. A glow window always cuts both
 // (light has to cross); a bare window cuts only where its mask opens, so a
-// one-face window leaves the other side's copper — and anything mounted on
-// it — completely alone. Mirrors pcb._window_geometry / _fill_geometry.
+// one-face window leaves the other side's copper (and anything mounted on
+// it) completely alone. Mirrors pcb._window_geometry / _fill_geometry.
 function windowFaces(a, mat) {
   if (mat === "glow") return ["front", "back"];
   return a.side === "through" || a.side === undefined
@@ -840,13 +856,11 @@ function updateView() {
   SCALE = Math.min(cvF.width / (x1 - x0), cvF.height / (y1 - y0));
   VIEW.tx = (cvF.width - (x1 - x0) * SCALE) / 2 - x0 * SCALE;
   VIEW.ty = (cvF.height - (y1 - y0) * SCALE) / 2 - y0 * SCALE;
-  // Title-block chip + dimension marks track the real board size.
-  const w = (ob[2] - ob[0]).toFixed(2), hh = (ob[3] - ob[1]).toFixed(2);
-  const rev = document.getElementById("revchip");
-  if (rev) rev.textContent = `SHEET 1/1 · ${w} × ${hh} MM`;
+  // Dimension marks track the real board size.
+  const w = (ob[2] - ob[0]).toFixed(2);
   for (const id of ["dimF", "dimB"]) {
     const el = document.getElementById(id);
-    if (el) el.textContent = `←—— ${w} MM ——→`;
+    if (el) el.textContent = `←── ${w} MM ──→`;
   }
 }
 const $ = id => document.getElementById(id);
@@ -856,7 +870,7 @@ const $ = id => document.getElementById(id);
 let statusTimer = null;
 // Toast stack. Two kinds share it: the transient status line (key "status")
 // and standing design warnings (keys "w:...") that live exactly as long as
-// the problem does — refreshWarnings() adds and removes them.
+// the problem does; refreshWarnings() adds and removes them.
 const toasts = new Map(); // key -> element
 function putToast(key, msg, kind, onClick) {
   let el = toasts.get(key);
@@ -874,7 +888,7 @@ function putToast(key, msg, kind, onClick) {
   if (el.textContent !== msg) el.textContent = msg;
   // The dock scrolls once there are more messages than room. Something the
   // user cannot see has not been said, so bring a new or reworded message
-  // into view — but only then, or every draw would fight their scrolling.
+  // into view, but only then, or every draw would fight their scrolling.
   if (changed) el.scrollIntoView({block: "nearest"});
   el.onclick = onClick || null;
   el.title = onClick ? "" : "Click to dismiss";
@@ -893,8 +907,8 @@ function setStatus(msg, isError) {
   clearTimeout(statusTimer);
   if (!msg) return clearStatus();
   putToast("status", msg, isError ? "err" : "info");
-  // Errors linger long enough to survive a glance away — a failed Download
-  // must not fade into "the button did nothing" — but they do expire: many
+  // Errors linger long enough to survive a glance away (a failed Download
+  // must not fade into "the button did nothing"), but they do expire: many
   // actions never post a status, so "stays until the next status" left a
   // red refusal on screen through minutes of later successful work, and a
   // stale red teaches users to ignore red.
@@ -906,7 +920,7 @@ function setStatus(msg, isError) {
 let lastDeleted = null;
 function noteDeleted(kind, index, item, label) {
   lastDeleted = { kind, index, item };
-  setStatus(`Removed ${label} — press Ctrl/⌘+Z to undo.`);
+  setStatus(`Removed ${label}. Press Ctrl/⌘+Z to undo.`);
 }
 function undoDelete() {
   if (!lastDeleted) return false;
@@ -964,6 +978,11 @@ const state = {
   finish: "enig",  // surface finish: what color the exposed metal plates
   tenting: true,   // vias covered with soldermask (every fab's default)
   pins: [...ALL_PINS],
+  // Board-level CLK hookup for units with L.clk set: the 3-pad solder
+  // jumper (bridge one side: steady 3V3 or blinking CLK) or a direct trace
+  // to pin 9. x/y null = the default spot beside pin 10 (JUMPER_AT).
+  clk: { jumper: true, x: null, y: null, rot: 0, side: "front", via: true,
+         nodes: [], v3nodes: [], v3pin: null },
   shape: {
     // There is no square/custom switch: the board IS the standard square
     // until an outline part with geometry exists (customActive), and the
@@ -982,7 +1001,7 @@ const SHAPE_KIND_LABELS = {
 };
 const MAX_SHAPE_ELS = 12;
 // The board only leaves the standard square once an outline part has
-// geometry (image parts count after their picture loads) — there is no
+// geometry (image parts count after their picture loads); there is no
 // mode switch, adding a part IS the switch. Cut-only compositions carve
 // the standard square, so cuts activate the custom outline too.
 const customActive = () =>
@@ -1013,6 +1032,29 @@ function appendShapeFiles(fd) {
 // fallback renders while this is in flight (e.g. mid-drag).
 let outlineTimer = null;
 let outlineSeq = 0; // discard out-of-order responses (rapid slider/file changes)
+// Set when an outline part is added: {rings: signature of the outline before
+// the add, label, el}. A part swallowed whole by the existing shape produces
+// the same outline, i.e. an "add" with no visible effect — say so, or the
+// only evidence the click did anything is a new card in the panel. The
+// comparison is geometric (ring count + area + bbox), not the raw vertex
+// list: recomputing an identical union can reorder its vertices.
+let outlineAddCheck = null;
+function ringSig(rings) {
+  if (!rings || !rings.length) return "empty";
+  let area = 0, minx = 1e9, miny = 1e9, maxx = -1e9, maxy = -1e9;
+  for (const r of rings) {
+    let a2 = 0;
+    for (let i = 0; i < r.length; i++) {
+      const [x1, y1] = r[i], [x2, y2] = r[(i + 1) % r.length];
+      a2 += x1 * y2 - x2 * y1;
+      if (x1 < minx) minx = x1; if (x1 > maxx) maxx = x1;
+      if (y1 < miny) miny = y1; if (y1 > maxy) maxy = y1;
+    }
+    area += Math.abs(a2) / 2;
+  }
+  return [rings.length, area.toFixed(2), minx.toFixed(1), miny.toFixed(1),
+          maxx.toFixed(1), maxy.toFixed(1)].join("|");
+}
 function requestOutline(immediate) {
   const s = state.shape;
   s.rings = null; // the client-side composition fills in until it arrives
@@ -1038,12 +1080,22 @@ function requestOutline(immediate) {
       // plain square, so this has to be said out loud rather than shipped
       // quietly. /outline answers with rings: null when the shape came to
       // nothing, which is indistinguishable from "still loading" in s.rings
-      // alone — hence the separate flag, set only on a real answer.
+      // alone; hence the separate flag, set only on a real answer.
       s.outlineEmpty = resp.ok && !(s.rings && s.rings.length);
       s.ringsRev = (s.ringsRev || 0) + 1;
-      if (data.bridged) setStatus("The shape doesn't reach some connector pads — bridges were added to keep the board in one piece.");
+      if (data.bridged) setStatus("The shape doesn't reach some connector pads. Bridges were added to keep the board in one piece.");
+      if (outlineAddCheck) {
+        const chk = outlineAddCheck;
+        outlineAddCheck = null;
+        if (!s.outlineEmpty && !(chk.el && chk.el.empty)
+            && s.rings && ringSig(s.rings) === chk.rings) {
+          setStatus(`${chk.label} didn't change the outline: the current shape `
+            + "swallows it whole. Drag or resize it to have an effect.");
+        }
+      }
     } catch (e) {
       if (seq !== outlineSeq) return;
+      outlineAddCheck = null;
       s.rings = null;
       s.outlineEmpty = false;
       s.ringsRev = (s.ringsRev || 0) + 1;
@@ -1249,7 +1301,7 @@ function compositeLayer(c, off, mirror) {
   c.restore();
 }
 // Paint the board region in `color` onto a transparent context. While a
-// part is being dragged — or before the server outline arrives — it is
+// part is being dragged (or before the server outline arrives), it is
 // composed client-side: adds fill, cuts erase, and the connector pad
 // plates always stay (they never move on the real board).
 function paintBoardMask(mc, color) {
@@ -1377,14 +1429,134 @@ function polysClear(A, B, gap) {
 // ---- via-less power routing (mirrors pcb.novia_route point for point) ----
 // A unit sits in one pour and needs the other net. With "no via" ticked it
 // runs a trace across its own layer to the nearest connector pad carrying
-// that net instead — those pads are plated through, so landing on one
+// that net instead; those pads are plated through, so landing on one
 // crosses layers just as a via would. Front-side through-hole LEDs need
 // nothing at all: the cathode lead is already plated to the back face.
 const NOVIA_CLEAR = 0.2, NOVIA_ESCAPE = 0.5, NOVIA_EDGE = 0.2 + 0.3 / 2;
-// pcb.POUR_CLEARANCE — copper pour to other-net copper. Kept in step with
+// pcb.POUR_CLEARANCE: copper pour to other-net copper. Kept in step with
 // pcb.py; tests/test_browser.py fails if the two art carves disagree.
 const POUR_CLEARANCE = 0.35;
 const padNetOf = label => (label === "GND" || label === "3V3") ? label : null;
+// ---- CLK drive (mirrors pcb.clk_info and friends) ----
+// Pin 9 carries the badge's blink clock; units with L.clk run their supply
+// off it: through the 3-pad solder jumper (bridge one side: steady 3V3 or
+// blinking CLK) or wired straight to pin 9.
+const JUMPER_AT = [9.2, 18.45], JUMPER_PITCH = 1.3, JUMPER_PAD = [1.0, 1.5];
+const JUMPER_VIA = [0, -1.5], JUMPER_V3VIA = [JUMPER_PITCH, -1.5];
+const CLK_RAIL = "CLK_LED";
+// The flag only means something while a CLK unit exists AND pin 9 is kept;
+// otherwise everything falls back to plain 3V3 feeds, like the server.
+const clkActive = () => state.leds.some(L => L.clk) && pinOn("9");
+// Effective connector-pad net: pin 9 joins the netlist as CLK once used.
+const padNetEff = label =>
+  padNetOf(label) || (clkActive() && label === "CLK" ? "CLK" : null);
+function clkInfo() {
+  if (!clkActive()) return null;
+  const p9q = PADS.find(p => p[4] === "9");
+  const p9 = [p9q[0], p9q[1]];
+  if (!state.clk.jumper) {
+    return { net: "CLK", jumper: null, side: "front", pads: [], via: null,
+             v3via: null, v3link: false, nodes: [], v3nodes: [],
+             v3pin: null, front: p9, back: p9, pin9: p9 };
+  }
+  const jx = state.clk.x != null ? state.clk.x : JUMPER_AT[0];
+  const jy = state.clk.y != null ? state.clk.y : JUMPER_AT[1];
+  const rot = ((state.clk.rot || 0) % 360 + 360) % 360;
+  const side = state.clk.side === "back" ? "back" : "front";
+  const at = (dx, dy) => {
+    const [rx, ry] = rotOff(dx, dy, rot);
+    return [jx + rx, jy + ry];
+  };
+  const pads = [["CLK", ...at(-JUMPER_PITCH, 0)], [CLK_RAIL, jx, jy],
+                ["3V3", ...at(JUMPER_PITCH, 0)]];
+  const farFace = side === "front" ? "back" : "front";
+  const far = at(...JUMPER_VIA);
+  const via = state.leds.some(L => L.clk && L.side === farFace) ? far : null;
+  const near = [jx, jy];
+  return { net: CLK_RAIL, jumper: [jx, jy, rot], side, pads, via,
+           v3via: side === "back" && state.clk.via !== false
+             ? at(...JUMPER_V3VIA) : null,
+           v3link: side === "back" && state.clk.via === false,
+           nodes: state.clk.nodes || [], v3nodes: state.clk.v3nodes || [],
+           v3pin: state.clk.v3pin || null,
+           front: side === "front" ? near : far,
+           back: side === "back" ? near : far, pin9: p9 };
+}
+function jumperPadQuad(ci, cx, cy, extra) {
+  const rot = ci.jumper[2];
+  const w2 = JUMPER_PAD[0] / 2 + (extra || 0), h2 = JUMPER_PAD[1] / 2 + (extra || 0);
+  return [[-w2, -h2], [w2, -h2], [w2, h2], [-w2, h2]].map(([qx, qy]) => {
+    const [rx, ry] = rotOff(qx, qy, rot);
+    return [cx + rx, cy + ry];
+  });
+}
+// The jumper's copper plus art margins, labeled like unitCopperPieces
+// (mirrors pcb.jumper_copper_pieces; the link trace routes separately).
+function jumperCopperPieces(ci) {
+  if (!ci || !ci.jumper) return [];
+  const out = ["pad_clk", "pad_rail", "pad_3v3"].map((lbl, k) =>
+    [lbl, jumperPadQuad(ci, ci.pads[k][1], ci.pads[k][2], 0.5)]);
+  if (ci.via) {
+    out.push(["via", viaCollar(ci.via[0], ci.via[1])]);
+    out.push(["trace_stub", quadSegPts([ci.jumper[0], ci.jumper[1]], ci.via, 1.1)]);
+  }
+  if (ci.v3via) {
+    out.push(["via_3v3", viaCollar(ci.v3via[0], ci.v3via[1])]);
+    out.push(["trace_3v3",
+              quadSegPts([ci.pads[2][1], ci.pads[2][2]], ci.v3via, 1.1)]);
+  }
+  return out;
+}
+// Real copper on other nets than `net`, for route hazards (mirrors
+// pcb._jumper_copper_quads: real pad sizes, not the art keepouts).
+function jumperCopperQuads(ci, net, face) {
+  if (!ci || !ci.jumper) return [];
+  const out = [];
+  const onFace = !face || face === ci.side;
+  if (onFace) {
+    ci.pads.forEach(([pnet, cx, cy]) => {
+      if (pnet !== net) out.push(jumperPadQuad(ci, cx, cy, 0));
+    });
+  }
+  if (ci.via && ci.net !== net) {
+    out.push(roundHazard(ci.via[0], ci.via[1], VIA_SIZE / 2 + NOVIA_CLEAR));
+    if (onFace) out.push(quadSegPts([ci.jumper[0], ci.jumper[1]], ci.via, 0.3));
+  }
+  if (ci.v3via && net !== "3V3") {
+    out.push(roundHazard(ci.v3via[0], ci.v3via[1], VIA_SIZE / 2 + NOVIA_CLEAR));
+    if (onFace) out.push(quadSegPts([ci.pads[2][1], ci.pads[2][2]], ci.v3via, 0.3));
+  }
+  return out;
+}
+function jumperWaypoints(ci) { // mirrors pcb._jumper_waypoints
+  if (!ci || !ci.jumper) return [];
+  const xs = [], ys = [];
+  for (const [, cx, cy] of ci.pads) {
+    for (const [px, py] of jumperPadQuad(ci, cx, cy, 0)) { xs.push(px); ys.push(py); }
+  }
+  for (const v of [ci.via, ci.v3via]) {
+    if (!v) continue;
+    xs.push(v[0] - VIA_SIZE / 2, v[0] + VIA_SIZE / 2);
+    ys.push(v[1] - VIA_SIZE / 2, v[1] + VIA_SIZE / 2);
+  }
+  const m = NOVIA_CLEAR + NOVIA_ESCAPE;
+  const x0 = Math.min(...xs) - m, y0 = Math.min(...ys) - m;
+  const x1 = Math.max(...xs) + m, y1 = Math.max(...ys) + m;
+  return [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+}
+function jumperCaptionBoxes(ci) { // mirrors pcb.jumper_caption_boxes
+  if (!ci || !ci.jumper) return [];
+  const [jx, jy, rot] = ci.jumper;
+  const out = [];
+  for (const [lbl, sgn] of [["CLK", -1], ["3V3", 1]]) {
+    const [lx, ly] = rotOff(sgn * (JUMPER_PITCH + JUMPER_PAD[0] / 2 + 1.0), 0, rot);
+    const cx = jx + lx, cy = jy + ly;
+    const hw = lbl.length * 0.6 / 2 + 0.3;
+    out.push(rot % 180 === 90 ? [cx - 0.55, cy - hw, cx + 0.55, cy + hw]
+                              : [cx - hw, cy - 0.55, cx + hw, cy + 0.55]);
+  }
+  return out;
+}
 function quadSegPts(a, b, w) {
   let nx = -(b[1] - a[1]), ny = b[0] - a[0];
   const ln = Math.sqrt(nx * nx + ny * ny) || 1;
@@ -1392,7 +1564,7 @@ function quadSegPts(a, b, w) {
   return [[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny],
           [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny]];
 }
-function unitCopperQuads(L, skipStart) {
+function unitCopperQuads(L, skipStart, startPad) {
   const g = geomOf(L), p = PKG[g.pkg], rp = resPkgOf(g.pkg);
   const front = L.side !== "back";
   const tb = (dx, dy) => unitPoint(L, dx, dy);
@@ -1401,12 +1573,15 @@ function unitCopperQuads(L, skipStart) {
   for (let i = 0; i + 1 < apts.length; i++) {
     out.push(quadSegPts(apts[i], apts[i + 1], 0.3));
   }
-  const rows = [[g.ledK, p.pw, p.ph, g.ledRot || 0, front],
-                [g.ledA, p.pw, p.ph, g.ledRot || 0, false],
-                [g.resIn, rp.pw, rp.ph, g.resRot || 0, !front],
-                [g.resOut, rp.pw, rp.ph, g.resRot || 0, false]];
-  for (const [off, w, h, extra, isStart] of rows) {
-    if (skipStart && isStart) continue;
+  // startPad overrides which pad "the trace leaves from": a front CLK
+  // supply run leaves from res_in, not the side's classic power pad
+  // (mirrors pcb._unit_copper_quads).
+  const rows = [[g.ledK, p.pw, p.ph, g.ledRot || 0, front, "led_k"],
+                [g.ledA, p.pw, p.ph, g.ledRot || 0, false, "led_a"],
+                [g.resIn, rp.pw, rp.ph, g.resRot || 0, !front, "res_in"],
+                [g.resOut, rp.pw, rp.ph, g.resRot || 0, false, "res_out"]];
+  for (const [off, w, h, extra, isStart, key] of rows) {
+    if (skipStart && (startPad ? key === startPad : isStart)) continue;
     const q = [];
     for (const [qx, qy] of [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]) {
       const [ox, oy] = extra ? rotOff(qx, qy, extra) : [qx, qy];
@@ -1417,6 +1592,24 @@ function unitCopperQuads(L, skipStart) {
   if (g.hole) {
     const [hx, hy] = tb(0, 0);
     out.push(roundHazard(hx, hy, g.hole / 2 + 0.2));
+  }
+  return out;
+}
+// A unit's power via collar (+ stub legs) as route hazards; empty for units
+// without a via. Mirrors pcb._unit_via_quads: the classic runs never need
+// these (a via always shares its layer's run net), a CLK run does.
+function unitViaQuads(L, stub) {
+  const front = L.side !== "back";
+  if (L.novia || (clkActive() && L.clk && !front)) return [];
+  const g = geomOf(L);
+  const vo = front ? g.viaF : g.viaB;
+  const [vx, vy] = unitPoint(L, vo[0], vo[1]);
+  const out = [roundHazard(vx, vy, VIA_SIZE / 2 + NOVIA_CLEAR)];
+  if (stub !== false) {
+    const vpts = unitTracePts(L, "v").pts;
+    for (let i = 0; i + 1 < vpts.length; i++) {
+      out.push(quadSegPts(vpts[i], vpts[i + 1], 0.3));
+    }
   }
   return out;
 }
@@ -1441,10 +1634,10 @@ function noviaSegDist(a, b, c, d) {
   return Math.min(ptSeg(a, c, d), ptSeg(b, c, d), ptSeg(c, a, b), ptSeg(d, a, b));
 }
 // Corner options that turn a leg into an axis run plus a 45 diagonal, and the
-// pass that applies them. Mirrors pcb._knees45 / pcb.mitre45 — board houses
+// pass that applies them. Mirrors pcb._knees45 / pcb.mitre45. Board houses
 // and KiCad's router both avoid square corners, so a trace only reads as
 // hand-routed if every turn is two 45s.
-// Octagon just containing a circle of radius r — mirrors pcb._round_hazard.
+// Octagon just containing a circle of radius r: mirrors pcb._round_hazard.
 // Round pads bounded by a square claim clearance that isn't there. Built from
 // a square root, not trig: IEEE-754 pins sqrt exactly while cos/sin can differ
 // by an ulp between here and Python, which is enough to route differently.
@@ -1456,8 +1649,8 @@ function roundHazard(cx, cy, r) {
 }
 // Mirrors pcb._via_collar: the window/art keepout round a via barrel, a
 // 16-gon at the 0.2 mm netclass minimum so the surviving patch of plane
-// renders as the round pad it effectively is. Built from square roots alone
-// — sqrt is IEEE-pinned while cos/sin can differ by an ulp from Python's,
+// renders as the round pad it effectively is. Built from square roots alone:
+// sqrt is IEEE-pinned while cos/sin can differ by an ulp from Python's,
 // and these pieces feed the bridge scan where an ulp can flip a route.
 const VIA_COLLAR_CLEAR = 0.2;
 const C16 = Math.sqrt(2 + Math.sqrt(2)) / 2;
@@ -1484,7 +1677,7 @@ function knees45(a, b) {
   return [axisFirst, [a[0] + sx * m, a[1] + sy * m]];
 }
 // owners[k] is the index in L.nodes that segment k of the mitred path belongs
-// after — so the "+" on a derived corner still inserts in the right place.
+// after, so the "+" on a derived corner still inserts in the right place.
 function mitre45(pts, ok, owners) {
   const out = [pts[0]], own = [];
   for (let i = 0; i + 1 < pts.length; i++) {
@@ -1553,8 +1746,12 @@ function soften45(pts, ok, owners) {
   return own ? { pts, owners: own } : { pts };
 }
 // Which Led field holds each trace's hand-placed bends: the via-less run
-// ("run"), the resistor-to-anode link ("a"), the pad-to-via stub ("v").
-const NODE_KEYS = { run: "nodes", a: "anodes", v: "vnodes" };
+// ("run"), the resistor-to-anode link ("a"), the pad-to-via stub ("v"),
+// the CLK supply run ("c").
+const NODE_KEYS = { run: "nodes", a: "anodes", v: "vnodes", c: "cnodes" };
+// The jumper's two routed links keep their bends on state.clk instead:
+// "link" is the CLK-pad-to-pin-9 trace, "v3" the 3V3-pad-to-3V3-pin trace.
+const JNODE_KEYS = { link: "nodes", v3: "v3nodes" };
 // Mirror of pcb.unit_trace_pts: board-mm polyline of a unit's internal
 // trace through its bends. Bends stay exactly where they were put; only
 // the corners between them soften into 45s, like the via-less run's nodes.
@@ -1572,11 +1769,14 @@ function unitTracePts(L, which) {
 }
 // Mirror of pcb.novia_term: resolve L.term ({pad:"16"} or {unit:3}) to
 // {pt:[x,y], unit: led|null}, or null for auto. A chosen-but-invalid
-// terminal — wrong net, dropped pin, other face, or a unit chain that loops
-// back on itself — falls back to auto exactly like the server, so the two
+// terminal (wrong net, dropped pin, other face, or a unit chain that loops
+// back on itself) falls back to auto exactly like the server, so the two
 // routers can never disagree about where a run ends.
 function noviaTerm(L) {
   if (!L.novia || !L.term) return null;
+  if (clkActive() && L.side === "back" && L.clk) {
+    return null; // its run goes to the CLK hookup; terms don't apply
+  }
   const net = L.side !== "back" ? "GND" : "3V3";
   if (L.term.pad != null) {
     const q = PADS.find(p => p[4] === L.term.pad);
@@ -1586,11 +1786,16 @@ function noviaTerm(L) {
   if (L.term.unit == null) return null;
   const k = Math.trunc(+L.term.unit), target = state.leds[k];
   if (!(k >= 0) || !target || target === L || target.side !== L.side) return null;
+  if (clkActive() && net === "3V3" && target.clk) {
+    return null; // that unit's supply pad carries CLK now, not 3V3
+  }
   const seen = new Set([L, target]);
   let cur = target;
   while (cur.novia && cur.term && cur.term.unit != null) {
+    if (clkActive() && cur.side === "back" && cur.clk) break; // plated hole
     const j = Math.trunc(+cur.term.unit), nxt = state.leds[j];
     if (!(j >= 0) || !nxt || nxt === cur || nxt.side !== cur.side) break;
+    if (clkActive() && cur.side === "back" && nxt.clk) break; // invalid link
     if (seen.has(nxt)) return null; // a loop feeds nothing
     seen.add(nxt);
     cur = nxt;
@@ -1602,7 +1807,7 @@ function noviaTerm(L) {
 // Every place this unit's trace may legally end: same-net kept connector
 // pads, plus the same-net pad of every same-face unit whose chain bottoms
 // out. Each candidate is probed with the real validator (temporarily set,
-// identity intact), so a choice that would loop is never even offered —
+// identity intact), so a choice that would loop is never even offered:
 // the dragged endpoint can only land somewhere valid.
 function noviaTermTargets(L) {
   const net = L.side !== "back" ? "GND" : "3V3";
@@ -1623,30 +1828,43 @@ function noviaTermTargets(L) {
   return out;
 }
 function noviaRouteRaw(L) {
-  if (!L.novia) return null;
-  const g = geomOf(L), p = PKG[g.pkg];
   const front = L.side !== "back";
-  const net = front ? "GND" : "3V3";
-  const sOff = front ? g.ledK : g.resIn;
-  const start = unitPoint(L, sOff[0], sOff[1]);
-  if (front && p.drill) return { pts: [start], net, pad: null, direct: true };
-  const term = noviaTerm(L);
-  let targets;
-  if (term) {
-    targets = [term.pt];
+  // A back unit with L.clk routes its supply here too, whether or not novia
+  // is set: the trace chases the CLK hookup (pin 9 or the jumper's rail
+  // via, both plated holes) instead of a 3V3 pad, replacing its 3V3 via
+  // exactly like a novia run would (mirrors pcb.novia_route).
+  const supply = clkActive() && L.clk && !front ? clkInfo() : null;
+  if (!supply && !L.novia) return null;
+  const g = geomOf(L), p = PKG[g.pkg];
+  let net, start, bends, term = null, targets;
+  if (supply) {
+    net = supply.net;
+    start = unitPoint(L, g.resIn[0], g.resIn[1]);
+    bends = L.cnodes || [];
+    targets = [supply.back];
   } else {
-    targets = PADS
-      .filter(q => padNetOf(q[2]) === net && pinOn(q[4]))
-      .map(q => [q[0], q[1]])
-      .sort((u, v) => ((u[0] - start[0]) ** 2 + (u[1] - start[1]) ** 2)
-                    - ((v[0] - start[0]) ** 2 + (v[1] - start[1]) ** 2));
-    if (!targets.length) return null;
+    net = front ? "GND" : "3V3";
+    bends = L.nodes || [];
+    const sOff = front ? g.ledK : g.resIn;
+    start = unitPoint(L, sOff[0], sOff[1]);
+    if (front && p.drill) return { pts: [start], net, pad: null, direct: true };
+    term = noviaTerm(L);
+    if (term) {
+      targets = [term.pt];
+    } else {
+      targets = PADS
+        .filter(q => padNetOf(q[2]) === net && pinOn(q[4]))
+        .map(q => [q[0], q[1]])
+        .sort((u, v) => ((u[0] - start[0]) ** 2 + (u[1] - start[1]) ** 2)
+                      - ((v[0] - start[0]) ** 2 + (v[1] - start[1]) ** 2));
+      if (!targets.length) return null;
+    }
   }
 
   // A chained-to unit's same-net pad is the destination, so it is dropped
   // from the hazards the same way the start pad is.
   const termLed = term ? term.unit : null;
-  const hazards = unitCopperQuads(L, true);
+  const hazards = unitCopperQuads(L, true, supply ? "res_in" : null);
   const siblings = state.leds.filter(o => o !== L && o.side === L.side);
   for (const o of siblings) hazards.push(...unitCopperQuads(o, o === termLed));
   for (const o of state.leds) {
@@ -1661,10 +1879,49 @@ function noviaRouteRaw(L) {
     if (og.hole) hazards.push(roundHazard(o.x, o.y, og.hole / 2 + NOVIA_CLEAR));
   }
   for (const q of PADS) {
-    if (!pinOn(q[4]) || padNetOf(q[2]) === net) continue;
+    if (!pinOn(q[4]) || padNetEff(q[2]) === net) continue;
     hazards.push(roundHazard(q[0], q[1], 0.875 + NOVIA_CLEAR));
   }
+  const clkI = clkActive() ? clkInfo() : null;
+  if (clkI) {
+    // The jumper's other-net pads (and, through them, its vias) are
+    // copper like any other; a run on any net but theirs keeps off.
+    hazards.push(...jumperCopperQuads(clkI, net, front ? "front" : "back"));
+  }
+  if (supply) {
+    // A CLK supply run is a DIFFERENT net from everything else on its
+    // layer: sibling via barrels and stubs, the far side's barrels, and
+    // sibling 3V3 runs all become real hazards (mirrors pcb.novia_route).
+    for (const o of siblings) hazards.push(...unitViaQuads(o));
+    for (const o of state.leds) {
+      if (o !== L && o.side !== L.side) hazards.push(...unitViaQuads(o, false));
+    }
+    for (const o of siblings) {
+      if (!(o.novia && !o.clk)) continue; // a sibling CLK run shares this net
+      const r2 = noviaRoute(o);
+      if (r2 && r2.pts.length > 1) {
+        for (let i = 0; i + 1 < r2.pts.length; i++) {
+          hazards.push(quadSegPts(r2.pts[i], r2.pts[i + 1], 0.3));
+        }
+      }
+    }
+  }
 
+  let waypoints = expandedCornersOf(L, NOVIA_ESCAPE);
+  for (const o of siblings) waypoints.push(...expandedCornersOf(o, NOVIA_ESCAPE));
+  for (const q of PADS) {
+    if (!pinOn(q[4]) || padNetEff(q[2]) === net) continue;
+    const r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE;
+    waypoints.push([q[0] - r, q[1] - r], [q[0] + r, q[1] - r],
+                   [q[0] + r, q[1] + r], [q[0] - r, q[1] + r]);
+  }
+  if (clkI) waypoints.push(...jumperWaypoints(clkI));
+  return routeRun(start, targets, net, bends, hazards, waypoints, !!term);
+}
+// The shared power-trace router behind novia, CLK and link runs (mirrors
+// pcb._route_run: same node order and tie-breaks as the server so both pick
+// the identical path).
+function routeRun(start, targets, net, bends, hazards, waypoints, termFlag) {
   const rings = boardRings();
   const edges = [];
   for (const ring of rings) {
@@ -1678,26 +1935,11 @@ function noviaRouteRaw(L) {
     return edges.every(([e0, e1]) => noviaSegDist(a, b, e0, e1) >= NOVIA_EDGE);
   };
 
-  let waypoints = expandedCornersOf(L, NOVIA_ESCAPE);
-  for (const o of siblings) waypoints.push(...expandedCornersOf(o, NOVIA_ESCAPE));
-  for (const q of PADS) {
-    if (!pinOn(q[4]) || padNetOf(q[2]) === net) continue;
-    const r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE;
-    waypoints.push([q[0] - r, q[1] - r], [q[0] + r, q[1] - r],
-                   [q[0] + r, q[1] + r], [q[0] - r, q[1] + r]);
-  }
-  const step = 1.5;
-  for (let gx = OUT[0] + step / 2; gx < OUT[2]; gx += step) {
-    for (let gy = OUT[1] + step / 2; gy < OUT[3]; gy += step) waypoints.push([gx, gy]);
-  }
-  waypoints = waypoints.filter(w => onBoard(w)
-    && hazards.every(h => polysClear(quadSegPts(w, w, 0.3), h, NOVIA_CLEAR)));
-
-  // Hand-placed bends win outright — that is the point of dragging them.
+  // Hand-placed bends win outright; that is the point of dragging them.
   // Legs are still checked so a bad one can be flagged.
-  if ((L.nodes || []).length) {
+  if (bends.length) {
     const pad = targets[0];
-    const raw = [start, ...L.nodes.map(n => [+n[0], +n[1]]), pad];
+    const raw = [start, ...bends.map(n => [+n[0], +n[1]]), pad];
     let bad = false;
     for (let i = 0; i + 1 < raw.length; i++) {
       if (!clear(raw[i], raw[i + 1])) { bad = true; break; }
@@ -1706,15 +1948,21 @@ function noviaRouteRaw(L) {
     // them are softened into 45s.
     const m = mitre45(raw, clear, raw.map((_p, i) => i));
     const out = { pts: m.pts, owners: m.owners, net, pad, manual: true };
-    if (term) out.term = true;
+    if (termFlag) out.term = true;
     if (bad) out.tight = true;
     return out;
   }
+  const step = 1.5;
+  for (let gx = OUT[0] + step / 2; gx < OUT[2]; gx += step) {
+    for (let gy = OUT[1] + step / 2; gy < OUT[3]; gy += step) waypoints.push([gx, gy]);
+  }
+  waypoints = waypoints.filter(w => onBoard(w)
+    && hazards.every(h => polysClear(quadSegPts(w, w, 0.3), h, NOVIA_CLEAR)));
   for (const pad of targets) {
     if (clear(start, pad)) {
       const m = mitre45([start, pad], clear);
       const out = { ...soften45(m.pts, clear, m.owners), net, pad };
-      if (term) out.term = true;
+      if (termFlag) out.term = true;
       return out;
     }
     // Dijkstra over the visibility graph; same node order and tie-breaks as
@@ -1741,34 +1989,39 @@ function noviaRouteRaw(L) {
       chain.reverse();
       const m = mitre45(chain, clear);
       const out = { ...soften45(m.pts, clear, m.owners), net, pad };
-      if (term) out.term = true;
+      if (termFlag) out.term = true;
       return out;
     }
   }
   const out = { pts: [start, targets[0]], net, pad: targets[0], tight: true };
-  if (term) out.term = true;
+  if (termFlag) out.term = true;
   return out;
 }
 // Routing is far too heavy for every mousemove, so results are cached per
 // unit and only recomputed when something that could move the trace changes.
 // While a drag is in flight the cache key misses; a provisional straight run
 // is drawn until it settles, then the exact path replaces it.
+// Whether the CLK jumper itself is in hand: every CLK run and the pin-9
+// link depend on it, so the mid-drag reuse below must not apply.
+const _jumperDrag = () => drag && (drag.kind === "jumper"
+  || (drag.kind === "rotate" && drag.tkind === "jumper"));
 let _noviaCache = new Map(), _noviaPrev = new Map();
 function noviaKey(L) {
   // term is part of the key; a chained target's own geometry is covered by
   // that unit's key inside noviaSig, so moving it flushes the whole cache.
   return [L.x, L.y, L.rot, L.side, L.size, L.layout, !!L.reverse, !!L.novia,
-          !!L.farled, JSON.stringify(L.nodes || []),
+          !!L.farled, !!L.clk, JSON.stringify(L.nodes || []),
           JSON.stringify(L.anodes || []), JSON.stringify(L.vnodes || []),
+          JSON.stringify(L.cnodes || []),
           JSON.stringify(L.term || null),
           L.adv ? JSON.stringify(L.adv) : ""].join("|");
 }
 function noviaSig() {
   return state.leds.map(noviaKey).join(";") + "|" + JSON.stringify(state.pins)
-    + "|" + (state.shape.ringsRev || 0);
+    + "|" + JSON.stringify(state.clk) + "|" + (state.shape.ringsRev || 0);
 }
 function noviaRoute(L) {
-  if (!L.novia) return null;
+  if (!L.novia && !(clkActive() && L.clk && L.side === "back")) return null;
   const sig = noviaSig();
   if (_noviaCache.get("sig") !== sig) {
     _noviaPrev = _noviaCache;
@@ -1780,7 +2033,7 @@ function noviaRoute(L) {
   // keep the path they already had (their own key is unchanged), so dragging
   // one unit on a busy board stays at one route computation per frame
   // instead of five. Everything recomputes the moment the drag ends.
-  if (drag && _noviaPrev.has(key)) {
+  if (drag && !_jumperDrag() && _noviaPrev.has(key)) {
     const cached = _noviaPrev.get(key);
     _noviaCache.set(key, cached);
     return cached;
@@ -1789,9 +2042,233 @@ function noviaRoute(L) {
   _noviaCache.set(key, r);
   return r;
 }
+// A front CLK unit's supply run to the jumper rail or pin 9 (mirrors
+// pcb.clk_route). Routed AFTER every classic run: this net is a stranger on
+// its layer, so it dodges the GND runs, every sibling's via barrel and
+// stub, and the jumper's other pads; one side dodging is all the clearance
+// rule needs. A back CLK unit's supply comes through noviaRoute instead.
+function clkRouteRaw(L) {
+  const ci = clkActive() ? clkInfo() : null;
+  if (!ci || !L.clk || L.side === "back") return null;
+  const g = geomOf(L);
+  const start = unitPoint(L, g.resIn[0], g.resIn[1]);
+  const net = ci.net;
+  const targets = [ci.front];
+
+  const hazards = unitCopperQuads(L, true, "res_in");
+  hazards.push(...unitViaQuads(L));
+  const siblings = state.leds.filter(o => o !== L && o.side === L.side);
+  for (const o of siblings) {
+    hazards.push(...unitCopperQuads(o, false));
+    hazards.push(...unitViaQuads(o));
+  }
+  for (const o of state.leds) {
+    if (o === L || o.side === L.side) continue;
+    const og = geomOf(o), op = PKG[og.pkg];
+    if (op.drill) {
+      for (const off of [og.ledK, og.ledA]) {
+        const [x, y] = unitPoint(o, off[0], off[1]);
+        hazards.push(roundHazard(x, y, op.pw / 2 + NOVIA_CLEAR));
+      }
+    }
+    if (og.hole) hazards.push(roundHazard(o.x, o.y, og.hole / 2 + NOVIA_CLEAR));
+  }
+  for (const o of state.leds) {
+    if (o !== L && o.side !== L.side) hazards.push(...unitViaQuads(o, false));
+  }
+  for (const q of PADS) {
+    if (!pinOn(q[4]) || padNetEff(q[2]) === net) continue;
+    hazards.push(roundHazard(q[0], q[1], 0.875 + NOVIA_CLEAR));
+  }
+  hazards.push(...jumperCopperQuads(ci, net, "front"));
+  const runs = [noviaRoute(L)];
+  for (const o of siblings) {
+    if (o.novia && !(o.clk && o.side === "back")) runs.push(noviaRoute(o));
+  }
+  for (const r2 of runs) {
+    if (r2 && r2.pts.length > 1) {
+      for (let i = 0; i + 1 < r2.pts.length; i++) {
+        hazards.push(quadSegPts(r2.pts[i], r2.pts[i + 1], 0.3));
+      }
+    }
+  }
+
+  let waypoints = expandedCornersOf(L, NOVIA_ESCAPE);
+  for (const o of siblings) waypoints.push(...expandedCornersOf(o, NOVIA_ESCAPE));
+  for (const q of PADS) {
+    if (!pinOn(q[4]) || padNetEff(q[2]) === net) continue;
+    const r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE;
+    waypoints.push([q[0] - r, q[1] - r], [q[0] + r, q[1] - r],
+                   [q[0] + r, q[1] + r], [q[0] - r, q[1] + r]);
+  }
+  waypoints.push(...jumperWaypoints(ci));
+  return routeRun(start, targets, net, L.cnodes || [], hazards, waypoints, false);
+}
+// Same per-unit cache discipline as noviaRoute; the signature already
+// carries state.clk and every unit's clk/cnodes.
+let _clkCache = new Map(), _clkPrev = new Map();
+function clkRoute(L) {
+  if (!clkActive() || !L.clk || L.side === "back") return null;
+  const sig = noviaSig();
+  if (_clkCache.get("sig") !== sig) {
+    _clkPrev = _clkCache;
+    _clkCache = new Map([["sig", sig]]);
+  }
+  const key = noviaKey(L);
+  if (_clkCache.has(key)) return _clkCache.get(key);
+  if (drag && !_jumperDrag() && _clkPrev.has(key)) {
+    const cached = _clkPrev.get(key);
+    _clkCache.set(key, cached);
+    return cached;
+  }
+  const r = clkRouteRaw(L);
+  _clkCache.set(key, r);
+  return r;
+}
+// The F.Cu trace from the jumper's CLK pad to pin 9 (mirrors pcb.clk_link).
+// Routed LAST, after every unit run, so it dodges them all.
+let _linkCache = { sig: null, route: null };
+function clkLink() {
+  const ci = clkActive() ? clkInfo() : null;
+  if (!ci || !ci.jumper) return null;
+  const sig = noviaSig();
+  if (_linkCache.sig === sig) return _linkCache.route;
+  const net = "CLK";
+  const jside = ci.side;
+  const start = [ci.pads[0][1], ci.pads[0][2]];
+  const targets = [ci.pin9];
+  const hazards = [];
+  for (const L of state.leds) {
+    if (L.side === jside) {
+      hazards.push(...unitCopperQuads(L, false));
+      hazards.push(...unitViaQuads(L));
+    } else {
+      const g = geomOf(L), p = PKG[g.pkg];
+      if (p.drill) {
+        for (const off of [g.ledK, g.ledA]) {
+          const [x, y] = unitPoint(L, off[0], off[1]);
+          hazards.push(roundHazard(x, y, p.pw / 2 + NOVIA_CLEAR));
+        }
+      }
+      if (g.hole) hazards.push(roundHazard(L.x, L.y, g.hole / 2 + NOVIA_CLEAR));
+      hazards.push(...unitViaQuads(L, false));
+    }
+  }
+  for (const q of PADS) {
+    if (!pinOn(q[4]) || padNetEff(q[2]) === net) continue;
+    hazards.push(roundHazard(q[0], q[1], 0.875 + NOVIA_CLEAR));
+  }
+  hazards.push(...jumperCopperQuads(ci, net, jside));
+  for (const L of state.leds) {
+    if (L.side !== jside) continue; // its runs are copper on the other face
+    const runs = [noviaRoute(L), clkRoute(L)];
+    for (const r2 of runs) {
+      if (r2 && r2.net !== net && r2.pts.length > 1) {
+        for (let i = 0; i + 1 < r2.pts.length; i++) {
+          hazards.push(quadSegPts(r2.pts[i], r2.pts[i + 1], 0.3));
+        }
+      }
+    }
+  }
+  let waypoints = [];
+  for (const L of state.leds) waypoints.push(...expandedCornersOf(L, NOVIA_ESCAPE));
+  for (const q of PADS) {
+    if (!pinOn(q[4]) || padNetEff(q[2]) === net) continue;
+    const r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE;
+    waypoints.push([q[0] - r, q[1] - r], [q[0] + r, q[1] - r],
+                   [q[0] + r, q[1] + r], [q[0] - r, q[1] + r]);
+  }
+  waypoints.push(...jumperWaypoints(ci));
+  const route = routeRun(start, targets, net, ci.nodes, hazards, waypoints,
+                         false);
+  _linkCache = { sig, route };
+  return route;
+}
+// The trace feeding a back-side jumper's 3V3 pad from a 3V3 connector pin
+// on its own face (mirrors pcb.clk_v3_link): exists only while the jumper
+// sits on the back with its dedicated via off. Routed after everything
+// else, the CLK link included.
+let _v3LinkCache = { sig: null, route: null };
+function clkV3Link() {
+  const ci = clkActive() ? clkInfo() : null;
+  if (!ci || !ci.jumper || !ci.v3link) return null;
+  const sig = noviaSig();
+  if (_v3LinkCache.sig === sig) return _v3LinkCache.route;
+  const net = "3V3";
+  const jside = ci.side;
+  const start = [ci.pads[2][1], ci.pads[2][2]];
+  // A hand-picked destination pin wins outright (unreachable comes back
+  // tight); an invalid choice falls back to nearest-first, like a via-less
+  // run's terminal (mirrors pcb.clk_v3_link).
+  const termQ = PADS.find(q => q[4] === ci.v3pin
+                          && padNetEff(q[2]) === net && pinOn(q[4]));
+  let targets;
+  if (termQ) {
+    targets = [[termQ[0], termQ[1]]];
+  } else {
+    targets = PADS
+      .filter(q => padNetEff(q[2]) === net && pinOn(q[4]))
+      .map(q => [q[0], q[1]])
+      .sort((u, v) => ((u[0] - start[0]) ** 2 + (u[1] - start[1]) ** 2)
+                    - ((v[0] - start[0]) ** 2 + (v[1] - start[1]) ** 2));
+    if (!targets.length) return null; // no 3V3 pin kept; powerMissing says so
+  }
+  const hazards = [];
+  for (const L of state.leds) {
+    if (L.side === jside) {
+      hazards.push(...unitCopperQuads(L, false));
+      hazards.push(...unitViaQuads(L));
+    } else {
+      const g = geomOf(L), p = PKG[g.pkg];
+      if (p.drill) {
+        for (const off of [g.ledK, g.ledA]) {
+          const [x, y] = unitPoint(L, off[0], off[1]);
+          hazards.push(roundHazard(x, y, p.pw / 2 + NOVIA_CLEAR));
+        }
+      }
+      if (g.hole) hazards.push(roundHazard(L.x, L.y, g.hole / 2 + NOVIA_CLEAR));
+      hazards.push(...unitViaQuads(L, false));
+    }
+  }
+  for (const q of PADS) {
+    if (!pinOn(q[4]) || padNetEff(q[2]) === net) continue;
+    hazards.push(roundHazard(q[0], q[1], 0.875 + NOVIA_CLEAR));
+  }
+  hazards.push(...jumperCopperQuads(ci, net, jside));
+  for (const L of state.leds) {
+    if (L.side !== jside) continue;
+    const runs = [noviaRoute(L), clkRoute(L)];
+    for (const r2 of runs) {
+      if (r2 && r2.net !== net && r2.pts.length > 1) {
+        for (let i = 0; i + 1 < r2.pts.length; i++) {
+          hazards.push(quadSegPts(r2.pts[i], r2.pts[i + 1], 0.3));
+        }
+      }
+    }
+  }
+  const lk = clkLink();
+  if (lk && lk.pts.length > 1) {
+    for (let i = 0; i + 1 < lk.pts.length; i++) {
+      hazards.push(quadSegPts(lk.pts[i], lk.pts[i + 1], 0.3));
+    }
+  }
+  let waypoints = [];
+  for (const L of state.leds) waypoints.push(...expandedCornersOf(L, NOVIA_ESCAPE));
+  for (const q of PADS) {
+    if (!pinOn(q[4]) || padNetEff(q[2]) === net) continue;
+    const r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE;
+    waypoints.push([q[0] - r, q[1] - r], [q[0] + r, q[1] - r],
+                   [q[0] + r, q[1] + r], [q[0] - r, q[1] + r]);
+  }
+  waypoints.push(...jumperWaypoints(ci));
+  const route = routeRun(start, targets, net, ci.v3nodes, hazards, waypoints,
+                         !!termQ);
+  _v3LinkCache = { sig, route };
+  return route;
+}
 const rectPoly = b => [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]];
 // The unit's actual copper (pads/via/traces/hole) inflated by the margins
-// art must keep — labeled convex quads mirroring pcb.unit_copper_pieces
+// art must keep: labeled convex quads mirroring pcb.unit_copper_pieces
 // exactly, so art hugs units identically in preview and on the board.
 // Advanced-placement sanity check: raw copper shapes (true pad/track/via
 // sizes + 0.2 mm clearance) on DIFFERENT nets must not touch. Designed
@@ -1817,7 +2294,7 @@ function partHalf(L, kind) {
   return [hx, hy];
 }
 // Keep every advanced part inside the safe rect WITHOUT moving the others.
-// Never clamp the anchor against the full envelope here — that made the
+// Never clamp the anchor against the full envelope here; that made the
 // rest of the unit walk the other way when one part was dragged to an edge.
 function clampAdvParts(L) {
   if (!L.adv) return;
@@ -1880,7 +2357,7 @@ function advConflict(L) {
     }
   }
   if (g.hole) {
-    // The routed hole sits under the LED body by design — its own pads are
+    // The routed hole sits under the LED body by design; its own pads are
     // engineered around it, but a user-routed resistor/via/trace must not
     // cross it.
     items.push({ n: "hole", net: "hole", q: quad(0, 0, g.hole, g.hole, 0),
@@ -1930,7 +2407,7 @@ function unitCopperPieces(L, face) {
                 quadSegPts(nvr.pts[i], nvr.pts[i + 1], 1.1)]);
     }
   } else {
-    // Round collar round the barrel — mirrors pcb.unit_copper_pieces (see
+    // Round collar round the barrel; mirrors pcb.unit_copper_pieces (see
     // viaCollar): a 16-gon at the netclass minimum, so the plane a same-net
     // via keeps reads as the round pad it effectively is, not the oversized
     // octagon the pour-rule margin used to leave.
@@ -1938,6 +2415,15 @@ function unitCopperPieces(L, face) {
     const vpts = unitTracePts(L, "v").pts;
     for (let i = 0; i + 1 < vpts.length; i++) {
       out.push(["trace_stub", quadSegPts(vpts[i], vpts[i + 1], 1.1)]);
+    }
+  }
+  // A front CLK unit's supply run: one more band of copper on its face that
+  // artwork keeps off (a back CLK unit's supply already came through nvr).
+  const crun = clkRoute(L);
+  if (crun && crun.pts.length > 1) {
+    for (let i = 0; i + 1 < crun.pts.length; i++) {
+      out.push([i ? `trace_clk${i}` : "trace_clk",
+                quadSegPts(crun.pts[i], crun.pts[i + 1], 1.1)]);
     }
   }
   if (g.hole) out.push(["hole", quadRect(0, 0, g.hole + 1.0, g.hole + 1.0)]);
@@ -1949,7 +2435,7 @@ function unitCopperPieces(L, face) {
                                     Math.max(p.body[1], lens) + 0.8, lrot)]);
   }
   // Per-face view of a far-side LED unit (mirrors pcb.unit_copper_pieces):
-  // its copper really is split across the board — the LED face carries just
+  // its copper really is split across the board: the LED face carries just
   // the LED pads, power via and hole, while on the resistor face the departed
   // LED pads shrink to the two via barrels sunk in them, so art and windows
   // reclaim the rest of the old pad room.
@@ -2038,8 +2524,9 @@ let _bridgeCache = { key: "", map: [] };
 function allBridges() { // {F: seg|null, B: seg|null} per LED, memoized
   const key = JSON.stringify([
     state.leds.map(L => [L.x, L.y, L.rot, L.layout, L.size, !!L.reverse, L.side,
-                         !!L.novia, L.adv, L.nodes || null, L.anodes || null,
-                         L.vnodes || null, L.term || null]),
+                         !!L.novia, !!L.clk, L.adv, L.nodes || null, L.anodes || null,
+                         L.vnodes || null, L.cnodes || null, L.term || null]),
+    state.clk, [...state.pins],
     state.shape.ringsRev || 0,
   ]);
   if (_bridgeCache.key === key) return _bridgeCache.map;
@@ -2048,6 +2535,18 @@ function allBridges() { // {F: seg|null, B: seg|null} per LED, memoized
     const hw = 1.225;
     return [[px - hw, py - hw], [px + hw, py - hw], [px + hw, py + hw], [px - hw, py + hw]];
   });
+  const ci = clkActive() ? clkInfo() : null;
+  if (ci && ci.jumper) {
+    // The jumper's copper (and its routed link to pin 9) blocks bridges
+    // exactly like a connector pad would (mirrors pcb.unit_bridges).
+    pads.push(...jumperCopperPieces(ci).map(([, q]) => q));
+    const lk = clkLink();
+    if (lk && lk.pts.length > 1) {
+      for (let i = 0; i + 1 < lk.pts.length; i++) {
+        pads.push(quadSegPts(lk.pts[i], lk.pts[i + 1], 1.0));
+      }
+    }
+  }
   const pieces = state.leds.map(L => unitCopperPieces(L));
   const map = state.leds.map((L, i) => {
     const g = geomOf(L);
@@ -2058,6 +2557,12 @@ function allBridges() { // {F: seg|null, B: seg|null} per LED, memoized
       F: front ? ["pad_res_in", g.resIn] : (L.novia ? null : ["via", g.viaB]),
       B: front ? (L.novia ? null : ["via", g.viaF]) : ["pad_led_k", g.ledK],
     };
+    if (ci && L.clk) {
+      // The supply is a CLK trace now, not a 3V3 pour feed: a front unit's
+      // res_in carries CLK (bridging it to the 3V3 ring would be a dead
+      // short), and a back unit's 3V3 via is gone entirely.
+      starts.F = null;
+    }
     const p = PKG[g.pkg];
     const th = !!p.drill;
     const far = !!L.farled && !g.hole && !th;
@@ -2129,7 +2634,7 @@ function distToRings(rings, x, y) {
 // A unit must sit on solid board with the same margin the generator
 // enforces (whole footprint ≥ 0.55 mm inside the outline; 0.555 here keeps
 // strictly inside the server's rule while leaving float slack against the
-// 0.56 clamp inset) — matching rules mean the downloaded board keeps every
+// 0.56 clamp inset); matching rules mean the downloaded board keeps every
 // unit exactly where it was placed.
 function segSegDist(ax, ay, bx, by, cx, cy, dx, dy) {
   // Exact distance between segments AB and CD (0 when they cross).
@@ -2166,7 +2671,7 @@ function unitInsideBoard(L) {
   // inside outline.buffer(-0.55). Equivalent formulation without polygon
   // offsetting: corners inside the outline (and outside its holes), no
   // outline vertex or edge inside/crossing the rect, and every rect edge
-  // at least 0.55 mm from every outline segment. Point sampling is gone —
+  // at least 0.55 mm from every outline segment. Point sampling is gone:
   // it accepted spots the generator then refused.
   // 0.555 (5 µm stricter than the server's 0.55) absorbs shapely's
   // chord-approximated erosion arcs at concave corners: the client may
@@ -2197,7 +2702,7 @@ function unitInsideBoard(L) {
   return true;
 }
 // A unit may not overlap a kept row's connector pad pairs (through-hole
-// copper on both layers) — but the strip between the pairs is fair game.
+// copper on both layers), but the strip between the pairs is fair game.
 function padConflict(L) {
   const poly = unitPoly(L);
   for (const key of activePairs()) {
@@ -2207,8 +2712,83 @@ function padConflict(L) {
   }
   return false;
 }
+// ---- CLK jumper placement (mirrors the server's backstop test) ----
+// The jumper's copper and labels must sit on solid board, clear of every
+// unit, kept pad pair, and pin caption. The jumper yields to units on the
+// server, so the canvas prevents both sides of the collision up front.
+function jumperGeomQuads(ci) {
+  const quads = jumperCopperPieces(ci).map(([, q]) => q);
+  for (const b of jumperCaptionBoxes(ci)) quads.push(rectPoly(b));
+  return quads;
+}
+function jumperInfoOk(ci, skipLed) {
+  if (!ci || !ci.jumper) return true;
+  const quads = jumperGeomQuads(ci);
+  const rings = boardRings();
+  const edges = [];
+  for (const ring of rings) {
+    for (let i = 0; i < ring.length; i++) edges.push([ring[i], ring[(i + 1) % ring.length]]);
+  }
+  for (const q of quads) {
+    for (const pt of q) if (!pipRings(rings, pt[0], pt[1])) return false;
+    for (let k = 0; k < q.length; k++) {
+      const a = q[k], b = q[(k + 1) % q.length];
+      if (edges.some(([e0, e1]) => noviaSegDist(a, b, e0, e1) < 0.35)) return false;
+    }
+  }
+  for (const L of state.leds) {
+    if (L === skipLed) continue;
+    const poly = unitPoly(L);
+    if (quads.some(q => !polysClear(q, poly, 0.2))) return false;
+  }
+  for (const key of activePairs()) {
+    const kp = rectPoly(PAD_PAIRS[key].keepout);
+    if (quads.some(q => !polysClear(q, kp, 0))) return false;
+  }
+  for (const b of captionBoxes()) {
+    const kp = rectPoly(b);
+    if (quads.some(q => !polysClear(q, kp, 0))) return false;
+  }
+  return true;
+}
+function clkInfoAt(x, y) { // clkInfo as if the jumper sat at (x, y)
+  const sx = state.clk.x, sy = state.clk.y;
+  state.clk.x = x; state.clk.y = y;
+  const ci = clkInfo();
+  state.clk.x = sx; state.clk.y = sy;
+  return ci;
+}
+const jumperOkAt = (x, y, skipLed) => jumperInfoOk(clkInfoAt(x, y), skipLed);
+const jumperConflict = () =>
+  clkActive() && state.clk.jumper && !jumperInfoOk(clkInfo());
+// Nearest clear spot for the jumper (mirrors the server's ring walk), used
+// when enabling CLK finds a unit parked on the default position.
+function relocateJumper() {
+  const ci = clkActive() && state.clk.jumper ? clkInfo() : null;
+  if (!ci || jumperInfoOk(ci)) return;
+  const [jx0, jy0] = ci.jumper;
+  for (let r = 0.5; r <= 30; r += 0.5) {
+    for (let k = 0; k < 16; k++) {
+      const t = k * 22.5 * Math.PI / 180;
+      const x = jx0 + r * Math.cos(t), y = jy0 + r * Math.sin(t);
+      if (jumperOkAt(x, y)) {
+        state.clk.x = x; state.clk.y = y;
+        return;
+      }
+    }
+  }
+}
+// A unit may not park on the jumper either: the server would then move the
+// JUMPER and the shipped board would no longer match the preview.
+function jumperBlocksUnit(probe) {
+  const ci = clkActive() && state.clk.jumper ? clkInfo() : null;
+  if (!ci) return false;
+  const poly = unitPoly(probe);
+  return jumperGeomQuads(ci).some(q => !polysClear(q, poly, 0.2));
+}
 const ledPosOk = (probe, skip) =>
-  !overlapsAny(probe, skip) && unitInsideBoard(probe) && !padConflict(probe);
+  !overlapsAny(probe, skip) && unitInsideBoard(probe) && !padConflict(probe)
+  && !jumperBlocksUnit(probe);
 
 function pushApart(i) {
   const L = state.leds[i];
@@ -2261,7 +2841,7 @@ function freeSpot(led, skip) {
   return null;
 }
 // A new outline (or a unit change) can leave LEDs over a board cutout or
-// off the board entirely — move any such unit to the nearest free spot.
+// off the board entirely; move any such unit to the nearest free spot.
 function relocateStrandedLeds() {
   let moved = false, stuck = false;
   state.leds.forEach((L, i) => {
@@ -2270,7 +2850,7 @@ function relocateStrandedLeds() {
     if (spot) { [L.x, L.y] = spot; moved = true; }
     else stuck = true;
   });
-  if (stuck) setStatus("An LED has no solid board under it — drag it somewhere solid or adjust the shape.", true);
+  if (stuck) setStatus("An LED has no solid board under it. Drag it somewhere solid or adjust the shape.", true);
   else if (moved) setStatus("Moved LED(s) onto solid board.");
 }
 function textOverParts(t) {
@@ -2291,8 +2871,8 @@ function textOverParts(t) {
   return activePads().some(([px, py]) =>
     px > b[0] - 0.9 && px < b[2] + 0.9 && py > b[1] - 0.9 && py < b[3] + 0.9);
 }
-// KiCad's stroke font is proportional — "iii" is a third the width of "WM" at
-// the same size — so a per-character constant cannot describe it, and the
+// KiCad's stroke font is proportional ("iii" is a third the width of "WM" at
+// the same size), so a per-character constant cannot describe it, and the
 // monospace stand-in the preview drew with was 17% narrow on caps and 2.6x out
 // on narrow strings. Bold Helvetica tracks the real advances; STROKE_W
 // calibrates it against boards measured out of KiCad.
@@ -2318,7 +2898,7 @@ function textBBox(t) {
   const w = textWidthMM(t);
   const h = t.size * 1.5;
   if (!t.rot) return [t.x - w / 2, t.y - h / 2, t.x + w / 2, t.y + h / 2];
-  // Envelope of the turned box — hit-testing, clamping and the fab-clip
+  // Envelope of the turned box: hit-testing, clamping and the fab-clip
   // warning all work off this.
   const pts = [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]
     .map(([px, py]) => rotOff(px, py, t.rot));
@@ -2341,7 +2921,7 @@ function textOnSolidBoard(t) {
   const b = [b0[0] - pad, b0[1] - SILK_EDGE_CLEAR,
              b0[2] + pad, b0[3] + SILK_EDGE_CLEAR];
   // A reverse-mount unit routes a hole clean through the board, so silk over
-  // it prints on nothing — the same failure as hanging off the outer edge,
+  // it prints on nothing, the same failure as hanging off the outer edge,
   // and what this check's own warning already promises to cover.
   for (const L of state.leds) {
     if (!L.reverse) continue;
@@ -2523,7 +3103,7 @@ function rebuildAllArt() { for (const a of state.art) rebuildArt(a); }
 
 // Extract up to MAX_PAL representative colors (most frequent first).
 // Anti-aliased edge pixels (SVG rasters especially) form many tiny blend
-// buckets — the flat-vs-photo decision goes by how much of the image the
+// buckets; the flat-vs-photo decision goes by how much of the image the
 // top colors cover, and sub-1.5% blend colors are dropped from the swatches.
 function extractPalette(img, iw, ih) {
   const N = 96;
@@ -2555,8 +3135,8 @@ function extractPalette(img, iw, ih) {
   const main = merged.filter(m => m.n / total >= 0.004).slice(0, MAX_PAL);
   const coverage = main.reduce((s, m) => s + m.n, 0) / Math.max(1, total);
   // Only ever default to materials that ADD to the board. Glow and bare cut
-  // copper from both layers and open the mask — they are holes you can see
-  // through — so handing them out automatically turned parts of someone's
+  // copper from both layers and open the mask (they are holes you can see
+  // through), so handing them out automatically turned parts of someone's
   // logo into windows they never asked for. The user opts into those.
   const defaults = ["ignore", "silk", "copper", "silk", "copper", "silk"];
   return {
@@ -2653,7 +3233,7 @@ function drawArtLayer(c, a, mat, viewSide) {
 
 // Server-side art keepouts, mirrored for the preview: decor (silk/copper)
 // is carved around connector pads and this face's units; windows (glow/bare)
-// give the pads a wider berth. Both hug per face — a unit only claims, on
+// give the pads a wider berth. Both hug per face: a unit only claims, on
 // its far face, the copper that actually crosses the board.
 function captionBoxes() { // mirrors pcb.caption_boxes
   const out = [];
@@ -2679,16 +3259,49 @@ function eraseArtKeepouts(oc, forWindows, unitSide) {
   for (const [x0, y0, x1, y1] of captionBoxes()) {
     oc.fillRect(mm2px(x0), mm2px(y0), (x1 - x0) * SCALE, (y1 - y0) * SCALE);
   }
+  { // The CLK jumper claims front-face room like a unit does (pads, rail
+    // via + stub, the routed link to pin 9, its labels); only the via
+    // barrel penetrates to the back (server parity: jumper_decor).
+    const ci = clkActive() ? clkInfo() : null;
+    if (ci && ci.jumper) {
+      if ((unitSide || "front") === ci.side) {
+        const quads = jumperCopperPieces(ci).map(([, q]) => q);
+        for (const run of [clkLink(), clkV3Link()]) {
+          if (!run || run.pts.length < 2) continue;
+          for (let i = 0; i + 1 < run.pts.length; i++) {
+            quads.push(quadSegPts(run.pts[i], run.pts[i + 1], 1.1));
+          }
+        }
+        for (const q of quads) {
+          oc.beginPath();
+          q.forEach(([x, y], i) =>
+            i ? oc.lineTo(mm2px(x), mm2px(y)) : oc.moveTo(mm2px(x), mm2px(y)));
+          oc.closePath();
+          oc.fill();
+        }
+        for (const [x0, y0, x1, y1] of jumperCaptionBoxes(ci)) {
+          oc.fillRect(mm2px(x0), mm2px(y0), (x1 - x0) * SCALE, (y1 - y0) * SCALE);
+        }
+      } else {
+        for (const v of [ci.via, ci.v3via]) {
+          if (!v) continue;
+          oc.beginPath();
+          oc.arc(mm2px(v[0]), mm2px(v[1]), 0.85 * SCALE, 0, 7);
+          oc.fill();
+        }
+      }
+    }
+  }
   for (const L of state.leds) {
     // Every layer is carved per face now (mirrors webapp emit_window): on
     // the face a unit is NOT mounted on, art and windows alike only dodge
-    // what actually crosses the board there — the via, a routed hole, TH
+    // what actually crosses the board there: the via, a routed hole, TH
     // pad annuli, or a far-side LED's whole half (its pads carry vias).
     const gF = geomOf(L), pF = PKG[gF.pkg];
     const farled = !!L.farled && !gF.hole && !pF.drill;
     const farOnly = L.side !== (unitSide || "front") && !farled;
     if (farOnly) {
-      // A reverse unit's routed hole penetrates both faces — keep this
+      // A reverse unit's routed hole penetrates both faces; keep this
       // side's decor clear of the hole and its light spot (server parity).
       const g = geomOf(L);
       if (g.hole) {
@@ -2708,7 +3321,7 @@ function eraseArtKeepouts(oc, forWindows, unitSide) {
       }
       continue;
     }
-    // Hug the unit's actual copper, not its bounding rectangle — art can
+    // Hug the unit's actual copper, not its bounding rectangle: art can
     // flow right up to the pads/traces plus their clearance margins. The
     // face matters for a far-side LED, whose copper differs per face.
     for (const [, q] of unitCopperPieces(L, unitSide || "front")) {
@@ -2741,9 +3354,7 @@ function strokeBridgesInWindows(oc, viewSide) {
     oc.lineTo(mm2px(seg[1][0]), mm2px(seg[1][1]));
     oc.stroke();
   }
-  for (const L of state.leds) {
-    if (L.novia) continue;  // no via: nothing of this unit crosses a window
-    const [bx, by] = unitPoint(L, ...viaOffset(L));
+  const viaCap = (bx, by) => {
     oc.beginPath();
     if (state.tenting) {
       oc.arc(mm2px(bx), mm2px(by), (VIA_SIZE / 2 + 0.1) * SCALE, 0, 7);
@@ -2755,6 +3366,15 @@ function strokeBridgesInWindows(oc, viewSide) {
       oc.arc(mm2px(bx), mm2px(by), VIA_DRILL / 2 * SCALE, 0, 7);
       oc.fillStyle = "#05080d"; oc.fill();
     }
+  };
+  for (const L of state.leds) {
+    if (L.novia) continue;  // no via: nothing of this unit crosses a window
+    if (clkActive() && L.clk && L.side === "back") continue; // 3V3 via gone
+    viaCap(...unitPoint(L, ...viaOffset(L)));
+  }
+  { // the jumper's vias cross windows exactly like a unit via
+    const ci = clkActive() ? clkInfo() : null;
+    if (ci) for (const v of [ci.via, ci.v3via]) if (v) viaCap(v[0], v[1]);
   }
   oc.restore();
 }
@@ -2762,7 +3382,7 @@ function strokeBridgesInWindows(oc, viewSide) {
 // Vector (TTF) texts are carved by the same keepouts as art on the real
 // board, so they render through an offscreen pass that erases those
 // regions. Window-material text cuts through the laminate and therefore
-// shows on BOTH views — mirrored when seen from the other side.
+// shows on BOTH views, mirrored when seen from the other side.
 // Clear a text's carve rectangle, turned with the text so a rotated string
 // carves the room its glyphs actually occupy (mirrors _text_keepout).
 function clearTextCarve(oc, t) {
@@ -2784,7 +3404,7 @@ function drawTextLayers(c, mirror) {
     { win: true, list: state.texts.filter(t => vec(t)
         && (t.material === "glow" || t.material === "bare")) },
     // KiCad stroke texts: not carved by keepouts (gr_text isn't), but they
-    // ARE clipped by the board edge and holes at the fab — clip the preview
+    // ARE clipped by the board edge and holes at the fab; clip the preview
     // the same way, with unsupported glyphs shown as the boxes they print.
     { stroke: true, list: state.texts.filter(t => (!t.font || t.font === "kicad")
         && t.text.trim() && t.side === viewSide) },
@@ -2884,7 +3504,7 @@ function drawWindowLayers(c, mirror, mats, eraseText) {
   compositeLayer(c, off, mirror);
 }
 
-// parts: "all" (whole unit on one face), "res" (everything but the LED — the
+// parts: "all" (whole unit on one face), "res" (everything but the LED: the
 // face the resistor is on when the LED crossed over), or "led" (just the LED,
 // on the far face).
 function drawUnitGeometry(c, led, parts = "all") {
@@ -2910,9 +3530,10 @@ function drawUnitGeometry(c, led, parts = "all") {
   };
   // Match the fab render: copper under the mask shows as a faint raised
   // ridge, and the pour keeps a clearance gap around every pad, trace, and
-  // via — a slightly darker halo where the mask sits on bare laminate.
+  // via: a slightly darker halo where the mask sits on bare laminate.
   const halo = "rgba(0,0,0,.16)";
   const nvr = noviaRoute(led);
+  const crun = clkRoute(led); // a front CLK unit's extra supply run
   const Pb = ([bx, by]) => [mm2px(bx), mm2px(by)];   // already board mm
   const runPath = (pts) => {
     c.beginPath();
@@ -2925,6 +3546,7 @@ function drawUnitGeometry(c, led, parts = "all") {
   c.lineCap = "round";
   if (parts !== "led") {
     runPath(unitTracePts(led, "a").pts);
+    if (crun && crun.pts.length > 1) runPath(crun.pts);
     if (nvr) {
       if (nvr.pts.length > 1) runPath(nvr.pts);
     } else {
@@ -2946,6 +3568,7 @@ function drawUnitGeometry(c, led, parts = "all") {
   c.lineWidth = 0.3 * SCALE;
   if (parts !== "led") {
     runPath(unitTracePts(led, "a").pts);
+    if (crun && crun.pts.length > 1) runPath(crun.pts);
     if (nvr) {
       if (nvr.pts.length > 1) runPath(nvr.pts);
     } else {
@@ -2959,8 +3582,9 @@ function drawUnitGeometry(c, led, parts = "all") {
   // when the pointer is near the middle of a leg. Every free-place trace
   // gets them, not just the via-less run; the selected one wears the
   // accent ring so Delete has a visible target.
-  if (parts !== "led" && led.adv) {
-    for (const key of ["run", "a", "v"]) {
+  if (parts !== "led" && (led.adv || (clkActive() && led.clk))) {
+    const keys = led.adv ? ["run", "a", "v", "c"] : ["c"];
+    for (const key of keys) {
       const list = led[NODE_KEYS[key]] || [];
       for (let k = 0; k < list.length; k++) {
         const [bx, by] = list[k];
@@ -2974,7 +3598,7 @@ function drawUnitGeometry(c, led, parts = "all") {
         c.strokeStyle = sel ? "#6fb2ff" : "rgba(255,255,255,.85)"; c.stroke();
       }
     }
-    if (nodeHint && state.leds[nodeHint.index] === led) {
+    if (nodeHint && !nodeHint.jumper && state.leds[nodeHint.index] === led) {
       const [px2, py2] = [mm2px(nodeHint.x), mm2px(nodeHint.y)];
       const r2 = 0.62 * SCALE;
       c.beginPath(); c.arc(px2, py2, r2, 0, 7);
@@ -2988,10 +3612,13 @@ function drawUnitGeometry(c, led, parts = "all") {
     }
   }
   // The trace's end is a handle for every via-less unit (no advanced mode
-  // needed): drag it to any highlighted spot — a same-net connector pad, or
+  // needed): drag it to any highlighted spot: a same-net connector pad, or
   // another unit's same-net pad to share a run. Diamond, so it never reads
   // as one more bend dot.
-  if (parts !== "led" && led.novia && nvr && !nvr.direct && nvr.pts.length > 1) {
+  if (parts !== "led" && led.novia && nvr && !nvr.direct && nvr.pts.length > 1
+      && !(clkActive() && led.clk && led.side === "back")) {
+    // (a back CLK unit's run ends on the CLK hookup; there is no
+    // destination to choose, so no endpoint handle)
     const [ex, ey] = nvr.pts[nvr.pts.length - 1];
     const [px3, py3] = [mm2px(ex), mm2px(ey)];
     const r3 = 0.52 * SCALE;
@@ -3042,7 +3669,7 @@ function drawUnitGeometry(c, led, parts = "all") {
     for (const off of [g.ledK, g.ledA]) circleAt(off[0], off[1], VIA_SIZE / 2, padCol());
   }
   if (parts === "res") { /* LED body lives on the other face */ } else if (th) {
-    // Round TH pads with their drilled holes — visible on both faces.
+    // Round TH pads with their drilled holes, visible on both faces.
     for (const off of [g.ledK, g.ledA]) {
       circleAt(off[0], off[1], pk.pw / 2, padCol());
       circleAt(off[0], off[1], pk.drill / 2, "#05080d");
@@ -3094,10 +3721,138 @@ function drawUnitGeometry(c, led, parts = "all") {
   }
 }
 
+// The CLK solder jumper: three SMD pads on the front, a silk bracket, the
+// rail stub + via (when a back CLK unit needs a plated hole), and the routed
+// link to pin 9. The back view shows only the via barrel.
+function drawJumper(c, mirror) {
+  const ci = clkActive() ? clkInfo() : null;
+  if (!ci || !ci.jumper) return;
+  const [jx, jy, rot] = ci.jumper;
+  for (const v of [ci.via, ci.v3via]) {
+    if (!v) continue; // via barrels cross the board: visible on both faces
+    c.beginPath(); c.arc(mm2px(v[0]), mm2px(v[1]), VIA_SIZE / 2 * SCALE, 0, 7);
+    c.fillStyle = padCol(); c.fill();
+    c.beginPath(); c.arc(mm2px(v[0]), mm2px(v[1]), VIA_DRILL / 2 * SCALE, 0, 7);
+    c.fillStyle = "#05080d"; c.fill();
+  }
+  if (mirror !== (ci.side === "back")) return; // pads live on the jumper's face
+  const halo = "rgba(0,0,0,.16)";
+  const paths = [];
+  if (ci.via) paths.push([[jx, jy], ci.via]);
+  if (ci.v3via) paths.push([[ci.pads[2][1], ci.pads[2][2]], ci.v3via]);
+  const lk = clkLink();
+  if (lk && lk.pts.length > 1) paths.push(lk.pts);
+  const v3l = clkV3Link();
+  if (v3l && v3l.pts.length > 1) paths.push(v3l.pts);
+  const runPath = pts => {
+    c.beginPath();
+    c.moveTo(mm2px(pts[0][0]), mm2px(pts[0][1]));
+    for (let i = 1; i < pts.length; i++) c.lineTo(mm2px(pts[i][0]), mm2px(pts[i][1]));
+    c.stroke();
+  };
+  c.lineCap = "round";
+  c.strokeStyle = halo;
+  c.lineWidth = (0.3 + 0.7) * SCALE;
+  for (const pts of paths) runPath(pts);
+  c.strokeStyle = state.mask === "white" ? "rgba(60,60,60,.25)" : "rgba(255,255,255,.18)";
+  c.lineWidth = 0.3 * SCALE;
+  for (const pts of paths) runPath(pts);
+  const quad = q => {
+    c.beginPath();
+    q.forEach(([x, y], i) =>
+      i ? c.lineTo(mm2px(x), mm2px(y)) : c.moveTo(mm2px(x), mm2px(y)));
+    c.closePath();
+    c.fill();
+  };
+  for (const [, cx, cy] of ci.pads) {
+    c.fillStyle = halo;
+    quad(jumperPadQuad(ci, cx, cy, 0.35));
+  }
+  for (const [, cx, cy] of ci.pads) {
+    c.fillStyle = padCol();
+    quad(jumperPadQuad(ci, cx, cy, 0));
+  }
+  // silk bracket above and below the pad row (mirrors _jumper_footprint)
+  c.strokeStyle = state.mask === "white" ? "#555" : "rgba(255,255,255,.75)";
+  c.lineWidth = Math.max(1, 0.12 * SCALE);
+  const hy = JUMPER_PAD[1] / 2 + 0.3;
+  for (const y0 of [-hy, hy]) {
+    const [ax, ay] = rotOff(-1.9, y0, rot), [bx2, by2] = rotOff(1.9, y0, rot);
+    c.beginPath();
+    c.moveTo(mm2px(jx + ax), mm2px(jy + ay));
+    c.lineTo(mm2px(jx + bx2), mm2px(jy + by2));
+    c.stroke();
+  }
+  // The 3V3 trace's end is a handle: drag it onto any kept 3V3 pin, or
+  // double-click it for the nearest. Diamond, like the via-less runs'.
+  if (v3l && v3l.pts.length > 1) {
+    const [ex, ey] = v3l.pts[v3l.pts.length - 1];
+    const [px3, py3] = [mm2px(ex), mm2px(ey)];
+    const r3 = 0.52 * SCALE;
+    c.beginPath();
+    c.moveTo(px3, py3 - r3); c.lineTo(px3 + r3, py3);
+    c.lineTo(px3, py3 + r3); c.lineTo(px3 - r3, py3);
+    c.closePath();
+    c.fillStyle = state.clk.v3pin ? "#6fb2ff" : "rgba(10,16,24,.85)"; c.fill();
+    c.lineWidth = Math.max(1, 0.09 * SCALE);
+    c.strokeStyle = state.clk.v3pin ? "rgba(255,255,255,.9)" : "#6fb2ff"; c.stroke();
+    if (drag && drag.kind === "jumperterm" && drag.cands) {
+      for (const cand of drag.cands) {
+        const [qx, qy] = [mm2px(cand.x), mm2px(cand.y)];
+        const cur = state.clk.v3pin === cand.pin;
+        c.beginPath(); c.arc(qx, qy, (cur ? 1.35 : 1.1) * SCALE, 0, 7);
+        if (cur) { c.fillStyle = "rgba(111,178,255,.25)"; c.fill(); }
+        c.lineWidth = Math.max(1, (cur ? 0.16 : 0.09) * SCALE);
+        c.setLineDash(cur ? [] : [4, 3]);
+        c.strokeStyle = "#6fb2ff"; c.stroke();
+        c.setLineDash([]);
+      }
+    }
+  }
+  // Hand-placed bends on the two routed links: draggable dots plus the
+  // "+" that appears mid-leg, exactly like a unit's free-place traces.
+  for (const key of ["link", "v3"]) {
+    const list = state.clk[JNODE_KEYS[key]] || [];
+    for (let k = 0; k < list.length; k++) {
+      const [bx, by] = list[k];
+      const sel = selected && selected.kind === "jumpernode"
+        && (selected.trace || "link") === key && selected.node === k;
+      const [hx2, hy2] = [mm2px(bx), mm2px(by)];
+      c.beginPath(); c.arc(hx2, hy2, (sel ? 0.5 : 0.42) * SCALE, 0, 7);
+      c.fillStyle = padCol(); c.fill();
+      c.lineWidth = Math.max(1, (sel ? 0.14 : 0.08) * SCALE);
+      c.strokeStyle = sel ? "#6fb2ff" : "rgba(255,255,255,.85)"; c.stroke();
+    }
+  }
+  if (nodeHint && nodeHint.jumper) {
+    const [px2, py2] = [mm2px(nodeHint.x), mm2px(nodeHint.y)];
+    const r2 = 0.62 * SCALE;
+    c.beginPath(); c.arc(px2, py2, r2, 0, 7);
+    c.fillStyle = "rgba(10,16,24,.85)"; c.fill();
+    c.strokeStyle = "#6fb2ff";
+    c.lineWidth = Math.max(1, 0.09 * SCALE); c.stroke();
+    c.beginPath();
+    c.moveTo(px2 - r2 * 0.45, py2); c.lineTo(px2 + r2 * 0.45, py2);
+    c.moveTo(px2, py2 - r2 * 0.45); c.lineTo(px2, py2 + r2 * 0.45);
+    c.strokeStyle = "#6fb2ff"; c.stroke();
+  }
+  if (jumperConflict()) {
+    // Dropped somewhere it cannot live (over a unit, a pad pair, off the
+    // board): same red halo as a stranded unit; the server would move it.
+    c.setLineDash([3, 3]);
+    c.strokeStyle = "#ff5147"; c.lineWidth = 2;
+    c.strokeRect(mm2px(jx - 3.7), mm2px(jy - (ci.via ? 2.0 : 1.05)),
+                 7.4 * SCALE, ((ci.via ? 2.0 : 1.05) + 1.05) * SCALE);
+    c.setLineDash([]);
+  }
+}
 function drawGhostUnit(c, led) {
-  const [bx, by] = unitPoint(led, ...viaOffset(led));
-  c.beginPath(); c.arc(mm2px(bx), mm2px(by), VIA_SIZE / 2 * SCALE, 0, 7);
-  c.fillStyle = padCol(); c.fill();
+  if (!(clkActive() && led.clk && led.side === "back")) {
+    // (a back CLK unit's 3V3 via is gone; its supply runs as a trace)
+    const [bx, by] = unitPoint(led, ...viaOffset(led));
+    c.beginPath(); c.arc(mm2px(bx), mm2px(by), VIA_SIZE / 2 * SCALE, 0, 7);
+    c.fillStyle = padCol(); c.fill();
+  }
   const g = geomOf(led);
   const pk = PKG[g.pkg];
   if (pk.drill) {
@@ -3135,7 +3890,7 @@ function drawGhostUnit(c, led) {
 function drawView(canvas, side) {
   const c = canvas.getContext("2d");
   const mirror = side === "back";
-  // Mirrored screen x must be W - (VIEW.tx + mm2px(x)) — the extra -2*tx
+  // Mirrored screen x must be W - (VIEW.tx + mm2px(x)); the extra -2*tx
   // in the inner translate compensates for the outer viewport translate.
   const tx = x => mirror ? canvas.width - 2 * VIEW.tx - mm2px(x) : mm2px(x);
   const lightUI = document.documentElement.dataset.theme === "light";
@@ -3168,7 +3923,7 @@ function drawView(canvas, side) {
   drawWindowLayers(c, mirror, ["glow"]);
   {
     // Decor on an offscreen pass: silk first, then copper openings on top
-    // — silk under an opening is carved server-side — then ink text clears
+    // (silk under an opening is carved server-side), then ink text clears
     // its rectangle out of the decor. Each view shows its own side's art.
     const viewSide = mirror ? "back" : "front";
     const [off, oc] = newLayer(canvas);
@@ -3194,6 +3949,7 @@ function drawView(canvas, side) {
     c.beginPath(); c.arc(mm2px(x), mm2px(y), 0.475 * SCALE, 0, 7);
     c.fillStyle = "#0d0e10"; c.fill();
   }
+  drawJumper(c, mirror);
   for (const led of state.leds) {
     const farled = !!led.farled && farOK(led);
     if ((led.side === "back") === mirror) drawUnitGeometry(c, led, farled ? "res" : "all");
@@ -3271,7 +4027,7 @@ function drawView(canvas, side) {
   c.fillStyle = state.mask === "white" ? "#555" : "rgba(255,255,255,.75)";
   c.font = `${0.75 * SCALE}px sans-serif`; c.textAlign = "center";
   // Pair captions, matching the silk actually printed on the fab board.
-  // Each caption names a pad PAIR, left word for the left pad — so in the
+  // Each caption names a pad PAIR, left word for the left pad, so in the
   // mirrored back view the words swap with the pads they describe.
   const capText = l => mirror ? l.split(" ").reverse().join(" ") : l;
   for (const key of activePairs()) {
@@ -3280,6 +4036,17 @@ function drawView(canvas, side) {
     const [lx, ly] = pairCaptionAt(key);
     c.fillText(capText(label), tx(lx), mm2px(ly));
   }
+  { // the CLK jumper's end labels (on its own face's silk)
+    const ci = clkActive() ? clkInfo() : null;
+    if (ci && ci.jumper && mirror === (ci.side === "back")) {
+      const [jx, jy, rot] = ci.jumper;
+      c.font = `${0.62 * SCALE}px sans-serif`;
+      for (const [lbl, sgn] of [["CLK", -1], ["3V3", 1]]) {
+        const [lx, ly] = rotOff(sgn * (JUMPER_PITCH + JUMPER_PAD[0] / 2 + 1.0), 0, rot);
+        c.fillText(lbl, tx(jx + lx), mm2px(jy + ly + 0.22));
+      }
+    }
+  }
 
   c.font = `${0.62 * SCALE}px sans-serif`;
   for (const led of state.leds) {
@@ -3287,11 +4054,16 @@ function drawView(canvas, side) {
     const front = led.side !== "back";
     const g = geomOf(led);
     const add = (a, b) => [a[0] + b[0], a[1] + b[1]];
-    const p3 = unitPoint(led, ...(front ? add(g.resIn, [0, -1.15]) : add(g.viaB, [0, -0.85])));
+    // A CLK unit's supply is the blink line, not 3V3, and a back CLK unit
+    // has no supply via at all: its label sits over res_in instead.
+    const isClk = clkActive() && led.clk;
+    const p3 = unitPoint(led, ...(front ? add(g.resIn, [0, -1.15])
+                                 : isClk ? add(g.resIn, [0, -1.15])
+                                 : add(g.viaB, [0, -0.85])));
     const pg = unitPoint(led, ...(front ? add(g.viaF, [0, -0.85]) : add(g.ledK, [0, 1.35])));
     c.fillStyle = state.mask === "white" ? "#444" : "rgba(255,255,255,.8)";
     const clearOfPads = pt => !activePads().some(p => Math.hypot(p[0] - pt[0], p[1] - pt[1]) < 2.6);
-    if (clearOfPads(p3)) c.fillText("3V3", tx(p3[0]), mm2px(p3[1]));
+    if (clearOfPads(p3)) c.fillText(isClk ? "CLK" : "3V3", tx(p3[0]), mm2px(p3[1]));
     if (clearOfPads(pg)) c.fillText("GND", tx(pg[0]), mm2px(pg[1]));
   }
 
@@ -3311,7 +4083,7 @@ function draw() {
   if (ready) { dirty = true; scheduleAutosave(); }
   // Every edit funnels through here, so this is the one place that can promise
   // the handles, the arrow keys and Delete are all still aimed at the object
-  // the user picked — whatever spliced, swapped or replaced the lists since.
+  // the user picked, whatever spliced, swapped or replaced the lists since.
   reconcileSelection();
   updateView();
   drawView(cvF, "front");
@@ -3335,21 +4107,34 @@ const NODE_HINT_R = 1.6;
 function traceNodeHint(mx, my) {
   for (let i = state.leds.length - 1; i >= 0; i--) {
     const L = state.leds[i];
-    if (!L.adv) continue;
+    const isClk = clkActive() && L.clk;
+    if (!L.adv && !isClk) continue;
     // Every trace this free-place unit owns: the via-less run, the
-    // resistor-to-anode link, and (with the via kept) the pad-to-via stub.
+    // resistor-to-anode link, (with the via kept) the pad-to-via stub, and
+    // a CLK unit's supply run. A back CLK unit's run IS its noviaRoute, but
+    // its bends live in cnodes, so it files under "c". The supply run is
+    // bendable WITHOUT free placement, like the jumper's links: it is the
+    // only shapeable copper the blink option itself adds.
     const traces = [];
-    if (L.novia) {
+    const backClk = isClk && L.side === "back";
+    if (L.novia || backClk) {
       const r = noviaRoute(L);
       if (r && !r.direct && r.pts.length > 1) {
-        traces.push(["run", r.pts, r.owners]);
+        const key = backClk ? "c" : "run";
+        if (L.adv || key === "c") traces.push([key, r.pts, r.owners]);
       }
-    } else {
+    } else if (L.adv) {
       const v = unitTracePts(L, "v");
       traces.push(["v", v.pts, v.owners]);
     }
-    const a = unitTracePts(L, "a");
-    traces.push(["a", a.pts, a.owners]);
+    if (isClk && L.side !== "back") {
+      const cr = clkRoute(L);
+      if (cr && cr.pts.length > 1) traces.push(["c", cr.pts, cr.owners]);
+    }
+    if (L.adv) {
+      const a = unitTracePts(L, "a");
+      traces.push(["a", a.pts, a.owners]);
+    }
     for (const [key, pts, owners] of traces) {
       const bends = L[NODE_KEYS[key]] || [];
       if (bends.length >= 8) continue; // the server keeps at most 8
@@ -3366,6 +4151,31 @@ function traceNodeHint(mx, my) {
           // segment back to a slot in the bend list before offering there.
           const slot = owners ? owners[k] : k;
           return { index: i, trace: key, leg: slot, x: cx, y: cy, side: L.side };
+        }
+      }
+    }
+  }
+  { // the jumper's routed links: bendable with no "free placement" gate
+    const ci = clkActive() && state.clk.jumper ? clkInfo() : null;
+    if (ci && ci.jumper) {
+      const traces = [];
+      const lk = clkLink();
+      if (lk && lk.pts.length > 1) traces.push(["link", lk.pts, lk.owners]);
+      const v3l = clkV3Link();
+      if (v3l && v3l.pts.length > 1) traces.push(["v3", v3l.pts, v3l.owners]);
+      for (const [key, pts, owners] of traces) {
+        const bends = state.clk[JNODE_KEYS[key]] || [];
+        if (bends.length >= 8) continue; // the server keeps at most 8
+        if (bends.some(([nx, ny]) =>
+            Math.sqrt((mx - nx) ** 2 + (my - ny) ** 2) < 0.9)) continue;
+        for (let k = 0; k + 1 < pts.length; k++) {
+          const s0 = pts[k], s1 = pts[k + 1];
+          const cx = (s0[0] + s1[0]) / 2, cy = (s0[1] + s1[1]) / 2;
+          if (Math.hypot(mx - cx, my - cy) < NODE_HINT_R) {
+            const slot = owners ? owners[k] : k;
+            return { jumper: true, trace: key, leg: slot, x: cx, y: cy,
+                     side: ci.side };
+          }
         }
       }
     }
@@ -3393,6 +4203,21 @@ function selectionInfo() {
       knob: unitPoint(L, mid, bb[1] - 16 / SCALE),
       resizable: false, rotatable: true,
     };
+  }
+  if (selected.kind === "jumper" && clkActive() && state.clk.jumper) {
+    const ci = clkInfo();
+    const [jx, jy, rot] = ci.jumper;
+    const q = [[-2.4, -1.05], [2.4, -1.05], [2.4, 1.05], [-2.4, 1.05]]
+      .map(([qx, qy]) => {
+        const [rx, ry] = rotOff(qx, qy, rot);
+        return [jx + rx, jy + ry];
+      });
+    const xs = q.map(v => v[0]), ys = q.map(v => v[1]);
+    const [sx, sy] = rotOff(0, -1.05, rot);
+    const [kx, ky] = rotOff(0, -1.05 - 16 / SCALE, rot);
+    return { sb: [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)],
+             poly: q, stem: [jx + sx, jy + sy], knob: [jx + kx, jy + ky],
+             resizable: false, rotatable: true };
   }
   if ((selected.kind === "ledres" || selected.kind === "ledbody" || selected.kind === "ledvia")
       && state.leds[selected.index] && state.leds[selected.index].adv) {
@@ -3463,7 +4288,7 @@ function boardCoords(cv, e, mirror) {
 }
 function attachPointer(cv, side) {
   const mirror = side === "back";
-  // Same-side items win, but everything is grabbable from either view —
+  // Same-side items win, but everything is grabbable from either view:
   // positions are board coordinates throughout, so dragging a back LED's
   // dashed ghost on the front view just works.
   const hitAt = (mx, my) => {
@@ -3482,7 +4307,8 @@ function attachPointer(cv, side) {
       // shadow the other forever.
       if (sameSide && selectedRef && state.leds.includes(selectedRef)) {
         const L = selectedRef;
-        if (L.side === side && L.novia) {
+        if (L.side === side && L.novia
+            && !(clkActive() && L.clk && L.side === "back")) {
           const nvr = noviaRoute(L);
           if (nvr && !nvr.direct && nvr.pts.length > 1) {
             const [ex, ey] = nvr.pts[nvr.pts.length - 1];
@@ -3496,7 +4322,9 @@ function attachPointer(cv, side) {
       for (let i = state.leds.length - 1; i >= 0; i--) {
         const L = state.leds[i];
         if ((L.side === side) !== sameSide) continue;
-        if (L.novia && sameSide) { // the trace's draggable endpoint
+        if (L.novia && sameSide
+            && !(clkActive() && L.clk && L.side === "back")) {
+          // the trace's draggable endpoint (a back CLK run's end is fixed)
           const nvr = noviaRoute(L);
           if (nvr && !nvr.direct && nvr.pts.length > 1) {
             const [ex, ey] = nvr.pts[nvr.pts.length - 1];
@@ -3505,8 +4333,10 @@ function attachPointer(cv, side) {
             }
           }
         }
-        if (L.adv && sameSide) { // hand-placed trace bends, on any trace
-          for (const key of ["run", "a", "v"]) {
+        if (sameSide) { // hand-placed trace bends, on any trace
+          const keys = L.adv ? ["run", "a", "v", "c"]
+            : (clkActive() && L.clk ? ["c"] : []);
+          for (const key of keys) {
             const list = L[NODE_KEYS[key]] || [];
             for (let n = list.length - 1; n >= 0; n--) {
               const [nx, ny] = list[n];
@@ -3539,6 +4369,37 @@ function attachPointer(cv, side) {
     };
     const hit = textHit() || ledHit(true);
     if (hit) return hit;
+    if (clkActive() && state.clk.jumper
+        && side === (state.clk.side === "back" ? "back" : "front")) {
+      // The CLK jumper drags like a part, on the face it is mounted on;
+      // its link bends grab before its body, like a unit's bends do.
+      const ci = clkInfo();
+      if (ci && ci.jumper) {
+        const v3l = clkV3Link();
+        if (v3l && v3l.pts.length > 1) {
+          const [ex, ey] = v3l.pts[v3l.pts.length - 1];
+          if (Math.hypot(mx - ex, my - ey) < 0.9) {
+            return { kind: "jumperterm", index: 0, x: ex, y: ey,
+                     side: ci.side };
+          }
+        }
+        for (const key of ["link", "v3"]) {
+          const list = state.clk[JNODE_KEYS[key]] || [];
+          for (let n = list.length - 1; n >= 0; n--) {
+            const [nx, ny] = list[n];
+            if (Math.hypot(mx - nx, my - ny) < 0.9) {
+              return { kind: "jumpernode", index: 0, trace: key, node: n,
+                       x: nx, y: ny, side: ci.side };
+            }
+          }
+        }
+        const [jx, jy, rot] = ci.jumper;
+        const [ux, uy] = rotOff(mx - jx, my - jy, -rot);
+        if (Math.abs(ux) < 2.4 && Math.abs(uy) < 1.2) {
+          return { kind: "jumper", index: 0, x: jx, y: jy, side: ci.side };
+        }
+      }
+    }
     for (let i = state.art.length - 1; i >= 0; i--) {
       const a = state.art[i];
       const d = artDims(a);
@@ -3610,7 +4471,7 @@ function attachPointer(cv, side) {
         } else {
           picking = null;
           renderArtList();
-          setStatus("That click was outside the layer — pick cancelled.", true);
+          setStatus("That click was outside the layer. Pick cancelled.", true);
         }
       } else {
         picking = null;
@@ -3626,6 +4487,7 @@ function attachPointer(cv, side) {
                  || selected.kind === "ledbody") && state.leds[selected.index];
       if (h.type === "rotate") {
         let rot0 = (a ? a.rot : L ? L.rot : el ? el.rot : 0) || 0;
+        if (selected.kind === "jumper") rot0 = state.clk.rot || 0;
         if (L && L.adv && selected.kind === "ledres") rot0 = (L.rot || 0) + (L.adv.rrot || 0);
         if (L && L.adv && selected.kind === "ledbody") rot0 = (L.rot || 0) + (L.adv.lrot || 0);
         drag = {
@@ -3652,18 +4514,39 @@ function attachPointer(cv, side) {
       return;
     }
     const onHandle = hitAt(mx, my);
-    const plus = onHandle && onHandle.kind !== "led" ? null
+    const plus = onHandle && onHandle.kind !== "led"
+        && onHandle.kind !== "jumper" && onHandle.kind !== "shapeel" ? null
       : (nodeHint && nodeHint.side === (mirror ? "back" : "front")
          ? nodeHint : (nodeHint && traceNodeHint(mx, my)));
     if (plus && Math.sqrt((mx - plus.x) ** 2 + (my - plus.y) ** 2) < NODE_HINT_R) {
+      if (plus.jumper) {
+        const kk = JNODE_KEYS[plus.trace || "link"];
+        state.clk[kk] = [...(state.clk[kk] || [])];
+        // The owner slot indexes the bends list; on an auto route (no bends
+        // yet) it indexes the route's legs instead, so clamp to the list.
+        const at = Math.min(plus.leg, state.clk[kk].length);
+        state.clk[kk].splice(at, 0, [plus.x, plus.y]);
+        setSelection("jumpernode", 0, plus.side);
+        if (selected) { selected.trace = plus.trace || "link"; selected.node = at; }
+        drag = { kind: "jumpernode", trace: plus.trace,
+                 node: at, dx: 0, dy: 0 };
+        nodeHint = null;
+        cv.setPointerCapture(e.pointerId);
+        cv.style.cursor = "grabbing";
+        draw();
+        return;
+      }
       const L = state.leds[plus.index];
       const kk = NODE_KEYS[plus.trace || "run"];
       L[kk] = [...(L[kk] || [])];
-      L[kk].splice(plus.leg, 0, [plus.x, plus.y]);
+      // Same clamp as the jumper branch: an auto route's owner slots index
+      // its legs, not the (possibly empty) bends list.
+      const at = Math.min(plus.leg, L[kk].length);
+      L[kk].splice(at, 0, [plus.x, plus.y]);
       setSelection("lednode", plus.index, L.side);
-      if (selected) { selected.trace = plus.trace || "run"; selected.node = plus.leg; }
+      if (selected) { selected.trace = plus.trace || "run"; selected.node = at; }
       drag = { kind: "lednode", index: plus.index, trace: plus.trace,
-               node: plus.leg, dx: 0, dy: 0 };
+               node: at, dx: 0, dy: 0 };
       nodeHint = null;
       cv.setPointerCapture(e.pointerId);
       cv.style.cursor = "grabbing";
@@ -3678,6 +4561,10 @@ function attachPointer(cv, side) {
       selected.trace = hit.trace || "run";
       selected.node = hit.node;
     }
+    if (hit && hit.kind === "jumpernode" && selected) {
+      selected.trace = hit.trace || "link";
+      selected.node = hit.node;
+    }
     if (hit) {
       drag = { kind: hit.kind, index: hit.index, trace: hit.trace,
                node: hit.node, dx: hit.x - mx, dy: hit.y - my };
@@ -3685,6 +4572,11 @@ function attachPointer(cv, side) {
         // Enumerate the legal destinations once, at pick-up: the move
         // handler snaps to the nearest of these and nothing else.
         drag.cands = noviaTermTargets(state.leds[hit.index]);
+      }
+      if (hit.kind === "jumperterm") {
+        drag.cands = PADS
+          .filter(q => padNetEff(q[2]) === "3V3" && pinOn(q[4]))
+          .map(q => ({ pin: q[4], x: q[0], y: q[1] }));
       }
       cv.setPointerCapture(e.pointerId);
       cv.style.cursor = "grabbing";
@@ -3719,7 +4611,14 @@ function attachPointer(cv, side) {
         // part, the endpoint): the internal traces run right between the
         // parts a free-place user is there to drag.
         const under = hitAt(hx, hy);
-        const nh = (!under || under.kind === "led") ? traceNodeHint(hx, hy) : null;
+        // The "+" yields to anything individually grabbable, but not to the
+        // broad-area objects a trace inevitably crosses: a unit's own body,
+        // the jumper's body, and the custom shape part that IS the board
+        // (on a custom outline it sits under every trace, and swallowing
+        // the hint there made bends unreachable anywhere off a part).
+        const nh = (!under || under.kind === "led" || under.kind === "jumper"
+                    || under.kind === "shapeel")
+          ? traceNodeHint(hx, hy) : null;
         const shown = nh && nh.side === wantSide ? nh : null;
         if ((shown && shown.x) !== (nodeHint && nodeHint.x)
             || (shown && shown.index) !== (nodeHint && nodeHint.index)) {
@@ -3747,7 +4646,7 @@ function attachPointer(cv, side) {
       }
     } else if (drag.kind === "ledterm") {
       // The endpoint follows the cursor by snapping to the nearest legal
-      // destination — it can never be dropped in open space, so the trace
+      // destination; it can never be dropped in open space, so the trace
       // always ends somewhere real.
       const L = state.leds[drag.index];
       if (L && drag.cands && drag.cands.length) {
@@ -3758,11 +4657,46 @@ function attachPointer(cv, side) {
         }
         if (best) L.term = { ...best.term };
       }
+    } else if (drag.kind === "jumperterm") {
+      // The endpoint snaps to the nearest kept 3V3 pin; it can never be
+      // dropped in open space, so the trace always ends on a plated hole.
+      if (drag.cands && drag.cands.length) {
+        let best = null, bd = Infinity;
+        for (const cand of drag.cands) {
+          const d2 = (cand.x - mx) ** 2 + (cand.y - my) ** 2;
+          if (d2 < bd) { bd = d2; best = cand; }
+        }
+        if (best) state.clk.v3pin = best.pin;
+      }
+    } else if (drag.kind === "jumper") {
+      const ob = outlineBounds();
+      const nx = Math.min(Math.max(mx + drag.dx, ob[0] + 1), ob[2] - 1);
+      const ny = Math.min(Math.max(my + drag.dy, ob[1] + 1), ob[3] - 1);
+      if (jumperConflict()) {
+        // Already stranded (a unit landed on it, or the shape changed):
+        // move freely so the user can pull it somewhere legal.
+        state.clk.x = nx; state.clk.y = ny;
+      } else {
+        const cx = state.clk.x != null ? state.clk.x : JUMPER_AT[0];
+        const cy = state.clk.y != null ? state.clk.y : JUMPER_AT[1];
+        // Slide along units / pads / board holes rather than entering them.
+        for (const [txx, tyy] of [[nx, ny], [nx, cy], [cx, ny]]) {
+          if (jumperOkAt(txx, tyy)) { state.clk.x = txx; state.clk.y = tyy; break; }
+        }
+      }
     } else if (drag.kind === "lednode") {
       const L = state.leds[drag.index];
       const kk = NODE_KEYS[drag.trace || "run"];
       if (L && L[kk] && L[kk][drag.node]) {
         L[kk] = L[kk].map((n, k) => k === drag.node
+          ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, mx + drag.dx)),
+             Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, my + drag.dy))]
+          : n);
+      }
+    } else if (drag.kind === "jumpernode") {
+      const kk = JNODE_KEYS[drag.trace || "link"];
+      if (state.clk[kk] && state.clk[kk][drag.node]) {
+        state.clk[kk] = state.clk[kk].map((n, k) => k === drag.node
           ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, mx + drag.dx)),
              Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, my + drag.dy))]
           : n);
@@ -3783,7 +4717,7 @@ function attachPointer(cv, side) {
       if (L && L.adv) {
         // Move ONLY the LED: the anchor shifts, and the unit-frame offsets
         // are counter-shifted so the resistor and via stay put on the board.
-        // Clamp by the LED's own extents — the full-envelope clamp would
+        // Clamp by the LED's own extents; the full-envelope clamp would
         // let the pinned parts push the LED around.
         const s = unitSafe();
         const [phx, phy] = partHalf(L, "led");
@@ -3826,6 +4760,8 @@ function attachPointer(cv, side) {
       if (drag.tkind === "led") {
         const L = state.leds[drag.index];
         if (L) { L.rot = rot; [L.x, L.y] = clampLedFor(L, L.x, L.y); }
+      } else if (drag.tkind === "jumper") {
+        state.clk.rot = rot;
       } else if (drag.tkind === "ledres" || drag.tkind === "ledbody") {
         const L = state.leds[drag.index];
         if (L && L.adv) {
@@ -3840,7 +4776,7 @@ function attachPointer(cv, side) {
           a.rot = rot;
           if (isShapeArt(a)) { draw(); return; }
           applyTransform(a);
-          // Reclassifying is the pricey part (SVG previews especially) —
+          // Reclassifying is the pricey part (SVG previews especially):
           // throttle it; the release does a final exact rebuild.
           const now = performance.now();
           if (!drag.lastRebuild || now - drag.lastRebuild > 120) {
@@ -3881,6 +4817,10 @@ function attachPointer(cv, side) {
   });
   cv.addEventListener("pointerup", () => {
     if (!drag) return;
+    _noviaCache = new Map(); _noviaPrev = new Map();
+    _clkCache = new Map(); _clkPrev = new Map();
+    _linkCache = { sig: null, route: null };
+    _v3LinkCache = { sig: null, route: null };
     const wasShape = draggingPart();
     const wasText = drag.kind === "text"
       || drag.kind === "resize" && drag.tkind === "text";
@@ -3919,15 +4859,16 @@ function attachPointer(cv, side) {
     const [mx, my] = boardCoords(cv, e, mirror);
     const hit = hitAt(mx, my); // ghosts rotate from either view too
     if (!hit) return;
-    if (hit.kind === "lednode") {
-      const L = state.leds[hit.index];
-      const kk = NODE_KEYS[hit.trace || "run"];
-      L[kk] = (L[kk] || []).filter((_n, k) => k !== hit.node);
-      if (!L[kk].length) delete L[kk];
-      if (selected && selected.kind === "lednode" && selectedRef === L) {
-        clearSelection(); // the dot it named is gone or renumbered
-      }
-      renderLedList(); draw();
+    if (hit.kind === "lednode" || hit.kind === "jumpernode") {
+      // Bends are removed by selecting the dot and pressing Delete; a
+      // double-click removal here fought the click-to-select and the
+      // grab-to-drag on the very same dot, and misfired more than it hit.
+      return;
+    }
+    if (hit.kind === "jumperterm") {
+      // Back to the automatic choice: the nearest kept 3V3 pin.
+      state.clk.v3pin = null;
+      draw();
       return;
     }
     if (hit.kind === "ledterm") {
@@ -3945,6 +4886,13 @@ function attachPointer(cv, side) {
         renderLedList();
         draw();
       }
+      return;
+    }
+    if (hit.kind === "jumper") {
+      state.clk.rot = (Math.round(state.clk.rot || 0) + 90) % 360;
+      relocateJumper(); // a quarter turn can swing a label off the board
+      draw();
+      m3dStale("CLK jumper rotated");
       return;
     }
     if (hit.kind === "led") {
@@ -3996,31 +4944,40 @@ const pairHTML = (cls, min, max, step, val) => `
     <div style="flex:1"><input type="range" class="${cls}" min="${min}" max="${max}" step="${step}" value="${val}"></div>
     <input type="number" class="${cls}n" min="${min}" max="${max}" step="${step}" value="${val}">
   </div>`;
-function bindPair(root, cls, apply) {
+function bindPair(root, cls, apply, wrap) {
   const s = root.querySelector("." + cls);
   if (!s) return;
   const n = root.querySelector("." + cls + "n");
   s.oninput = () => { n.value = s.value; apply(+s.value); };
   n.oninput = () => {
-    const v = Math.min(+s.max, Math.max(+s.min, parseFloat(n.value)));
+    let v = parseFloat(n.value);
     if (!isFinite(v)) return;
+    // Angles wrap (720° is two full turns, i.e. 0°); plain sizes clamp.
+    v = wrap ? ((v % 360) + 360) % 360 : Math.min(+s.max, Math.max(+s.min, v));
     s.value = v;
     apply(v);
   };
-  n.onblur = () => { n.value = s.value; }; // snap the display back into range
+  // Snap the display to the accepted value on commit (Enter as well as
+  // blur): a box still showing -5 while the design uses 3 is a lie.
+  n.onchange = n.onblur = () => { n.value = s.value; };
 }
 
 const WAND_MATS = { ignore: "Ignore (mask)", ...MATERIALS };
 let picking = null; // {index, material} while a magic-wand pick is armed
-let selected = null; // {kind, index, side} — last clicked object, for keyboard nudge/delete
+let selected = null; // {kind, index, side}: last clicked object, for keyboard nudge/delete
 // `selected.index` names a slot in one of the design arrays, and every splice,
 // swap or duplicate moves the objects between those slots. Remembering WHICH
 // object was picked lets the index be re-derived (or the selection dropped)
-// after any list edit — without that, deleting or reordering a card silently
+// after any list edit; without that, deleting or reordering a card silently
 // hands the arrow keys and the Delete key an object the user never picked.
 let selectedRef = null;
 const SEL_LIST = { text: () => state.texts, art: () => state.art,
-                   shapeel: () => state.shape.elements };
+                   shapeel: () => state.shape.elements,
+                   // the CLK jumper is a singleton; state.clk is a stable
+                   // reference, so reconcileSelection keeps working
+                   jumper: () => [state.clk],
+                   jumpernode: () => [state.clk],
+                   jumperterm: () => [state.clk] };
 // led / ledres / ledvia / ledbody / lednode / ledterm are all parts of one
 // LED unit.
 const selList = kind => (SEL_LIST[kind] || (() => state.leds))();
@@ -4044,11 +5001,20 @@ function reconcileSelection() {
   }
   if (selected.kind === "lednode") {
     // A bend selection also names a slot in one of the unit's bend lists;
-    // lists shrink out from under it (double-click removal, novia/adv
+    // lists shrink out from under it (Delete-key removal, novia/adv
     // toggles), and a stale slot would hand Delete a dot never picked.
     const L = state.leds[selected.index];
     const bends = L ? (L[NODE_KEYS[selected.trace || "run"]] || []) : [];
     if (selected.node == null || selected.node >= bends.length) clearSelection();
+  }
+  if (selected.kind === "jumpernode") {
+    const bends = state.clk[JNODE_KEYS[selected.trace || "link"]] || [];
+    if (selected.node == null || selected.node >= bends.length
+        || !clkActive() || !state.clk.jumper) clearSelection();
+  }
+  if (selected.kind === "jumperterm" && !(clkActive() && state.clk.jumper
+      && clkV3Link())) {
+    clearSelection(); // the trace whose end it named is gone
   }
 }
 // The single door out of the design arrays. Deleting through it is what keeps
@@ -4056,7 +5022,7 @@ function reconcileSelection() {
 // as a deletion (undo would splice `undefined` back in and every later draw
 // would throw), and the selection never outlives the object it named.
 // Unit-terminal references are indices into state.leds, so removing or
-// restoring a unit has to renumber them — otherwise deleting LED 2 silently
+// restoring a unit has to renumber them; otherwise deleting LED 2 silently
 // rewires every trace that ended on LED 3.
 function remapTerms(at, delta) {
   for (const L of state.leds) {
@@ -4095,7 +5061,7 @@ function renderArtList() {
     if (!usesBare(a) && a.side === "through") a.side = "front";
     const through = usesBare(a)
       ? opt("through", "Through", a.side || "front") : "";
-    return `<select class="aside" title="Which face this layer lives on${usesBare(a) ? " — Through opens the bare window on both faces and cuts copper from both; one face leaves the other side untouched" : ""}">
+    return `<select class="aside" title="Which face this layer lives on${usesBare(a) ? ". Through opens the bare window on both faces and cuts copper from both; one face leaves the other side untouched" : ""}">
       ${opt("front", "Front", a.side || "front")}${opt("back", "Back", a.side || "front")}${through}</select>`;
   };
   state.art.forEach((a, i) => {
@@ -4142,7 +5108,7 @@ function renderArtList() {
         renderArtList(); draw();
       };
       div.querySelector(".aside").onchange = e => { a.side = e.target.value; draw(); };
-      bindPair(div, "rots", v => { a.rot = v; draw(); });
+      bindPair(div, "rots", v => { a.rot = v; draw(); }, true);
       bindPair(div, "sd", v => { a.sides = Math.round(v); draw(); });
       bindPair(div, "wd", v => { a.wmm = v; draw(); });
       bindPair(div, "hh", v => { a.h = v; draw(); });
@@ -4174,20 +5140,20 @@ function renderArtList() {
         <div><select class="mode" title="Mode">${opt("palette", "By color (assign materials)", a.mode)}${opt("threshold", "Threshold (single material)", a.mode)}</select></div>
         <div style="flex:0 0 96px">${sideSelectHTML(a)}</div>
       </div>
-      ${a.mode === "palette" ? paletteRows + `<div class="sub">The ${MAX_PAL} strongest colors are kept; everything else merges into the nearest swatch — use the wand to retarget.</div>` : `
+      ${a.mode === "palette" ? paletteRows + `<div class="sub">The ${MAX_PAL} strongest colors are kept; everything else merges into the nearest swatch; use the wand to retarget.</div>` : `
         <div style="margin-top:6px"><select class="m" title="Material">${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, a.material)).join("")}</select></div>
         <div class="sub">Threshold <span class="tv">${a.threshold}</span></div>
         <input type="range" class="th" min="1" max="254" value="${a.threshold}">
         <div class="check"><input type="checkbox" class="inv" id="inv${i}"${a.invert ? " checked" : ""}><label for="inv${i}">Invert</label></div>`}
       <div class="sub">Width (mm)</div>
       ${pairHTML("wd", 3, 119, 0.5, a.wmm)}
-      <div class="sub">Rotation (&deg;, clockwise) — double-click the layer for +90</div>
+      <div class="sub">Rotation (&deg;, clockwise); double-click the layer on the board for +90</div>
       ${pairHTML("rots", 0, 359, 1, a.rot)}
       <div class="row" style="margin-top:6px">
         <div><button class="tool flipb">${a.flip ? "Unmirror" : "Mirror"}</button></div>
         <div><button class="tool repb" title="Swap the picture, keep position/size/transform">Change image…</button></div>
       </div>
-      <div class="sub">Magic wand — retarget one connected region <button class="qm" tabindex="-1" data-tip="wand" title="How the wand works">?</button></div>
+      <div class="sub">Magic wand: retarget one connected region <button class="qm" tabindex="-1" data-tip="wand" title="How the wand works">?</button></div>
       <div class="row">
         <div><select class="wandm">${Object.entries(WAND_MATS).map(([v, l]) => opt(v, l, "bare")).join("")}</select></div>
         <div><button class="tool wandb">Pick region</button></div>
@@ -4250,7 +5216,7 @@ function renderArtList() {
     bindPair(div, "rots", v => {
       a.rot = v;
       applyTransform(a); rebuildArt(a); draw();
-    });
+    }, true);
     div.querySelector(".flipb").onclick = () => {
       a.flip = !a.flip;
       applyTransform(a); rebuildArt(a); renderArtList(); draw();
@@ -4262,7 +5228,7 @@ function renderArtList() {
       picking = { index: i, material: div.querySelector(".wandm").value };
       e.target.classList.add("armed");
       (need === "back" ? cvB : cvF).style.cursor = "crosshair";
-      setStatus(`Hover the ${need.toUpperCase()} view — the region under the cursor lights up; click to retarget it. (Esc cancels)`);
+      setStatus(`Hover the ${need.toUpperCase()} view: the region under the cursor lights up; click to retarget it. (Esc cancels)`);
     };
     for (const sel of div.querySelectorAll(".ovm")) {
       sel.onchange = e => {
@@ -4307,7 +5273,7 @@ function renderArtList() {
 // These describe a problem that lasts until the design is fixed (a part off
 // the board, text over a pad, artwork that resolves to nothing). They live
 // in the work-area toast stack rather than inline in the editor cards, so
-// they stay visible whichever panel is open — and while the 3D view is up.
+// they stay visible whichever panel is open, and while the 3D view is up.
 const WARN_PANEL = { led: "leds", text: "text", art: "art", shapeel: "shape", pins: "shape" };
 const WARN_LIST = { led: "ledlist", text: "textlist", art: "artlist", shapeel: "shapeopts", pins: "pingrid" };
 // Clicking a warning takes you to the part it is about.
@@ -4315,6 +5281,12 @@ function revealItem(kind, i) {
   // The whole-outline warning has no single part to blame (i = -1): it just
   // opens the shape panel.
   if ((kind === "shapeel" || kind === "pins") && i < 0) { showPanel("shape"); return; }
+  if (kind === "jumper") { // the CLK jumper: select it and show its panel
+    setSelection("jumper", 0, state.clk.side === "back" ? "back" : "front");
+    showPanel("leds");
+    draw();
+    return;
+  }
   const item = { led: state.leds, text: state.texts, art: state.art,
                  shapeel: state.shape.elements }[kind][i];
   if (!item) return;
@@ -4330,7 +5302,7 @@ function textWarnings(t) {
   const msgs = [];
   if (/[^ -ÿ‐-―‘-‟•…°]/.test(t.text)) {
     // The stroke font prints these as boxes. The bundled typefaces are Latin
-    // only and drop them outright — the browser renders an emoji here through
+    // only and drop them outright; the browser renders an emoji here through
     // its own fallback, so without this warning the preview shows something
     // that never reaches the board.
     msgs.push(!t.font || t.font === "kicad"
@@ -4339,8 +5311,8 @@ function textWarnings(t) {
         + "board entirely, even though the preview shows them.");
   }
   if (t.text.trim() && textOverParts(t)) {
-    msgs.push("This text overlaps a part or pad — the fab clips that area, and "
-      + "KiCad's DRC reports it as a silkscreen warning.");
+    msgs.push("This text overlaps a part or pad; the overlapping area is "
+      + "clipped away and won't print there.");
   }
   if (t.text.trim() && !textOnSolidBoard(t)) {
     msgs.push("Part of this text hangs over the board edge or a hole, where "
@@ -4364,16 +5336,36 @@ function blockingProblems() {
     out.push([`the connector has no ${rails.join(" or ")} pin left`, "pins", -1]);
   }
   state.leds.forEach((L, i) => {
-    const r = L.novia ? noviaRoute(L) : null;
+    const backClk = clkActive() && L.clk && L.side === "back";
+    const r = L.novia && !backClk ? noviaRoute(L) : null;
     if (r && r.tight) {
       out.push([r.manual ? `LED ${i + 1} has a trace bend too close to other copper`
                 : r.term ? `LED ${i + 1} has no clear path to its chosen trace end`
                 : `LED ${i + 1} can't reach its power without a via`, "led", i]);
     }
+    if (clkActive() && L.clk) {
+      const cr = L.side !== "back" ? clkRoute(L) : noviaRoute(L);
+      if (cr && cr.tight) {
+        out.push([cr.manual
+          ? `LED ${i + 1} has a CLK trace bend too close to other copper`
+          : `LED ${i + 1}'s CLK supply trace has no clear path`, "led", i]);
+      }
+    }
   });
+  if (state.leds.some(L => L.clk) && !pinOn("9")) {
+    out.push(["an LED blinks with CLK but connector pin 9 is dropped", "pins", -1]);
+  }
+  {
+    const lk = clkLink();
+    if (lk && lk.tight) out.push(["the CLK jumper can't reach pin 9", "led", -1]);
+    const v3l = clkV3Link();
+    if (v3l && v3l.tight) {
+      out.push(["the jumper's 3V3 trace can't reach a 3V3 pin", "led", -1]);
+    }
+  }
   state.texts.forEach((t, i) => {
     // Silk that leaves the board is not printed at all, and KiCad's DRC
-    // flags it — the preview clips it, so the export must not ship it.
+    // flags it; the preview clips it, so the export must not ship it.
     if (t.text.trim() && !textOnSolidBoard(t)) {
       out.push([`Text ${i + 1} hangs over the board edge or a hole`, "text", i]);
     }
@@ -4386,37 +5378,51 @@ function blockingProblems() {
 function refreshWarnings() {
   const want = []; // [key, label, message, kind, index]
   state.leds.forEach((L, i) => {
-    // Same red halo, two different causes — say which one it is now that
+    // Same red halo, two different causes; say which one it is now that
     // the message is no longer sitting next to the unit's own card.
     if (!unitInsideBoard(L)) {
       want.push([`w:led-fit-${i}`, `LED ${i + 1}`,
-        "no solid board under this unit (outlined red) — drag it somewhere "
+        "no solid board under this unit (outlined red); drag it somewhere "
         + "with room, or adjust the shape. Downloads will fail until it fits.",
         "led", i]);
     } else if (padConflict(L)) {
       want.push([`w:led-fit-${i}`, `LED ${i + 1}`,
-        "this unit sits on a connector pad pair (outlined red) — drag it clear. "
+        "this unit sits on a connector pad pair (outlined red); drag it clear. "
         + "Downloads will fail until it does.", "led", i]);
     }
-    if (L.novia) {
+    const backClk = clkActive() && L.clk && L.side === "back";
+    if (L.novia && !backClk) {
       const r = noviaRoute(L);
       if (r && r.tight) {
         want.push([`w:led-novia-${i}`, `LED ${i + 1}`, r.manual
-          ? "a trace bend runs too close to other copper — drag it clear, or "
-            + "double-click it to remove. Downloads are blocked until it is."
+          ? "a trace bend runs too close to other copper; drag it clear, or "
+            + "select it and press Delete. Downloads are blocked until it is."
           : r.term
-          ? "no clear path to the chosen trace end — drag the endpoint "
+          ? "no clear path to the chosen trace end; drag the endpoint "
             + "somewhere else, or double-click it to go back to the nearest "
             + "pad. Downloads are blocked until it routes."
-          : "can't reach its power without a via from here — move it, switch the "
+          : "can't reach its power without a via from here; move it, switch the "
             + "power via back on, or turn on the other connector row. Downloads are "
             + "blocked until it can.", "led", i]);
+      }
+    }
+    if (clkActive() && L.clk) {
+      const cr = L.side !== "back" ? clkRoute(L) : noviaRoute(L);
+      if (cr && cr.tight) {
+        want.push([`w:led-clk-${i}`, `LED ${i + 1}`, cr.manual
+          ? "a CLK trace bend runs too close to other copper; drag it clear, "
+            + "or select it and press Delete. Downloads are blocked until it is."
+          : "its CLK supply trace has no clear path to "
+            + (state.clk.jumper ? "the jumper; move the LED or the jumper"
+                                : "pin 9; move the LED")
+            + ", or turn its blink option off. Downloads are blocked until "
+            + "it routes.", "led", i]);
       }
     }
     if (L.adv && advConflict(L)) {
       want.push([`w:led-adv-${i}`, `LED ${i + 1}`,
         "this placement puts copper on different nets too close together (or "
-        + "over the hole) — KiCad's DRC will fail. Pull the resistor, via, or "
+        + "over the hole); KiCad's DRC will fail. Pull the resistor, via, or "
         + "traces apart.", "led", i]);
     }
   });
@@ -4427,7 +5433,7 @@ function refreshWarnings() {
   state.art.forEach((a, i) => {
     if (a.empty) {
       want.push([`w:art-${i}`, `Layer ${i + 1}`,
-        "nothing visible at these settings — try Invert or a different threshold.",
+        "nothing visible at these settings; try Invert or a different threshold.",
         "art", i]);
     }
   });
@@ -4439,37 +5445,88 @@ function refreshWarnings() {
   const rails = powerMissing();
   if (rails.length && state.leds.length) {
     want.push(["w:pins", "Connector", `no ${rails.join(" or ")} pin left, so the `
-      + `LED${state.leds.length > 1 ? "s have" : " has"} nothing to run on — `
+      + `LED${state.leds.length > 1 ? "s have" : " has"} nothing to run on; `
       + "put one back, or remove the LEDs. Downloads are blocked until then.",
       "pins", -1]);
+  }
+  if (state.leds.some(L => L.clk) && !pinOn("9")) {
+    want.push(["w:clkpin", "Connector",
+      "an LED is set to blink with CLK, but pin 9 (CLK) is dropped; put it "
+      + "back or turn the blink option off. Downloads are blocked until then.",
+      "pins", -1]);
+  }
+  {
+    const lk = clkLink();
+    if (lk && lk.tight) {
+      want.push(["w:clklink", "CLK jumper", lk.manual
+        ? "a bend on its pin-9 trace runs too close to other copper; drag "
+          + "it clear, or select it and press Delete. Downloads are blocked "
+          + "until it is."
+        : "the jumper's CLK pad has no clear path to pin 9; drag the jumper "
+          + "(or the LEDs in the way) clear. Downloads are blocked until it "
+          + "routes.", "jumper", -1]);
+    }
+    const v3l = clkV3Link();
+    if (v3l && v3l.tight) {
+      want.push(["w:clkv3link", "CLK jumper", v3l.manual
+        ? "a bend on its 3V3 trace runs too close to other copper; drag it "
+          + "clear, or select it and press Delete. Downloads are blocked "
+          + "until it is."
+        : v3l.term
+        ? "no clear path to the chosen 3V3 pin; drag the endpoint to the "
+          + "other one, or double-click it for the nearest. Downloads are "
+          + "blocked until it routes."
+        : "the jumper's 3V3 pad has no clear path to a 3V3 pin; drag the "
+          + "jumper clear, or switch it back to feeding 3V3 through a via. "
+          + "Downloads are blocked until it routes.", "jumper", -1]);
+    }
+    if (jumperConflict()) {
+      want.push(["w:clkjump", "CLK jumper",
+        "the jumper sits on a unit, a pad pair, or off the board (outlined "
+        + "red); drag it somewhere clear.", "jumper", -1]);
+    }
   }
   if (customActive()) {
     state.shape.elements.forEach((el, i) => {
       if (el.kind === "image" && el.empty) {
         want.push([`w:el-${i}`, `Outline part ${i + 1}`,
-          "no dark pixels at this threshold, so it adds nothing to the shape — "
+          "no dark pixels at this threshold, so it adds nothing to the shape; "
           + "try Invert or a different threshold.", "shapeel", i]);
       }
     });
     if (state.shape.outlineEmpty) {
       want.push(["w:outline", "Board outline",
         "this custom outline is empty, so there is no board to make. Add a shape "
-        + "or fix the parts above — downloads are blocked until it has one.",
+        + "or fix the parts above; downloads are blocked until it has one.",
         "shapeel", -1]);
     }
   }
-  const shown = want.slice(0, MAX_WARN_TOASTS);
-  const keep = new Set(shown.map(w => w[0]));
-  if (want.length > shown.length) keep.add("w:more");
+  // Identical problems collapse into one toast ("LED 1, LED 2: no solid
+  // board..."): four copies of the same warning bury the very board the
+  // stack sits over without saying anything the first copy didn't.
+  const groups = [];
+  const byMsg = new Map();
+  for (const [key, label, msg, kind, i] of want) {
+    const g = byMsg.get(kind + "|" + msg);
+    if (g) { g.labels.push(label); continue; }
+    const ng = { key, labels: [label], msg, kind, i };
+    byMsg.set(kind + "|" + msg, ng);
+    groups.push(ng);
+  }
+  const shown = groups.slice(0, MAX_WARN_TOASTS);
+  const keep = new Set(shown.map(g => g.key));
+  const extra = groups.length - shown.length;
+  if (extra > 0) keep.add("w:more");
   for (const key of [...toasts.keys()]) {
     if (key.startsWith("w:") && !keep.has(key)) dropToast(key);
   }
-  for (const [key, label, msg, kind, i] of shown) {
-    putToast(key, `${label}: ${msg}`, "warn", () => revealItem(kind, i));
+  for (const g of shown) {
+    putToast(g.key, `${g.labels.join(", ")}: ${g.msg}`, "warn",
+             () => revealItem(g.kind, g.i));
   }
-  if (want.length > shown.length) {
-    putToast("w:more", `+${want.length - shown.length} more warning`
-      + (want.length - shown.length > 1 ? "s" : "") + " — fix these first.",
+  if (extra > 0) {
+    putToast("w:more", `+${extra} more warning`
+      + (extra > 1 ? "s" : "") + "; fix these first.",
       "warn", () => {});
   }
 }
@@ -4483,7 +5540,7 @@ function renderLedList() {
   const wrap = $("ledlist");
   wrap.innerHTML = "";
   if (!state.leds.length) {
-    wrap.innerHTML = `<div class="sub">Add an LED — each brings its series resistor, pre-wired through the power pours.</div>`;
+    wrap.innerHTML = `<div class="sub">Add an LED. Each brings its series resistor, pre-wired through the power pours.</div>`;
   }
   state.leds.forEach((L, i) => {
     const div = document.createElement("div");
@@ -4497,12 +5554,19 @@ function renderLedList() {
       <div class="row" style="margin-top:6px">
         <div style="flex:3"><div class="sub" style="margin-top:0">Layout</div><select class="l">${opt("inline", "In line (R beside)", L.layout)}${opt("stacked", "Stacked (R above)", L.layout)}</select></div>
         <div style="flex:2"><div class="sub" style="margin-top:0">Size</div><select class="pk">${LED_SIZE_ORDER.map(k =>
-          `<option value="${k}"${(L.reverse ? "1206" : (L.size || "0805")) === k ? " selected" : ""}${L.reverse && k !== "1206" ? ` disabled title="Reverse mount needs 1206 pad spacing — smaller pads sit too close to the hole"` : ""}>${PKG[k].label || k}</option>`).join("")}</select></div>
+          `<option value="${k}"${(L.reverse ? "1206" : (L.size || "0805")) === k ? " selected" : ""}${L.reverse && k !== "1206" ? ` disabled title="Reverse mount needs 1206 pad spacing; smaller pads sit too close to the hole"` : ""}>${PKG[k].label || k}</option>`).join("")}</select></div>
       </div>
-      ${L.side === "back" && !L.reverse && !L.farled ? `<div class="sub">Faces the host badge — only shows from behind.</div>` : ""}
+      ${L.side === "back" && !L.reverse && !L.farled ? `<div class="sub">Faces the host badge; only shows from behind.</div>` : ""}
       ${(PKG[L.size] || PKG["0805"]).drill && !L.reverse ? `<div class="sub">Leads pass through; solder on the far face. Short lead toward the bar.</div>` : ""}
-      <div class="sub">Rotation (&deg;) — double-click the unit for +90</div>
+      <div class="sub">Rotation (&deg;); double-click the unit on the board for +90</div>
       ${pairHTML("r", 0, 359, 1, L.rot)}
+      <div class="check" style="margin-top:6px"><input type="checkbox" class="clk" id="clk${i}"${L.clk ? " checked" : ""}${pinOn("9") ? "" : " disabled"}><label for="clk${i}">Blink with the badge clock (CLK)</label></div>
+      ${L.clk && pinOn("9")
+        ? `<div class="sub">Supply routes to ${state.clk.jumper
+            ? `the CLK/3V3 solder jumper on the ${state.clk.side === "back" ? "back" : "front"} (drag it on the board; the builder bridges one side)`
+            : "pin 9, so it always blinks"}. Hover the trace to add a bend (+), drag bends to move them, select one and press Delete to remove it.</div>`
+        : !pinOn("9")
+        ? `<div class="sub">Needs connector pin 9 (CLK); it's unchecked under Board shape.</div>` : ""}
       <details class="advbox"${L.reverse || L.novia || L.adv || L.farled ? " open" : ""}>
         <summary>Advanced${(() => {
           const on = [L.reverse && "reverse mount", L.novia && "no via",
@@ -4516,7 +5580,7 @@ function renderLedList() {
         ${L.reverse ? `<div class="sub">Solder upside-down over the hole; glows out the ${L.side === "back" ? "front" : "back"}. 1206 only.</div>` : ""}
         <div class="check" style="margin-top:6px"><input type="checkbox" class="nvia" id="nvia${i}"${L.novia ? " checked" : ""}><label for="nvia${i}">No power via</label></div>
         ${L.novia ? `<div class="sub">${(PKG[L.size] || PKG["0805"]).drill && L.side !== "back" && !L.farled
-          ? "Leads already cross the board — nothing to route."
+          ? "Leads already cross the board; nothing to route."
           : "Traces to " + (() => {
               if (!L.term) return "the nearest " + (L.side === "back" ? "3V3" : "GND")
                 + " connector pad";
@@ -4526,10 +5590,10 @@ function renderLedList() {
               }
               if (L.term.unit != null) return "LED " + (L.term.unit + 1) + "'s pad";
               return "the nearest " + (L.side === "back" ? "3V3" : "GND") + " connector pad";
-            })() + " — drag the &#9670; endpoint to any highlighted spot; double-click it for the nearest pad."}</div>` : ""}
+            })() + ". Drag the &#9670; endpoint to any highlighted spot; double-click it for the nearest pad."}</div>` : ""}
         <div class="check" style="margin-top:6px"><input type="checkbox" class="farled" id="farled${i}"${L.farled && farOK(L) ? " checked" : ""}${farOK(L) ? "" : " disabled"}><label for="farled${i}">LED on the other side</label></div>
         ${L.farled && farOK(L) ? `<div class="sub">LED sits on the ${L.side === "back" ? "front" : "back"}; a via in each of its pads carries the connections through.</div>`
-          : L.reverse ? `<div class="sub">Not with reverse mount — that already shines through.</div>`
+          : L.reverse ? `<div class="sub">Not with reverse mount; that already shines through.</div>`
           : !farOK(L) ? `<div class="sub">Through-hole leads already cross the board.</div>` : ""}
         <div class="check" style="margin-top:6px"><input type="checkbox" class="adv" id="adv${i}"${L.adv ? " checked" : ""}><label for="adv${i}">Move parts freely</label></div>
         ${L.adv ? `
@@ -4548,7 +5612,7 @@ function renderLedList() {
             <input type="number" class="avx" min="-20" max="20" step="0.05" value="${(+L.adv.vx).toFixed(2)}">
             <input type="number" class="avy" min="-20" max="20" step="0.05" value="${(+L.adv.vy).toFixed(2)}">
           </div>`}
-          ${`<div class="sub">Trace bends: ${(L.nodes || []).length + (L.anodes || []).length + (L.vnodes || []).length}. Hover any of this unit's traces on the canvas to add one (+), drag to move, click to select, Delete or double-click to remove.</div>`}` : ""}
+          ${`<div class="sub">Trace bends: ${(L.nodes || []).length + (L.anodes || []).length + (L.vnodes || []).length + (L.cnodes || []).length}. Hover any of this unit's traces on the canvas to add one (+), drag to move, click to select, Delete to remove.</div>`}` : ""}
       </details>
 `;
     const reposition = () => {
@@ -4559,7 +5623,7 @@ function renderLedList() {
         const spot = freeSpot(L, i);
         if (spot) [L.x, L.y] = spot;
         else {
-          setStatus(`LED ${i + 1} no longer fits where it is — drag it somewhere `
+          setStatus(`LED ${i + 1} no longer fits where it is. Drag it somewhere `
             + "with room (it's outlined red) or undo the change.", true);
         }
       }
@@ -4575,7 +5639,7 @@ function renderLedList() {
     div.querySelector(".s").onchange = e => {
       L.side = e.target.value; pushApart(i); renderLedList(); draw();
     };
-    bindPair(div, "r", v => { L.rot = v; reposition(); draw(); });
+    bindPair(div, "r", v => { L.rot = v; reposition(); draw(); }, true);
     div.querySelector(".l").onchange = e => { L.layout = e.target.value; reposition(); draw(); };
     // Re-render: the package decides whether the leads are plated through, so
     // the via-less explainer under the checkbox changes with it.
@@ -4587,6 +5651,14 @@ function renderLedList() {
       if (!L.novia) { delete L.nodes; delete L.term; } // both belong to the trace
       else delete L.vnodes; // the via stub those bends shaped is gone
       renderLedList(); reposition(); draw(); m3dStale("via routing changed");
+    };
+    div.querySelector(".clk").onchange = e => {
+      L.clk = e.target.checked;
+      if (!L.clk) delete L.cnodes; // the supply run those bends shaped is gone
+      // Enabling CLK may drop the jumper onto a unit that was already
+      // there; the jumper yields, like it does on the server.
+      relocateJumper();
+      renderLedList(); reposition(); draw(); m3dStale("CLK routing changed");
     };
     div.querySelector(".farled").onchange = e => {
       L.farled = e.target.checked;
@@ -4609,7 +5681,7 @@ function renderLedList() {
     div.querySelector(".adv").onchange = e => {
       if (e.target.checked) {
         // Seed from the current layout so nothing jumps. The inline layout
-        // mounts the LED flipped (anode toward the resistor) — expressed in
+        // mounts the LED flipped (anode toward the resistor), expressed in
         // advanced mode as a 180° LED angle, or the pads would swap sides.
         const g = geomOf(L);
         const via = L.side === "back" ? g.viaB : g.viaF;
@@ -4647,6 +5719,58 @@ function renderLedList() {
     }
     wrap.appendChild(div);
   });
+  renderClkOpts();
+}
+
+// Board-level CLK hookup, shown once any unit blinks: the classic 3-pad
+// solder jumper (the builder picks steady or blinking with an iron) or a
+// direct trace to pin 9 (always blinks). Mirrors BadgeSpec.clk_jumper.
+function renderClkOpts() {
+  const wrap = $("clkopts");
+  if (!state.leds.some(L => L.clk) || !pinOn("9")) { wrap.innerHTML = ""; return; }
+  const jside = state.clk.side === "back" ? "back" : "front";
+  const farFace = jside === "front" ? "back" : "front";
+  const needsVia = state.leds.some(L => L.clk && L.side === farFace);
+  wrap.innerHTML = `
+    <div class="item">
+      <div class="itemhead"><span>CLK hookup</span></div>
+      <div class="check"><input type="radio" name="clkhook" class="cj" id="clkjump"${state.clk.jumper ? " checked" : ""}><label for="clkjump">Solder jumper (choose when soldering)</label></div>
+      <div class="check"><input type="radio" name="clkhook" class="ct" id="clktrace"${state.clk.jumper ? "" : " checked"}><label for="clktrace">Direct trace to pin 9 (always blinks)</label></div>
+      ${state.clk.jumper ? `
+      <div class="row" style="margin-top:6px; align-items:center">
+        <div class="sub" style="margin-top:0; flex:1">Jumper side</div>
+        <select class="jside">${opt("front", "Front", jside)}${opt("back", "Back", jside)}</select>
+      </div>
+      ${jside === "back" ? `<div class="check" style="margin-top:6px"><input type="checkbox" class="jvia" id="clkjvia"${state.clk.via !== false ? " checked" : ""}><label for="clkjvia">Feed 3V3 through a via</label></div>
+      <div class="sub">${state.clk.via !== false
+        ? "The 3V3 pad drops straight into the front power plane through its own via."
+        : "The 3V3 pad is wired by a trace to a 3V3 connector pin on this face instead of a via. Drag its &#9670; endpoint onto either 3V3 pin; double-click it for the nearest."}</div>` : ""}
+      ${needsVia ? `<div class="sub">A blinking LED sits on the ${farFace}; the rail via beside the jumper carries its supply through the board.</div>` : ""}
+      <div class="sub">Drag the jumper like a part; double-click for +90&deg;. Its traces grow bends when you hover them (+), just like a unit's. Bridge its centre pad to the 3V3 side for steady light or the CLK side to blink with the badge; bridge exactly ONE side. Unbridged, those LEDs stay dark.</div>`
+      : `<div class="sub">Those LEDs pulse with the badge clock; there is no steady option without reworking the board.</div>`}
+    </div>`;
+  wrap.querySelector(".cj").onchange = () => {
+    state.clk.jumper = true;
+    relocateJumper();
+    renderLedList(); draw(); m3dStale("CLK hookup changed");
+  };
+  wrap.querySelector(".ct").onchange = () => {
+    state.clk.jumper = false;
+    if (selected && selected.kind === "jumper") clearSelection();
+    renderLedList(); draw(); m3dStale("CLK hookup changed");
+  };
+  const sideSel = wrap.querySelector(".jside");
+  if (sideSel) sideSel.onchange = e => {
+    state.clk.side = e.target.value === "back" ? "back" : "front";
+    if (selected && selected.kind === "jumper") clearSelection();
+    relocateJumper();
+    renderLedList(); draw(); m3dStale("CLK jumper side changed");
+  };
+  const viaBox = wrap.querySelector(".jvia");
+  if (viaBox) viaBox.onchange = e => {
+    state.clk.via = e.target.checked;
+    renderLedList(); draw(); m3dStale("CLK via changed");
+  };
 }
 
 function renderTextList() {
@@ -4677,9 +5801,9 @@ function renderTextList() {
           ${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, t.material)).join("")}
         </select></div>
       </div>
-      <div class="sub">Rotation (&deg;, clockwise) — double-click the text for +90</div>
+      <div class="sub">Rotation (&deg;, clockwise); double-click the text on the board for +90</div>
       ${pairHTML("trot", 0, 359, 1, t.rot || 0)}
-      ${t.font === "kicad" ? `<div class="sub">KiCad's stroke font is silkscreen-only — pick another font to use copper, glow, or bare.</div>` : ""}`;
+      ${t.font === "kicad" ? `<div class="sub">KiCad's stroke font is silkscreen-only; pick another font to use copper, glow, or bare.</div>` : ""}`;
     div.querySelector(".tx").value = t.text;
     div.querySelector(".itemhead button").onclick = () => {
       if (!removeItem("text", i, `text ${i + 1}`)) return;
@@ -4692,7 +5816,7 @@ function renderTextList() {
     };
     div.querySelector(".tx").oninput = e => { t.text = e.target.value; refreshCount(); draw(); };
     bindPair(div, "sz", v => { t.size = v; draw(); });
-    bindPair(div, "trot", v => { t.rot = ((Math.round(v) % 360) + 360) % 360; draw(); });
+    bindPair(div, "trot", v => { t.rot = ((Math.round(v) % 360) + 360) % 360; draw(); }, true);
     div.querySelector(".s").onchange = e => { t.side = e.target.value; draw(); };
     div.querySelector(".fnt").onchange = e => {
       t.font = e.target.value;
@@ -4731,7 +5855,7 @@ document.addEventListener("click", e => {
     });
     renderArtList();
     draw();
-    setStatus(`${SHAPE_KIND_LABELS[kind]} added as a through window — set its material, face, and size below.`);
+    setStatus(`${SHAPE_KIND_LABELS[kind]} added as a through window. Set its material, face, and size below.`);
   } else if (!e.target.closest("#addartshape")) {
     menu.style.display = "none";
   }
@@ -4753,8 +5877,8 @@ async function svgObjectUrl(f) {
   }
   return URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], {type: "image/svg+xml"}));
 }
-// Shared loader. SVGs upload as-is — the server uses their exact vector
-// paths — plus a browser-rasterized PNG that doubles as the local preview
+// Shared loader. SVGs upload as-is (the server uses their exact vector
+// paths), plus a browser-rasterized PNG that doubles as the local preview
 // and the server's fallback for SVGs it can't parse exactly (gradients).
 async function loadImageFile(f, cb) {
   const isSvg = /\.svg$/i.test(f.name) || f.type === "image/svg+xml";
@@ -4828,7 +5952,7 @@ $("artfile").addEventListener("change", () => {
     state.art.push(a);
     renderArtList();
     draw();
-    setStatus(`Added ${f.name} — ${a.mode === "palette" ? "assign a material per color" : "tune the threshold"} below.`);
+    setStatus(`Added ${f.name}: ${a.mode === "palette" ? "assign a material per color" : "tune the threshold"} below.`);
   });
 });
 
@@ -4841,7 +5965,7 @@ function renderShapeOpts() {
   bar.className = "row";
   bar.style.marginTop = "8px";
   bar.innerHTML = `
-    <div><button class="tool" id="eladdimg">+ Image…</button></div>
+    <div><button class="tool" id="eladdimg" title="Turn a picture into the board shape: dark pixels become board. To print a picture ON the board, use the ART tab instead.">+ Silhouette…</button></div>
     <div><select id="eladdkind">${Object.entries(SHAPE_KIND_LABELS).map(([v, l]) => opt(v, l, "circle")).join("")}</select></div>
     <div><button class="tool" id="eladdshape">+ Shape</button></div>`;
   wrap.appendChild(bar);
@@ -4849,7 +5973,7 @@ function renderShapeOpts() {
     const d = document.createElement("div");
     d.className = "sub";
     d.textContent = "The board is the standard 20 × 20 square. Reshape it by "
-      + "adding images and shapes — they merge into one board, any part can "
+      + "adding images and shapes; they merge into one board, any part can "
       + "be switched to cut a hole instead, and removing every part brings "
       + "the square back.";
     wrap.appendChild(d);
@@ -4858,14 +5982,14 @@ function renderShapeOpts() {
     const div = document.createElement("div");
     div.className = "item";
     const isImg = el.kind === "image";
-    // SVG silhouettes are traced exactly from their vector paths — there is
+    // SVG silhouettes are traced exactly from their vector paths; there is
     // no pixel staircase, so the smoothing slider only applies to rasters.
     div.innerHTML = `
       <div class="itemhead"><span class="fname"></span><span class="hbtns">
         <button class="del" title="Remove">&times;</button></span></div>
       <select class="op" title="Add or cut">${opt("add", "Adds board material", el.op)}${opt("cut", "Cuts a hole", el.op)}</select>
       ${isImg ? `
-        <div class="sub">Dark ${el.isSvg ? "shapes become board (exact vector outline)" : "pixels become board"} — drag it on the front view</div>
+        <div class="sub">Dark ${el.isSvg ? "shapes become board (exact vector outline)" : "pixels become board"}; drag it on the front view</div>
         <div class="row" style="margin-top:6px"><div><button class="tool chimg">Change image…</button></div></div>
         <div class="sub">Threshold <span class="etv">${el.threshold}</span></div>
         <input type="range" class="eth" min="1" max="254" value="${el.threshold}">
@@ -4914,7 +6038,7 @@ function renderShapeOpts() {
   if (s.elements.some(el => el.kind === "image" && el.orig && !el.isSvg)) {
     const d = document.createElement("div");
     d.innerHTML = `
-      <div class="sub">Edge smoothing <span id="ssv">${s.smooth > 0 ? s.smooth.toFixed(2) + " mm" : "off"}</span> — raster images (0 = keep raw pixels)</div>
+      <div class="sub">Edge smoothing <span id="ssv">${s.smooth > 0 ? s.smooth.toFixed(2) + " mm" : "off"}</span>: raster images (0 = keep raw pixels)</div>
       <input type="range" id="ssm" min="0" max="0.4" step="0.04" value="${s.smooth}">`;
     d.querySelector("#ssm").oninput = e => {
       s.smooth = +e.target.value;
@@ -4935,6 +6059,7 @@ function renderShapeOpts() {
   };
   $("eladdshape").onclick = () => {
     if (!roomForMore()) return;
+    outlineAddCheck = { rings: ringSig(s.rings), label: "The new part" };
     s.elements.push({ kind: $("eladdkind").value, op: "add", cx: 10.16, cy: 10.16,
                       w: 20, h: 20, rot: 0, sides: 6, threshold: 128, invert: false });
     renderShapeOpts();
@@ -4950,9 +6075,11 @@ $("shapefile").addEventListener("change", () => {
   loadImageFile(f, ({ upload, raster, isSvg, dataUrl, src, iw, ih }) => {
     let el = target === "new" ? null : state.shape.elements[target];
     if (!el) {
+      outlineAddCheck = { rings: ringSig(state.shape.rings), label: f.name };
       el = { kind: "image", op: "add", cx: 10.16, cy: 10.16, w: 16, h: 16,
              rot: 0, threshold: 128, invert: false };
       state.shape.elements.push(el);
+      outlineAddCheck.el = el;
     }
     Object.assign(el, { file: upload, raster, isSvg, srcData: dataUrl, fname: f.name, orig: src, ow: iw, oh: ih });
     computeElGrid(el);
@@ -4960,14 +6087,14 @@ $("shapefile").addEventListener("change", () => {
     requestOutline(true);
     if (el.empty) {
       setStatus(`${f.name} has no dark pixels at this threshold, so it adds `
-        + "nothing to the outline — try Invert or raise the threshold.", true);
+        + "nothing to the outline; try Invert or raise the threshold.", true);
     } else {
-      setStatus(`${f.name} added to the outline — dark pixels become board.`);
+      setStatus(`${f.name} added to the outline; dark pixels become board.`);
     }
   });
 });
-// The pin grid is laid out like the board itself — two corners across, top
-// row above bottom — so ticking a box maps to a place on the badge rather
+// The pin grid is laid out like the board itself (two corners across, top
+// row above bottom), so ticking a box maps to a place on the badge rather
 // than a pad number nobody memorises.
 function renderPinGrid() {
   const wrap = $("pingrid");
@@ -4998,19 +6125,19 @@ function renderPinGrid() {
   const note = $("pinnote");
   if (note) {
     note.textContent = missing.length
-      ? `No ${missing.join(" or ")} pin left — the LEDs have nothing to run on.`
+      ? `No ${missing.join(" or ")} pin left; the LEDs have nothing to run on.`
       : "Untick any pin your design doesn't need.";
     note.style.color = missing.length ? "#e0a63f" : "";
   }
 }
 // Orientations tried for a new unit, in preference order. A unit's envelope
 // is strongly asymmetric (the resistor and via hang off one end), so 180/270
-// are genuinely different shapes to fit, not mirror images of 0/90 — they are
+// are genuinely different shapes to fit, not mirror images of 0/90; they are
 // what lets a lopsided custom outline take another unit.
 const LED_TRY_ORIENT = [["inline", 0], ["stacked", 0], ["inline", 90], ["stacked", 90],
                         ["inline", 180], ["stacked", 180], ["inline", 270], ["stacked", 270]];
 // Mutates `led` to the orientation that fits. Returns null only when no
-// orientation fits anywhere — which is what makes the refusal message true.
+// orientation fits anywhere, which is what makes the refusal message true.
 function spotForNewLed(led) {
   for (const [layout, rot] of LED_TRY_ORIENT) {
     led.layout = layout; led.rot = rot;
@@ -5023,18 +6150,18 @@ $("addled").addEventListener("click", () => {
   // Saying nothing is the one unacceptable answer: the click has to either
   // place a unit or explain itself.
   if (state.leds.length >= MAX_LEDS) {
-    setStatus(`That is the limit — ${MAX_LEDS} LED units on one badge. `
+    setStatus(`That is the limit: ${MAX_LEDS} LED units on one badge. `
       + "Remove one before adding another.", true);
     return;
   }
   // Front is the default: a new LED should be visible from the side the
   // user is looking at. Back-side (glowing through a window, facing the
-  // host badge) is a deliberate choice, one click away — the old back
+  // host badge) is a deliberate choice, one click away; the old back
   // default meant the first thing a newcomer ever placed was invisible.
   const led = {x: 10, y: 10, color: "red", side: "front", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null};
   const spot = spotForNewLed(led);
   if (!spot) {
-    setStatus(`No room for another LED — ${state.leds.length} unit`
+    setStatus(`No room for another LED: ${state.leds.length} unit`
       + `${state.leds.length === 1 ? "" : "s"} already fill this board. Drag units `
       + "closer together, switch some to the smaller 0603 size, or enlarge the board.", true);
     return;
@@ -5046,7 +6173,7 @@ $("addled").addEventListener("click", () => {
 });
 $("addtext").addEventListener("click", () => {
   if (state.texts.length >= MAX_TEXTS) {
-    setStatus(`That is the limit — ${MAX_TEXTS} text layers on one badge. `
+    setStatus(`That is the limit: ${MAX_TEXTS} text layers on one badge. `
       + "Remove one before adding another.", true);
     return;
   }
@@ -5055,7 +6182,7 @@ $("addtext").addEventListener("click", () => {
              side: "front", font: "kicad", material: "silk", rot: 0};
   // New text must land somewhere sensible, like a new LED does: scan a few
   // candidates (the staggered default first) for a spot that is on solid
-  // board AND clear of parts and pads — spawning onto a unit used to greet
+  // board AND clear of parts and pads; spawning onto a unit used to greet
   // the user with an overlap warning for something the app did to itself.
   // Settle for merely-solid, then for the default, rather than refusing.
   {
@@ -5069,7 +6196,10 @@ $("addtext").addEventListener("click", () => {
     for (const [x, y] of cands) {
       probe.x = x; probe.y = y;
       if (!textOnSolidBoard(probe)) continue;
-      if (!textOverParts(probe)) { clear = [x, y]; break; }
+      // "Clear" also means clear of the other texts: two texts spawned onto
+      // the same spot hide each other completely.
+      const onText = state.texts.some(o => Math.hypot(o.x - x, o.y - y) < 3);
+      if (!textOverParts(probe) && !onText) { clear = [x, y]; break; }
       if (!solid) solid = [x, y];
     }
     if (clear) [t.x, t.y] = clear;
@@ -5120,6 +6250,13 @@ function designFormData() { // the full design, as /generate and /render take it
     finish: state.finish,
     tenting: state.tenting,
     pins: ALL_PINS.filter(pinOn),
+    clk: { jumper: !!state.clk.jumper, rot: state.clk.rot || 0,
+           side: state.clk.side === "back" ? "back" : "front",
+           via: state.clk.via !== false,
+           nodes: state.clk.nodes || [], v3nodes: state.clk.v3nodes || [],
+           ...(state.clk.v3pin ? { v3pin: state.clk.v3pin } : {}),
+           ...(state.clk.x != null && state.clk.y != null
+               ? { x: state.clk.x, y: state.clk.y } : {}) },
     shape: shapeParams(),
     art: state.art.map(a => ({
       kind: a.kind || "image", side: a.side || "front",
@@ -5144,7 +6281,7 @@ function reportBlocked() { // true (and says why) when the design can't build
   const more = blocked.length - 1;
   setStatus(`Can't build this board: ${what}`
     + (more ? ` (and ${more} other problem${more > 1 ? "s" : ""})` : "")
-    + " — fix it and download again.", true);
+    + "; fix it and download again.", true);
   revealItem(kind, i);
   return true;
 }
@@ -5157,9 +6294,17 @@ async function fetchDesignZip(endpoint, fallbackName) {
   a.download = (resp.headers.get("Content-Disposition") || "").match(/filename=(.+)/)?.[1] || fallbackName;
   a.click();
   URL.revokeObjectURL(a.href);
+  // Mirror of the server's filename rule: when nothing in the name survives
+  // sanitizing (e.g. a fully non-Latin name), the zip quietly arrives under
+  // the stock name — return a note so the status can say so.
+  const name = $("name").value.trim();
+  const slug = name.replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._-]+|[._-]+$/g, "");
+  return name && !slug
+    ? ` (The name “${name}” has no characters that work in a filename, so the file is ${a.download}.)`
+    : "";
 }
 function revealCulprit(err) {
-  // The server names the culprit ("LED 2 ...") — take the user to it.
+  // The server names the culprit ("LED 2 ..."); take the user to it.
   const m = /LED (\d+)/.exec(err.message);
   const i = m ? parseInt(m[1], 10) - 1 : -1;
   if (i >= 0 && state.leds[i]) {
@@ -5180,8 +6325,8 @@ $("download").addEventListener("click", async () => {
   const settle = () => setTimeout(() => { btn.disabled = false; }, 700);
   setStatus("Generating…");
   try {
-    await fetchDesignZip("/generate", "minibadge.zip");
-    setStatus("Done — open the .kicad_pro in KiCad, press B to fill zones, export Gerbers.");
+    const note = await fetchDesignZip("/generate", "minibadge.zip");
+    setStatus("Done. Open the .kicad_pro in KiCad, press B to fill zones, export Gerbers." + note);
     dirty = false; // the design is saved in the zip
   } catch (err) {
     setStatus("Download failed: " + err.message, true);
@@ -5220,10 +6365,10 @@ $("gerberbtn").addEventListener("click", async () => {
   const settle = () => setTimeout(() => { btn.disabled = false; }, 700);
   setStatus("Plotting Gerbers…");
   try {
-    await fetchDesignZip("/gerbers", "minibadge-gerbers.zip");
-    setStatus("Done — upload the zip as-is to JLCPCB or PCBWay and order 1.6 mm, "
+    const note = await fetchDesignZip("/gerbers", "minibadge-gerbers.zip");
+    setStatus("Done. Upload the zip as-is to JLCPCB or PCBWay and order 1.6 mm, "
       + "2 layers, your mask color and finish. (OSH Park instead takes the "
-      + ".kicad_pcb from the KiCad project zip directly.)");
+      + ".kicad_pcb from the KiCad project zip directly.)" + note);
   } catch (err) {
     setStatus("Gerber export failed: " + err.message, true);
     revealCulprit(err);
@@ -5245,12 +6390,12 @@ function m3dStale(reason) {
   const el = $("d3stale");
   if (!reason) { el.style.display = "none"; return; }
   $("d3stalewhy").textContent = m3d.url
-    ? reason + " — showing the last board that built."
+    ? reason + "; showing the last board that built."
     : reason;
   el.style.display = "block";
 }
-// Belt and braces: whatever the reason — a failed export, a build that never
-// ran, a request still in flight when the tab opened — a model that does not
+// Belt and braces: whatever the reason (a failed export, a build that never
+// ran, a request still in flight when the tab opened), a model that does not
 // match the current design must never sit there looking authoritative.
 function m3dCheckStale() {
   if (!mode3d || m3d.busy || m3d.pending) return;
@@ -5265,7 +6410,7 @@ function m3dCheckStale() {
 }
 // ---- per-layer opacity ----
 // The server names every material "<layer>:<index>" (see _tag_glb_layers), so
-// the sliders can group by layer without guessing from colours — which would
+// the sliders can group by layer without guessing from colours, which would
 // fall apart the moment someone picks a black soldermask. These are view
 // settings, not design data: they never touch the design or trigger a
 // re-export, and they are re-applied whenever a new model finishes loading.
@@ -5300,7 +6445,7 @@ for (const el of document.querySelectorAll("#d3layers input")) {
 }
 // Edits made while the 3D tab is open re-export automatically. The export
 // shells out to kicad-cli (seconds, not milliseconds), so changes are
-// debounced — a drag or a slider sweep exports once, when it settles.
+// debounced: a drag or a slider sweep exports once, when it settles.
 const M3D_DEBOUNCE = 700;
 function m3dSchedule() {
   if (!mode3d) return;
@@ -5371,7 +6516,7 @@ async function m3dLoad(force) {
     }
   }
 }
-// The view selector stays put in 3D — it's how you get back — so entering
+// The view selector stays put in 3D (it's how you get back), so entering
 // only moves the highlight off the flat views and onto the cube.
 function markViewTabs() {
   for (const el of document.querySelectorAll("#viewtabs div")) {
@@ -5468,6 +6613,19 @@ window.addEventListener("keydown", e => {
         ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, n[0] + dx)),
            Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, n[1] + dy))]
         : n);
+    } else if (selected.kind === "jumpernode") {
+      const kk = JNODE_KEYS[selected.trace || "link"];
+      if (!(state.clk[kk] || [])[selected.node]) return;
+      state.clk[kk] = state.clk[kk].map((n, k) => k === selected.node
+        ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, n[0] + dx)),
+           Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, n[1] + dy))]
+        : n);
+    } else if (selected.kind === "jumper") {
+      const ob = outlineBounds();
+      const cx = state.clk.x != null ? state.clk.x : JUMPER_AT[0];
+      const cy = state.clk.y != null ? state.clk.y : JUMPER_AT[1];
+      state.clk.x = Math.min(Math.max(cx + dx, ob[0] + 1), ob[2] - 1);
+      state.clk.y = Math.min(Math.max(cy + dy, ob[1] + 1), ob[3] - 1);
     } else if (selected.kind === "text") {
       const t = state.texts[selected.index];
       if (!t) return;
@@ -5506,6 +6664,14 @@ window.addEventListener("keydown", e => {
       draw();
       return;
     }
+    if (selected.kind === "jumpernode") {
+      const kk = JNODE_KEYS[selected.trace || "link"];
+      if (!(state.clk[kk] || [])[selected.node]) return;
+      state.clk[kk] = state.clk[kk].filter((_n, k) => k !== selected.node);
+      clearSelection();
+      draw();
+      return;
+    }
     if (selected.kind === "led") {
       if (removeItem("led", idx, `LED ${idx + 1}`)) renderLedList();
     } else if (selected.kind === "text") {
@@ -5526,53 +6692,54 @@ window.addEventListener("keydown", e => {
 
 // ---- illustrated tooltips (the "?" buttons) ----
 const TIPS = {
-  basics: { title: "Getting around — meet the helmet badge", img: "rotate.webp", html: `
+  basics: { title: "Getting around: meet the helmet badge", img: "rotate.webp", html: `
     <p>Every "?" on this page walks through building the same thing: a helmet-shaped
     badge with copper stripes, a glowing visor, and a stencil name.</p><ul>
-    <li>Drag anything on <b>either view</b> — parts on the other side show as dashed ghosts and can be grabbed there too.</li>
+    <li>Drag anything on <b>either view</b>; parts on the other side show as dashed ghosts and can be grabbed there too.</li>
     <li>Click to select, then: <b>arrow keys</b> nudge (Shift = 1 mm), <b>Delete</b> removes, corner squares <b>resize</b>, the round knob <b>rotates</b> (Shift snaps 15°).</li>
     <li><b>Double-click</b> an LED or artwork layer for a quick +90°.</li>
   </ul>` },
-  shape: { title: "Step 1 — a helmet-shaped board", img: "parts.webp", html: `<ul>
-    <li>Add the helmet PNG as an outline part (<b>+ Image…</b> under Board shape): dark pixels become the board, so the badge IS the helmet (raise the threshold if bright details get punched out). No parts = the standard square.</li>
-    <li>Each connector row carries 3V3 + GND, so one row alone powers the badge — <b>uncheck the top row</b> and the helmet's crown stays clean; the kept row's tabs are bridged in automatically.</li>
+  shape: { title: "Step 1: a helmet-shaped board", img: "parts.webp", html: `<ul>
+    <li>Add the helmet PNG as an outline part (<b>+ Silhouette…</b> under Board shape): dark pixels become the board, so the badge IS the helmet (raise the threshold if bright details get punched out). No parts = the standard square.</li>
+    <li>Each connector row carries 3V3 + GND, so one row alone powers the badge: <b>uncheck the top row</b> and the helmet's crown stays clean; the kept row's tabs are bridged in automatically.</li>
     <li>Parts compose: any part can also be switched to <b>Cuts a hole</b> to punch openings.</li>
     <li>SVG silhouettes trace exactly; <b>Edge smoothing</b> melts raster pixel stairs.</li>
   </ul>` },
-  art: { title: "Step 2 — paint it with materials", img: "art.webp", html: `<ul>
-    <li>Add the same helmet PNG as artwork — it loads in <b>By color</b> mode, one material per color: the yellow stripes become <b>exposed copper</b>, the light vents become <b>silkscreen</b>, and the body stays plain soldermask (<i>Ignore</i>).</li>
+  art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
+    <li>Add the same helmet PNG as artwork; it loads in <b>By color</b> mode, one material per color: the yellow stripes become <b>exposed copper</b>, the light vents become <b>silkscreen</b>, and the body stays plain soldermask (<i>Ignore</i>).</li>
     <li><b>Hover a color row or wand chip</b> to light up exactly which pixels it controls.</li>
     <li>SVG art stays exact at any size and angle; PNG/JPG use a 0.18 mm pixel grid.</li>
   </ul>` },
-  wand: { title: "Step 3 — the visor, with the magic wand", img: "wand.webp", html: `<ul>
-    <li>The visor is the same "ignore" black as the body — but only the visor should glow. Pick <b>Glow window</b>, press <b>Pick region</b>, hover the visor (it lights up), and click: just that connected patch becomes a window. <b>Esc</b> cancels.</li>
-    <li>Every pick becomes a chip below — change its material or remove it anytime.</li>
+  wand: { title: "Step 3: the visor, with the magic wand", img: "wand.webp", html: `<ul>
+    <li>The visor is the same "ignore" black as the body, but only the visor should glow. Pick <b>Glow window</b>, press <b>Pick region</b>, hover the visor (it lights up), and click: just that connected patch becomes a window. <b>Esc</b> cancels.</li>
+    <li>Every pick becomes a chip below; change its material or remove it anytime.</li>
   </ul>` },
   materials: { title: "What the helmet is made of", img: "materials.png", html: `<ul>
-    <li><b>Silkscreen</b> — the white vents (ink printed on the mask).</li>
-    <li><b>Exposed copper</b> — the stripes: mask opened so the metal shines. <b>Gold or silver</b> comes from the Surface finish picker in the top bar (ENIG = gold, HASL = silver) — one finish for all exposed metal, pads included.</li>
-    <li><b>Glow window</b> — the visor: copper stripped from both layers, mask kept, so back-side LED light shines through.</li>
-    <li><b>Bare board</b> — like glow, but the mask opens too: raw laminate, the brightest window. A bare layer's <b>Side</b> select gains a <b>Through</b> option (both faces — the default for shape windows); Front/Back opens one face only, e.g. a bigger back-only window behind a small front graphic.</li>
-    <li>Windows always keep a copper ring at the board edge, and every LED ties to that ring with a hairline copper bridge — where one crosses a window it stays under a thin strip of soldermask (vias keep their mask cap too, unless you pick exposed vias in Shape).</li>
+    <li><b>Silkscreen</b>. The white vents (ink printed on the mask).</li>
+    <li><b>Exposed copper</b>. The stripes: mask opened so the metal shines. <b>Gold or silver</b> comes from the Surface finish picker in the top bar (ENIG = gold, HASL = silver); one finish for all exposed metal, pads included.</li>
+    <li><b>Glow window</b>. The visor: copper stripped from both layers, mask kept, so back-side LED light shines through.</li>
+    <li><b>Bare board</b>. Like glow, but the mask opens too: raw laminate, the brightest window. A bare layer's <b>Side</b> select gains a <b>Through</b> option (both faces, the default for shape windows); Front/Back opens one face only, e.g. a bigger back-only window behind a small front graphic.</li>
+    <li>Windows always keep a copper ring at the board edge, and every LED ties to that ring with a hairline copper bridge; where one crosses a window it stays under a thin strip of soldermask (vias keep their mask cap too, unless you pick exposed vias in Shape).</li>
   </ul>` },
-  leds: { title: "Step 4 — a red LED behind the visor", img: "leds.webp", html: `<ul>
-    <li>Drop a <b>back-side</b> LED and drag its dashed ghost behind the visor on the front view — its light will shine through the glow window when the badge is powered.</li>
-    <li>Each LED brings its series resistor, wired 3V3 → R → LED → GND through the pours — no routing needed.</li>
-    <li><b>In line</b> = thin strip (fits behind the visor), <b>Stacked</b> = compact block,  <b>Reverse mount</b> is the badgelife trick: a 1206 soldered upside-down over a routed hole so it glows out the other face (works with either layout). Double-click for +90°, drag the knob for any angle — tilted units only claim the room they really need.</li>
-    <li><b>Size</b> picks the part package: 0603 is compact but fiddly to hand-solder, 0805 is the minibadge standard, 1206 is bigger, brighter, and easiest to solder. The <b>TH</b> entries are through-hole LEDs that stand off the board — 1.8 mm (tiny dome, barely bigger than a 1206), 3 mm (the classic), and the 5×2 mm rectangular bar (great for eyes, mouths, and light strips). Their series resistor stays an 0805.</li>
+  leds: { title: "Step 4: a red LED behind the visor", img: "leds.webp", html: `<ul>
+    <li>Drop a <b>back-side</b> LED and drag its dashed ghost behind the visor on the front view; its light will shine through the glow window when the badge is powered.</li>
+    <li>Each LED brings its series resistor, wired 3V3 → R → LED → GND through the pours. No routing needed.</li>
+    <li><b>In line</b> = thin strip (fits behind the visor), <b>Stacked</b> = compact block,  <b>Reverse mount</b> is the badgelife trick: a 1206 soldered upside-down over a routed hole so it glows out the other face (works with either layout). Double-click for +90°, drag the knob for any angle; tilted units only claim the room they really need.</li>
+    <li><b>Size</b> picks the part package: 0603 is compact but fiddly to hand-solder, 0805 is the minibadge standard, 1206 is bigger, brighter, and easiest to solder. The <b>TH</b> entries are through-hole LEDs that stand off the board: 1.8 mm (tiny dome, barely bigger than a 1206), 3 mm (the classic), and the 5×2 mm rectangular bar (great for eyes, mouths, and light strips). Their series resistor stays an 0805.</li>
     <li><b>Advanced placement</b> unlocks the whole unit: the LED, resistor, and via each drag on their own (double-click a part for +90&deg;, or type offsets and angles) when the standard layouts don't fit around your art. The card warns if a placement would short copper.</li>
-    <li><b>No power via</b> runs a trace to a connector pad instead — and its ◆ endpoint is draggable: every legal destination lights up (any same-net pad, or another unit's pad to share one run), the drop snaps to the nearest one, and double-clicking goes back to the automatic choice.</li>
+    <li><b>No power via</b> runs a trace to a connector pad instead, and its ◆ endpoint is draggable: every legal destination lights up (any same-net pad, or another unit's pad to share one run), the drop snaps to the nearest one, and double-clicking goes back to the automatic choice.</li>
+    <li><b>Blink with the badge clock</b> feeds the LED from the connector's CLK pin instead of 3V3, so it pulses with the host badge. A <b>CLK hookup</b> choice appears below the list: the classic 3-pad solder jumper (drag it on the board; the builder bridges the 3V3 side for steady light or the CLK side to blink; NEVER both), or a direct trace to pin 9 (always blinks).</li>
   </ul>` },
-  text: { title: "Step 5 — your handle on the back", img: "text.webp", html: `<ul>
-    <li>Sign your work: "made by half" in <b>Black Ops One</b>, with Side set to <b>Back</b> — the bundled typefaces become exact polygons and can use any material; KiCad's own stroke font is silkscreen-only.</li>
+  text: { title: "Step 5: your handle on the back", img: "text.webp", html: `<ul>
+    <li>Sign your work: "made by half" in <b>Black Ops One</b>, with Side set to <b>Back</b>; the bundled typefaces become exact polygons and can use any material; KiCad's own stroke font is silkscreen-only.</li>
     <li>Back text reads correctly when you flip the badge over; glow/bare text cuts through the board and shows mirrored from the far side.</li>
     <li>Keep decorative fonts <b>≥ 1.2 mm</b> so thin strokes survive fabrication.</li>
   </ul>` },
-  download: { title: "Step 6 — the finished board", img: "final.png", html: `<ul>
+  download: { title: "Step 6: the finished board", img: "final.png", html: `<ul>
     <li>The actual KiCad renders, front and back: clean crown (bottom row only), visor dark until its LED lights it, and the maker's mark on the back. The zip holds the board, project file, BOM, and a README with ordering notes (including your soldermask color).</li>
     <li>Open the <b>.kicad_pro</b>, press <b>B</b> to refill zones (the hairline slits in copper areas vanish), then export Gerbers.</li>
-    <li>Or skip KiCad entirely: <b>⬇ Gerbers for fab</b> plots that exact package on the server — a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the .kicad_pcb itself). Order 1.6 mm, 2 layers, your mask color and finish.</li>
-    <li>Silk is carved around pads, parts, text, and mask openings automatically — the project arrives DRC-clean.</li>
+    <li>Or skip KiCad entirely: <b>⬇ Gerbers for fab</b> plots that exact package on the server: a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the .kicad_pcb itself). Order 1.6 mm, 2 layers, your mask color and finish.</li>
+    <li>Silk is carved around pads, parts, text, and mask openings automatically; the project arrives DRC-clean.</li>
   </ul>` },
 };
 const tipPop = document.createElement("div");
@@ -5630,15 +6797,16 @@ function showPanel(key) {
 }
 // The rail's panel tabs pick what the LEFT panel edits; the 3D tab picks
 // what the canvas zone shows. They're independent, so switching panels
-// leaves the 3D view up — that's the point of live re-export: edit on the
+// leaves the 3D view up; that's the point of live re-export: edit on the
 // left, watch the board rebuild on the right.
 for (const [k, tabId] of Object.entries(PANEL_TABS)) {
   $(tabId).addEventListener("click", () => showPanel(k));
 }
-// Selecting something on the board opens its panel — the rail follows you.
+// Selecting something on the board opens its panel; the rail follows you.
 const PANEL_OF_KIND = { led: "leds", ledres: "leds", ledvia: "leds", lednode: "leds",
-                        ledterm: "leds", ledbody: "leds", text: "text",
-                        art: "art", shapeel: "shape" };
+                        ledterm: "leds", ledbody: "leds", jumper: "leds",
+                        jumpernode: "leds", jumperterm: "leds",
+                        text: "text", art: "art", shapeel: "shape" };
 
 let view = "both";
 function setView(v) {
@@ -5650,7 +6818,7 @@ function setView(v) {
       cvF.style.cursor = ""; cvB.style.cursor = "";
       artHL = null;
       renderArtList();
-      setStatus(`Wand pick cancelled — the ${need} view was hidden.`);
+      setStatus(`Wand pick cancelled: the ${need} view was hidden.`);
     }
   }
   view = v;
@@ -5665,6 +6833,28 @@ function setView(v) {
 for (const el of document.querySelectorAll("#viewtabs div")) {
   el.addEventListener("click", () => setView(el.dataset.view));
 }
+// The cue lives in the scrolling zone, so it pins itself to the bottom of
+// the visible slice while shown; it retires as soon as the user scrolls
+// (they have found the scroll) or FIG. 2 is already on screen.
+{
+  const czone = document.getElementById("canvaszone");
+  const updateFoldCue = () => {
+    const cue = $("foldcue");
+    // "Hidden" means most of the back canvas is below the fold: a caption
+    // sliver peeking in does not tell anyone there is a whole board there.
+    const cvBr = cvB.getBoundingClientRect();
+    const show = view === "both" && !mode3d && czone.scrollTop < 60
+      && czone.scrollHeight - czone.clientHeight > 80
+      && cvBr.top + cvBr.height / 2 > czone.getBoundingClientRect().bottom;
+    cue.style.display = show ? "block" : "none";
+    if (show) cue.style.top = (czone.scrollTop + czone.clientHeight - 42) + "px";
+  };
+  $("foldcue").onclick = () =>
+    $("figB").scrollIntoView({ behavior: "smooth", block: "start" });
+  czone.addEventListener("scroll", updateFoldCue);
+  window.addEventListener("resize", updateFoldCue);
+  new ResizeObserver(updateFoldCue).observe($("views"));
+}
 
 // ---- autosave: the design (images included) survives a refresh ----
 function designJSON() {
@@ -5672,6 +6862,7 @@ function designJSON() {
     v: 1, name: $("name").value, mask: state.mask, finish: state.finish,
     tenting: state.tenting,
     pins: [...(state.pins || ALL_PINS)],
+    clk: { ...state.clk },
     shape: {
       mode: state.shape.mode, smooth: state.shape.smooth,
       elements: state.shape.elements.map(el => ({
@@ -5695,7 +6886,7 @@ function designJSON() {
 let saveTimer = null, saveWarned = false;
 // Autosave has a single writer. There is one storage slot, so two open tabs
 // would otherwise take turns overwriting each other and whoever reloaded
-// second would find an empty editor with no restore point — silent loss of
+// second would find an empty editor with no restore point: silent loss of
 // real work. A tab claims the slot when it saves and keeps the claim fresh;
 // another tab only takes over once that claim goes stale (i.e. the first tab
 // is gone). The tab that cannot save is told so, rather than pretending.
@@ -5711,17 +6902,21 @@ function claimHolder() {
   } catch (e) { return null; }
 }
 function yieldAutosave() {
+  // A standing warning, not the status line: the status expires in seconds,
+  // and a user who missed it would keep editing a tab that never saves.
+  // Re-raised on every save attempt while yielded, so dismissing it only
+  // quiets it until the next edit.
+  putToast("autosave-yield", "This design is open in another tab, which is "
+    + "the one being autosaved. Edits here stay on screen only until that tab "
+    + "closes; download the zip to keep them for sure.", "warn");
   if (!autosaveOwner) return;
   autosaveOwner = false;
   clearTimeout(saveTimer);
-  setStatus("This design is open in another tab, which is the one being "
-    + "autosaved. Edits here are kept on screen but not saved — download the "
-    + "zip to keep them.", true);
 }
 // Hand the claim back on the way out. Without this a tab that navigates away
 // leaves its claim sitting in localStorage for the full stale window, so
 // re-opening the app in that same tab within 20 s meets its own ghost and is
-// told — wrongly, with no second tab anywhere — that it is not being saved.
+// told (wrongly, with no second tab anywhere) that it is not being saved.
 window.addEventListener("pagehide", () => {
   try {
     if (claimHolder() === TAB_ID) localStorage.removeItem(CLAIM_KEY);
@@ -5734,18 +6929,21 @@ window.addEventListener("storage", e => {
   if (who && who !== TAB_ID) yieldAutosave();
 });
 function scheduleAutosave() {
-  if (!autosaveOwner) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     const holder = claimHolder();
     if (holder && holder !== TAB_ID) { yieldAutosave(); return; }
+    // The claim is free again (the other tab closed, or stopped saving for
+    // the whole stale window): a yielded tab takes the slot back instead of
+    // staying an unsaved orphan for the rest of its life.
+    if (!autosaveOwner) { autosaveOwner = true; dropToast("autosave-yield"); }
     try {
       localStorage.setItem(CLAIM_KEY, JSON.stringify({ tab: TAB_ID, t: Date.now() }));
       const s = JSON.stringify({ tab: TAB_ID, design: designJSON() });
       if (s.length > 4.5e6) {
         if (!saveWarned) {
           saveWarned = true;
-          setStatus("This design is too large to autosave — download the zip to keep it.", true);
+          setStatus("This design is too large to autosave; download the zip to keep it.", true);
         }
         return;
       }
@@ -5770,6 +6968,25 @@ async function restoreDesign(d) {
     : d.rows ? ALL_PINS.filter(n => d.rows[PADS.find(p => p[4] === n)[3]])
     : [...ALL_PINS];
   renderPinGrid();
+  // Keep state.clk's identity: the jumper selection machinery holds a
+  // reference to this exact object (SEL_LIST).
+  Object.assign(state.clk,
+                { jumper: true, x: null, y: null, rot: 0,
+                  side: "front", via: true, nodes: [], v3nodes: [],
+                  v3pin: null },
+                d.clk ? { jumper: d.clk.jumper !== false,
+                          x: typeof d.clk.x === "number" ? d.clk.x : null,
+                          y: typeof d.clk.y === "number" ? d.clk.y : null,
+                          rot: +d.clk.rot || 0,
+                          side: d.clk.side === "back" ? "back" : "front",
+                          via: d.clk.via !== false,
+                          nodes: Array.isArray(d.clk.nodes)
+                            ? d.clk.nodes.map(n => [+n[0], +n[1]]) : [],
+                          v3nodes: Array.isArray(d.clk.v3nodes)
+                            ? d.clk.v3nodes.map(n => [+n[0], +n[1]]) : [],
+                          v3pin: typeof d.clk.v3pin === "string"
+                            ? d.clk.v3pin : null }
+                      : {});
   state.leds = (d.leds || []).map(L => {
     const led = { ...L, adv: L.adv ? { ...L.adv } : null };
     if (led.layout === "reverse") { led.layout = "stacked"; led.reverse = true; }
@@ -5779,7 +6996,7 @@ async function restoreDesign(d) {
   state.texts.forEach(t => ensureFont(t.font));
   // The square/custom dropdown is gone: a board is square exactly when it
   // has no outline parts. Saves from the dropdown era could carry leftover
-  // parts while set to "square" (switching back kept them, invisibly) —
+  // parts while set to "square" (switching back kept them, invisibly);
   // honor what that save showed on screen by dropping the parts.
   const savedMode = (d.shape && d.shape.mode) || "square";
   state.shape.mode = "custom";
@@ -5832,7 +7049,7 @@ async function restoreDesign(d) {
   draw();
   setStatus("Design restored.");
 }
-(() => { // offer — never force — restoring the last session's design
+(() => { // offer (never force) restoring the last session's design
   let saved = null;
   try {
     const raw = JSON.parse(localStorage.getItem("bm-design") || "null");
@@ -5846,6 +7063,7 @@ async function restoreDesign(d) {
     && saved.pins.length !== ALL_PINS.length;
   const meaningful = saved && ((saved.art || []).length || (saved.texts || []).length
     || ((saved.shape || {}).elements || []).length || (saved.leds || []).length > 1
+    || (saved.leds || []).some(L => L && L.clk)
     || droppedPins);
   if (!meaningful) return;
   const bar = $("restorebar");

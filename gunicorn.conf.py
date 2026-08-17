@@ -3,7 +3,7 @@
 Worker processes, not threads, on purpose: every request already works in
 its own TemporaryDirectory and shells out to its own kicad-cli, so isolated
 processes make the remaining shared-state questions (font caches, the
-refill-interpreter memo) disappear by construction — and CPU-bound shapely/
+refill-interpreter memo) disappear by construction, and CPU-bound shapely/
 PIL work scales across cores instead of serializing on the GIL.
 """
 
@@ -27,7 +27,7 @@ graceful_timeout = 30
 
 # The worker heartbeat file lives in memory; on containers with slow or
 # throttled disk a /tmp heartbeat can miss and kill healthy workers.
-# Linux-only path — running this config on macOS (dev) falls back to the
+# Linux-only path: running this config on macOS (dev) falls back to the
 # default temp dir.
 if os.path.isdir("/dev/shm"):
     worker_tmp_dir = "/dev/shm"

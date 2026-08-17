@@ -65,7 +65,7 @@ def test_clipped_to_board_edges():
 
 
 def _tricolor() -> bytes:
-    # Left third tan, middle third white, right third black — like a badge
+    # Left third tan, middle third white, right third black, like a badge
     # with lettering, filigree, and background.
     img = Image.new("RGBA", (90, 90), (0, 0, 0, 255))
     d = ImageDraw.Draw(img)
@@ -113,7 +113,7 @@ def test_palette_mode_skips_transparent_pixels():
 
 def _skull() -> bytes:
     # Helldivers-style: yellow background, black skull, yellow eyes enclosed
-    # in the black — the eyes match the background color but are a separate
+    # in the black; the eyes match the background color but are a separate
     # connected region.
     img = Image.new("RGB", (120, 120), (255, 220, 0))
     d = ImageDraw.Draw(img)

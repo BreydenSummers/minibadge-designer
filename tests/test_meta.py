@@ -613,7 +613,7 @@ def _battery() -> set[str]:
 
 
 #: Non-``test_*.py`` modules under ``tests/`` that a collected test imports, so
-#: names used in them really are exercised. Keep this list tiny and justified —
+#: names used in them really are exercised. Keep this list tiny and justified:
 #: every entry is a file that can certify a checker as reachable.
 _IMPORTED_HELPERS = {"conftest.py", "hostile.py"}
 
@@ -633,8 +633,8 @@ def _names_referenced_outside_the_library() -> set[str]:
         # `python_files` is `test_*.py`; an adversary added `_scratch_notes.py`
         # holding three bare attribute expressions inside `if False:`, deleted
         # the three matching exemptions, and the gate went green while
-        # `check_rotation_invariance` — the assertion that catches the historical
-        # LED-lens bug — ran nowhere. Helper modules imported *by* a collected
+        # `check_rotation_invariance` (the assertion that catches the historical
+        # LED-lens bug) ran nowhere. Helper modules imported *by* a collected
         # test still count, because their names are reachable through it.
         if not (f.name.startswith("test_") or f.name in _IMPORTED_HELPERS):
             continue
@@ -1004,7 +1004,7 @@ MEASURED_INERT = {
     "assert_every_unit_reaches_its_rails":
         "asserts only when a rail island is stranded; clean boards strand none, "
         "so the enumeration is empty on every corpus row. Defects #17 and #18 "
-        "have dedicated rows that DO reach it — see test_board_invariants.py.",
+        "have dedicated rows that DO reach it; see test_board_invariants.py.",
 }
 
 
@@ -1028,7 +1028,7 @@ def test_every_battery_check_actually_evaluates_an_assertion():
     Measured, not inferred: trace one pass of the corpus and record which
     ``assert``/``raise`` lines in ``invariants.py`` actually execute. An earlier
     version of the reachability gate read identifiers out of the AST, which a
-    never-collected file could satisfy — and separately certified four checks as
+    never-collected file could satisfy, and separately certified four checks as
     reached while no corpus row set ``farled``, ``novia``, ``texts`` or a custom
     outline, so their assertions ran on nothing.
     """
@@ -1072,7 +1072,7 @@ def test_every_battery_check_actually_evaluates_an_assertion():
     )
     stale = sorted(n for n in MEASURED_INERT if n in fired)
     assert not stale, (
-        f"MEASURED_INERT lists {stale}, but a corpus row now reaches them — "
+        f"MEASURED_INERT lists {stale}, but a corpus row now reaches them; "
         "delete the entry so the list keeps shrinking."
     )
 
@@ -1092,7 +1092,7 @@ def test_every_test_the_skill_documents_actually_exists():
 
     refs = REPO / ".claude" / "skills" / "writing-tests" / "references"
     if not refs.is_dir():
-        pytest.skip(f"{refs} is absent — the skill is gitignored, so a fresh "
+        pytest.skip(f"{refs} is absent; the skill is gitignored, so a fresh "
                     "clone legitimately has no reference files to check")
 
     defined = set()

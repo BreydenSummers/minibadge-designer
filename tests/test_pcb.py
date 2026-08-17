@@ -150,7 +150,7 @@ def test_pad_overlap_is_resolved():
 
 def test_clamp_is_rotation_aware():
     # rot 180 puts the resistor below the LED, so the LED itself can sit
-    # higher on the board than at rot 0 — and lower limits tighten instead.
+    # higher on the board than at rot 0, and lower limits tighten instead.
     _x0, y0 = pcb.clamp_led(0.0, 0.0, 0)
     _x180, y180 = pcb.clamp_led(0.0, 0.0, 180)
     assert y180 < y0
@@ -200,7 +200,7 @@ def test_arbitrary_rotation_rotates_unit():
 
 def test_tilted_units_pack_diagonally():
     # Two 45° units placed corner-to-corner: their axis-aligned envelopes
-    # overlap, but the rotated footprints are well clear — the tight
+    # overlap, but the rotated footprints are well clear: the tight
     # bounding must accept the placement (the envelope used to reject it).
     a = pcb.Led(8.0, 10.0, rot=45, side="front")
     b = pcb.Led(13.0, 15.0, rot=45, side="back")
@@ -317,7 +317,7 @@ def test_back_led_lands_on_back_layers(layout, size, rot):
     # pad's inflated art-keepout quad. When the scan treated the unit's own
     # back-face pads as F.Cu obstacles too, every ray "collided" with copper
     # that is not on that layer, no F.Cu bridge routed, and the webapp fell
-    # back to the reserved 2 mm window corridor — a fat band of pour across
+    # back to the reserved 2 mm window corridor: a fat band of pour across
     # the user's window where this 0.3 mm trace belongs.
     fsegs = re.findall(r'\(segment [^\n]+\(layer "F\.Cu"\) \(net (\d+)\)', out)
     assert fsegs == ["1"], \
@@ -385,7 +385,7 @@ def test_rotated_text_keeps_its_carve_area():
 
 def test_zone_fills_have_no_holes():
     # A back-side unit carves a U-shaped hole into the back pour whose
-    # bounding-box center lies on copper — the case that once left an
+    # bounding-box center lies on copper, the case that once left an
     # unfractured hole and poured copper over other-net pads (generate_pcb
     # now raises if a hole ever survives fracturing).
     spec = pcb.BadgeSpec(
@@ -468,7 +468,7 @@ def test_reverse_layout_routes_hole_and_forces_1206():
     g = pcb._layout("stacked", "0603", reverse=True)   # size is overridden to 1206
     assert g["pkg"] == "1206"
     assert g["hole"] == 1.25
-    # reverse composes with the inline layout too — same hole, inline offsets
+    # reverse composes with the inline layout too: same hole, inline offsets
     gi = pcb._layout("inline", "0805", reverse=True)
     assert gi["pkg"] == "1206" and gi["hole"] == 1.25
     assert gi["led_flip"] and gi["res"] == (-5.675, 0.0)
@@ -624,7 +624,7 @@ def test_th_model_anchored_at_pad_one():
     # The THT models are anchored at pin 1, so the model offset must walk to
     # pad 1 (board frame, unrotated, 3D y counting up) while the model's own
     # z-rotation matches the angle baked into our geometry. Getting either
-    # wrong slides the lens off its pads — invisible to DRC, obvious in 3D.
+    # wrong slides the lens off its pads: invisible to DRC, obvious in 3D.
     for ang, want_off in ((0, "-1.27 0 0"), (90, "0 1.27 0"), (270, "0 -1.27 0")):
         out = pcb.generate_pcb(pcb.BadgeSpec(
             leds=[pcb.Led(10.16, 10.16, "red", size="3mm", rot=ang)]))
@@ -634,7 +634,7 @@ def test_th_model_anchored_at_pad_one():
         assert m.group(1) == want_off, f"rot {ang}: offset {m.group(1)}"
         assert float(m.group(2)) == ang, f"rot {ang}: rotate {m.group(2)}"
     # A back-side footprint is flipped through the board plane, which reverses
-    # the sense of the model's z-rotation — and the offset rides along, since
+    # the sense of the model's z-rotation, and the offset rides along, since
     # it is expressed in the model's own frame. With the sign wrong the body
     # lies across its own pads at twice the angle (invisible on a round part,
     # which is why this needs asserting rather than eyeballing a render).
@@ -720,7 +720,7 @@ def test_light_windows_get_keepouts():
 
 def test_through_hole_silk_is_inside_the_art_keepout():
     """Artwork carves around a unit's copper, but a through-hole lens outline
-    is drawn well outside the pads — so silk art used to print straight over
+    is drawn well outside the pads, so silk art used to print straight over
     the part's own silkscreen and KiCad flagged the overlap. The keepout has
     to cover the body, not just the copper."""
     from shapely.geometry import Point
@@ -740,13 +740,13 @@ def test_through_hole_silk_is_inside_the_art_keepout():
         for pt in (Point(10.16 + reach_x, 10.16), Point(10.16 - reach_x, 10.16),
                    Point(10.16, 10.16 + reach_y), Point(10.16, 10.16 - reach_y)):
             assert poly.contains(pt), f"{size}: silk at {pt.wkt} not kept clear"
-    # SMD parts keep the tighter envelope — no phantom body keepout
+    # SMD parts keep the tighter envelope: no phantom body keepout
     assert "silk_body" not in {n for n, _q in pcb.unit_copper_pieces(
         pcb.Led(10.16, 10.16, "red", size="0805"))}
 
 
 def _courtyard_half(size: str) -> tuple[float, float]:
-    """Half-extents of a footprint's courtyard rect — mirrors _footprint()."""
+    """Half-extents of a footprint's courtyard rect; mirrors _footprint()."""
     p = pcb.PKG[size]
     bw, bh = p["body"]
     return (max(p["dx"] + 1.05, bw / 2 + 0.25),
@@ -1036,7 +1036,7 @@ def test_routes_squeezed_around_an_obstacle_never_turn_sharper_than_45():
 
 
 def test_a_chosen_pad_wins_over_the_nearest_one():
-    """A hand-picked trace end sends the run there — never to the closer pad
+    """A hand-picked trace end sends the run there, never to the closer pad
     the auto-router would use.
 
     The endpoint is the user's routing decision on the physical board: a run
@@ -1075,7 +1075,7 @@ def test_a_run_chained_onto_another_unit_lands_on_its_pad_and_ships_no_via():
     assert term is not None and term[1] is b, "the chain target did not resolve"
     route = pcb.novia_route(a, spec.pins, safe, spec.leds, term=term)
     assert not route.get("tight"), route
-    # The run ends exactly on b's cathode pad — the GND pad of a front unit.
+    # The run ends exactly on b's cathode pad, the GND pad of a front unit.
     g = pcb.led_geometry(b)
     bx, by = pcb.clamp_led_obj(b, safe)
     ox, oy = pcb._r(*g["led_k"], b.rot)
@@ -1098,8 +1098,8 @@ def test_a_run_chained_onto_another_unit_lands_on_its_pad_and_ships_no_via():
 ])
 def test_an_invalid_terminal_choice_falls_back_to_the_nearest_pad(
         term, leds_extra, why):
-    """Every invalid choice resolves to None — the automatic nearest-pad
-    route — instead of refusing the board or, worse, landing the run on
+    """Every invalid choice resolves to None (the automatic nearest-pad
+    route) instead of refusing the board or, worse, landing the run on
     copper that cannot power it. Hand-crafted requests are sanitized, and
     the canvas never offers these choices in the first place."""
     led = pcb.Led(6.0, 6.0, "red", novia=True, term=term)
@@ -1158,7 +1158,7 @@ def test_half_populated_pair_still_gets_a_single_pin_header():
     import re
 
     # A pair with one pin dropped has a real one-pin header on the finished
-    # badge, so the 3D model must show one — centred on the pad that is left,
+    # badge, so the 3D model must show one, centred on the pad that is left,
     # not on the pair midpoint a two-pin body would use.
     out = pcb.generate_pcb(pcb.BadgeSpec(leds=[], pins=("7",)))
     assert "PinHeader_1x01_P2.54mm_Vertical" in out
@@ -1177,7 +1177,7 @@ def test_one_face_bare_window_leaves_the_other_pour_alone():
     from shapely.geometry import Point
 
     # A part on the front and a bare window on the back, overlapping. The
-    # window only opens the back mask, so only the back pour is cut — the
+    # window only opens the back mask, so only the back pour is cut; the
     # front keeps its copper and the part keeps working.
     win = (5.0, 6.0, 11.0, 8.0)
     led = pcb.Led(10.16, 10.16, "red", side="front", size="0805", layout="inline")
@@ -1191,7 +1191,7 @@ def test_one_face_bare_window_leaves_the_other_pour_alone():
     assert any(p.contains(at) for p in front), "front pour should survive"
     assert not any(p.contains(at) for p in back), "back pour should be cut"
 
-    # A glow window has to cut both — light crosses the board.
+    # A glow window has to cut both: light crosses the board.
     spec = pcb.BadgeSpec(leds=[led], art=[pcb.ArtLayer("glow", [win])])
     assert not any(p.contains(at) for p in pcb._fill_geometry("3V3", "F.Cu", spec))
     assert not any(p.contains(at) for p in pcb._fill_geometry("GND", "B.Cu", spec))

@@ -5,7 +5,7 @@ grid entirely. Every filled shape is flattened to polygons with fine
 chords, assembled under its fill rule (holes stay holes), occluded in
 paint order (later shapes cover earlier ones, like a renderer would), and
 grouped by the color that actually ends up visible. The result is the
-artwork's true printed geometry — no 0.18 mm pixel staircase.
+artwork's true printed geometry, with no 0.18 mm pixel staircase.
 
 Approximations versus a real renderer (fine for flat-color logo SVGs,
 which is what the palette pipeline targets):
@@ -13,7 +13,7 @@ which is what the palette pipeline targets):
 - paint with alpha < 50% is treated as fully transparent, >= 50% as
   fully opaque (the raster path applies the same alpha-128 cut);
 - strokes get round caps/joins regardless of the SVG's cap/join style;
-- gradients/patterns aren't solid colors — parsing raises ValueError and
+- gradients/patterns aren't solid colors; parsing raises ValueError and
   the caller falls back to the raster pipeline.
 """
 
@@ -23,7 +23,7 @@ import io
 
 from .logo import EDGE_MARGIN
 
-# A parsed document is normalized so its frame is (0, 0, width, height) —
+# A parsed document is normalized so its frame is (0, 0, width, height):
 # svgelements applies the viewBox transform, matching what a browser
 # rasterizes. Geometry may spill outside the frame; like the raster path
 # (which clips to the canvas), we clip to the frame.
@@ -71,7 +71,7 @@ def _rings_to_geometry(rings: list[list[tuple[float, float]]], fill_rule: str):
     Rings are sorted by area (outermost first) and folded: a ring whose
     interior band is painted unions in, one whose band is unpainted cuts
     out. Winding numbers decide "painted" (nonzero) or containment parity
-    (evenodd) — so opposite-wound holes AND same-wound nested subpaths
+    (evenodd), so opposite-wound holes AND same-wound nested subpaths
     both come out the way a renderer draws them.
     """
     from shapely.geometry import LinearRing, Polygon
@@ -82,7 +82,7 @@ def _rings_to_geometry(rings: list[list[tuple[float, float]]], fill_rule: str):
             continue
         try:
             sign = 1 if LinearRing(ring).is_ccw else -1
-        except Exception:  # noqa: BLE001, S112 — degenerate ring: skip it
+        except Exception:  # noqa: BLE001, S112 (degenerate ring: skip it)
             continue
         poly = Polygon(ring).buffer(0)  # heal self-intersections
         if poly.is_empty:
@@ -126,8 +126,8 @@ def svg_color_regions(data: bytes):
     """Parse an SVG into painter-flattened per-color regions.
 
     Returns (regions, frame): regions is an ordered list of
-    ((r, g, b), geometry) pairs — mutually disjoint, each the part of that
-    color actually visible after later shapes covered earlier ones — and
+    ((r, g, b), geometry) pairs (mutually disjoint, each the part of that
+    color actually visible after later shapes covered earlier ones), and
     frame is (width, height) in SVG user units. Raises ValueError for
     SVGs this parser can't do exactly (gradients, patterns, no fillable
     shapes); callers then fall back to the raster pipeline.

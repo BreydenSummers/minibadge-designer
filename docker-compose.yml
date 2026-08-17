@@ -4,7 +4,7 @@ name: minibadge-designer
 services:
   minibadge-designer:
     build: .
-    # Optional local overrides — the app has no required configuration, so a
+    # Optional local overrides: the app has no required configuration, so a
     # missing .env must not stop the stack from coming up.
     env_file:
       - path: .env

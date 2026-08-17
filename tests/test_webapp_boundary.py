@@ -1,8 +1,8 @@
 """Collects the hostile-input corpus (`tests/hostile.py`) against the HTTP boundary.
 
-This module is deliberately three lines of code. Every decision — which routes a
+This module is deliberately three lines of code. Every decision (which routes a
 payload visits, its wall-clock budget, its strict-xfail marker naming a live
-defect, its `slow`/`kicad` tier markers — is made by `hostile.route_cases()` and
+defect, its `slow`/`kicad` tier markers) is made by `hostile.route_cases()` and
 asserted by `hostile.probe()`, which returns `None` so that nothing here can grow
 an assertion about a status code. Add payloads to the corpus, never to this file.
 """
