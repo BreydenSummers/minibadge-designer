@@ -619,6 +619,7 @@
       <span class="lg"><span class="lgchip" data-mat="copper"></span>Copper</span>
       <span class="lg"><span class="lgchip" data-mat="glow"></span>Glow</span>
       <span class="lg"><span class="lgchip" data-mat="bare"></span>Bare</span>
+      <span class="lg"><span class="lgchip" data-mat="cut"></span>Cut</span>
       <span class="lg"><span class="lgdash"></span>other side</span>
       <span class="lg"><span class="lgchip" id="viachip" style="background:#cfa435;border-radius:50%"></span>via</span>
       <button class="qm" tabindex="-1" data-tip="materials" title="What the materials mean">?</button>
@@ -777,7 +778,7 @@ function geomOf(L) { // mirrors pcb.led_geometry (incl. advanced placement)
 const BOARD_SPAN = 20.32;
 const MASKS = { green:"#0d5c38", purple:"#4b2a7b", black:"#1b1d21", red:"#7c1622", blue:"#173f7c", white:"#e8e6df" };
 const LEDC = { red:"#ff3b30", orange:"#ff9500", yellow:"#ffe14d", green:"#3dff6e", blue:"#3f8cff", white:"#ffffff" };
-const MATERIALS = { silk: "Silkscreen", copper: "Exposed copper", glow: "Glow window", bare: "Bare board" };
+const MATERIALS = { silk: "Silkscreen", copper: "Exposed copper", glow: "Glow window", bare: "Bare board", cut: "Cut through board" };
 // Exposed metal (pads, vias, copper art) plates gold under ENIG, silver
 // under lead-free HASL: a board-wide fab choice, so it's one picker.
 const FINISH_PAD = { enig: "#cfa435", hasl: "#c6ccd6" };
@@ -797,6 +798,15 @@ const layerHasMat = (a, mat) => isShapeArt(a) ? a.material === mat : !!(a.caches
 const usesBare = a => isShapeArt(a) ? a.material === "bare"
   : (a.mode === "threshold" ? a.material === "bare"
      : a.palette.some(p => p.material === "bare")) || a.overrides.some(o => o.material === "bare");
+// Cut-material regions remove the board itself: they subtract from the
+// outline server-side, and the preview punches them out of the board mask.
+const usesCut = a => isShapeArt(a) ? a.material === "cut"
+  : (a.mode === "threshold" ? a.material === "cut"
+     : a.palette.some(p => p.material === "cut")) || a.overrides.some(o => o.material === "cut");
+const artHasCut = () => state.art.some(usesCut);
+// Whether anything at all carves the board away from the standard square:
+// an outline part, or an art layer with cut regions.
+const boardCarved = () => customActive() || artHasCut();
 // When a layer FIRST gains bare, default its window to Through (the classic
 // light pipe); the user can still narrow it to one face afterwards.
 function promoteToThrough(a, hadBare) {
@@ -1065,20 +1075,34 @@ function requestOutline(immediate) {
   s.outlineEmpty = false; // unknown again until the new outline comes back
   s.ringsRev = (s.ringsRev || 0) + 1;
   const seq = ++outlineSeq;
-  if (!customActive()) { draw(); return; }
+  if (!boardCarved()) { draw(); return; }
   clearTimeout(outlineTimer);
   outlineTimer = setTimeout(async () => {
     const fd = new FormData();
     appendShapeFiles(fd);
-    fd.append("params", JSON.stringify({
+    const params = {
       pins: ALL_PINS.filter(pinOn),
       shape: shapeParams(),
-    }));
+    };
+    if (artHasCut()) {
+      // Cut-material art carves the outline too; send those layers (meta +
+      // files, at their real indices) so the hole is the exact contour the
+      // generator will cut.
+      params.art = artParams();
+      state.art.forEach((a, i) => {
+        if (usesCut(a) && a.file) {
+          fd.append(`art${i}`, a.file, a.file.name || a.fname);
+          if (a.raster) fd.append(`art${i}_raster`, a.raster, a.raster.name);
+        }
+      });
+    }
+    fd.append("params", JSON.stringify(params));
     try {
       const resp = await fetch("/outline", { method: "POST", body: fd });
       const data = await resp.json();
       if (seq !== outlineSeq) return; // a newer request superseded this one
       s.rings = data.rings || null;
+      s.cutIgnored = !!data.cutIgnored;
       // A resolved-but-empty outline is the one case the preview cannot show:
       // there is simply nothing to draw. Downloads would fall back to the
       // plain square, so this has to be said out loud rather than shipped
@@ -1102,6 +1126,7 @@ function requestOutline(immediate) {
       outlineAddCheck = null;
       s.rings = null;
       s.outlineEmpty = false;
+      s.cutIgnored = false;
       s.ringsRev = (s.ringsRev || 0) + 1;
     }
     relocateStrandedLeds();
@@ -1109,6 +1134,33 @@ function requestOutline(immediate) {
     draw();
   }, immediate ? 0 : 250);
   draw();
+}
+
+// Everything about an art layer that can move its cut regions on the board.
+// draw() is the funnel every edit passes through, so comparing this
+// signature there catches width boxes, threshold slides, wand picks and
+// canvas drags alike without instrumenting each control; the debounce in
+// requestOutline keeps mid-drag changes to one request per pause.
+let _artCutSig = "";
+function artCutSig() {
+  const parts = [];
+  state.art.forEach((a, i) => {
+    if (!usesCut(a)) return;
+    parts.push([
+      i, a.kind || "image", a.cx, a.cy, a.wmm, a.h || 0, a.rot || 0,
+      !!a.flip, a.side || "front", a.sides || 0, a.mode || "",
+      a.threshold || 0, !!a.invert, a.material || "",
+      (a.palette || []).map(p => p.material).join(","),
+      (a.overrides || []).map(o => `${o.u}:${o.v}:${o.material}`).join(","),
+    ].join("|"));
+  });
+  return parts.join(";");
+}
+function syncArtCutOutline() {
+  const sig = artCutSig();
+  if (sig === _artCutSig) return;
+  _artCutSig = sig;
+  requestOutline();
 }
 
 // ---- board outline ----
@@ -1308,14 +1360,33 @@ function compositeLayer(c, off, mirror) {
 // part is being dragged (or before the server outline arrives), it is
 // composed client-side: adds fill, cuts erase, and the connector pad
 // plates always stay (they never move on the real board).
+// Punch every art layer's cut-material regions out of a board mask context.
+// Only used while the mask is composed client-side; the server outline
+// already carries the exact holes once /outline answers.
+function punchArtCuts(mc) {
+  if (!artHasCut()) return;
+  mc.globalCompositeOperation = "destination-out";
+  for (const a of state.art) if (usesCut(a)) drawArtSided(mc, a, "cut", null);
+  mc.globalCompositeOperation = "source-over";
+}
+// Is an art layer with cut regions being moved/resized/rotated? The board
+// mask then composes client-side so the hole tracks the cursor, exactly
+// like dragging a board-shape part does.
+const draggingCutArt = () => {
+  if (!drag) return false;
+  const i = drag.kind === "art" ? drag.index
+    : (drag.kind === "resize" || drag.kind === "rotate") && drag.tkind === "art"
+      ? drag.index : -1;
+  return i >= 0 && !!state.art[i] && usesCut(state.art[i]);
+};
 function paintBoardMask(mc, color) {
   const s = state.shape;
   mc.fillStyle = color;
-  if (!customActive()) {
+  if (!boardCarved()) {
     mc.fillRect(mm2px(0.16), mm2px(0.16), 20 * SCALE, 20 * SCALE);
     return;
   }
-  if (s.rings && !draggingPart()) {
+  if (s.rings && !draggingPart() && !draggingCutArt()) {
     mc.fill(ringsPath(s.rings), "evenodd");
     return;
   }
@@ -1327,6 +1398,7 @@ function paintBoardMask(mc, color) {
   mc.globalCompositeOperation = "destination-out";
   for (const el of s.elements) if (el.op === "cut") fillElement(mc, el);
   mc.globalCompositeOperation = "source-over";
+  punchArtCuts(mc);
   mc.fill(platesPath());
 }
 // Erase everything outside the board from a view-space offscreen context.
@@ -2670,7 +2742,7 @@ function pointInQuad(q, x, y) { // convex quad, consistent winding
 }
 function unitInsideBoard(L) {
   const s = state.shape;
-  if (!customActive() || !s.rings) return true; // server backstops
+  if (!boardCarved() || !s.rings) return true; // server backstops
   // EXACT mirror of the server's test: the unit's rotated rect must sit
   // inside outline.buffer(-0.55). Equivalent formulation without polygon
   // offsetting: corners inside the outline (and outside its holes), no
@@ -2936,7 +3008,7 @@ function textOnSolidBoard(t) {
     const ny = Math.max(0, Math.max(b[1] - L.y, L.y - b[3]));
     if (nx * nx + ny * ny < r * r) return false;
   }
-  if (!customActive() || !state.shape.rings) {
+  if (!boardCarved() || !state.shape.rings) {
     return b[0] >= OUT[0] && b[2] <= OUT[2] && b[1] >= OUT[1] && b[3] <= OUT[3];
   }
   // ~1 mm sample grid over the text box so small holes can't slip between
@@ -2978,6 +3050,9 @@ function materialRGBA(material) {
     return state.finish === "hasl" ? [199, 206, 216, 255] : [219, 178, 74, 255];
   }
   if (material === "bare") return [206, 172, 122, 255];
+  // Cut: a hole through the board. The cache built from this is only ever
+  // used as a punch mask (alpha), but the legend chip shows this color.
+  if (material === "cut") return [10, 14, 20, 255];
   const m = hexRGB(MASKS[state.mask]);            // glow: lightened mask tint
   const mix = (c, w) => Math.round(c + (255 - c) * w);
   return [mix(m[0], 0.55), mix(m[1], 0.55), mix(m[2], 0.55), 235];
@@ -3911,10 +3986,10 @@ function drawView(canvas, side) {
   paintBoardMask(boardCtx, MASKS[state.mask]);
   compositeLayer(c, boardOff, mirror);
   const edgeStroke = lightUI ? "rgba(22,48,78,.4)" : "rgba(255,255,255,.25)";
-  if (!customActive()) {
+  if (!boardCarved()) {
     c.strokeStyle = edgeStroke; c.lineWidth = 1;
     c.strokeRect(mm2px(0.16), mm2px(0.16), 20 * SCALE, 20 * SCALE);
-  } else if (state.shape.rings && !draggingPart()) {
+  } else if (state.shape.rings && !draggingPart() && !draggingCutArt()) {
     // Only stroke a real boundary; the client-side composition fallback
     // would show internal seams between the parts.
     c.strokeStyle = edgeStroke; c.lineWidth = 1;
@@ -3953,6 +4028,11 @@ function drawView(canvas, side) {
     c.beginPath(); c.arc(mm2px(x), mm2px(y), 0.475 * SCALE, 0, 7);
     c.fillStyle = "#0d0e10"; c.fill();
   }
+  // Text is board decor like the art layers, so it goes on before the parts:
+  // a component is mounted ON the board and physically covers whatever is
+  // printed under it. Drawing text last painted glyphs over the very LED
+  // the user was trying to see (and grab).
+  drawTextLayers(c, mirror); // vector AND stroke texts, board-clipped
   drawJumper(c, mirror);
   for (const led of state.leds) {
     const farled = !!led.farled && farOK(led);
@@ -4071,7 +4151,6 @@ function drawView(canvas, side) {
     if (clearOfPads(pg)) c.fillText("GND", tx(pg[0]), mm2px(pg[1]));
   }
 
-  drawTextLayers(c, mirror); // vector AND stroke texts, board-clipped
   c.restore(); // viewport translate
 }
 
@@ -4089,6 +4168,10 @@ function draw() {
   // the handles, the arrow keys and Delete are all still aimed at the object
   // the user picked, whatever spliced, swapped or replaced the lists since.
   reconcileSelection();
+  // Cut-material art carves the outline; refetch it when those regions
+  // change (no-op otherwise; requestOutline's own draw() call re-enters
+  // here with an unchanged signature, so this cannot loop).
+  syncArtCutOutline();
   updateView();
   drawView(cvF, "front");
   drawView(cvB, "back");
@@ -4389,8 +4472,8 @@ function attachPointer(cv, side) {
     };
     const hit = textHit() || ledHit(true);
     if (hit) return hit;
-    if (clkActive() && state.clk.jumper
-        && side === (state.clk.side === "back" ? "back" : "front")) {
+    const jumperSide = state.clk.side === "back" ? "back" : "front";
+    if (clkActive() && state.clk.jumper && side === jumperSide) {
       // The CLK jumper drags like a part, on the face it is mounted on;
       // its link bends grab before its body, like a unit's bends do.
       const ci = clkInfo();
@@ -4420,6 +4503,22 @@ function attachPointer(cv, side) {
         }
       }
     }
+    // Components stay on top: a far-side unit's dashed ghost (and the
+    // jumper's) grabs before art and before the board-shape parts. On a
+    // custom outline the shape part covers the whole board, and testing it
+    // first made every ghost drag move the board out from under the user.
+    const ghost = ledHit(false);
+    if (ghost) return ghost;
+    if (clkActive() && state.clk.jumper && side !== jumperSide) {
+      const ci = clkInfo();
+      if (ci && ci.jumper) {
+        const [jx, jy, rot] = ci.jumper;
+        const [ux, uy] = rotOff(mx - jx, my - jy, -rot);
+        if (Math.abs(ux) < 2.4 && Math.abs(uy) < 1.2) {
+          return { kind: "jumper", index: 0, x: jx, y: jy, side: ci.side };
+        }
+      }
+    }
     for (let i = state.art.length - 1; i >= 0; i--) {
       const a = state.art[i];
       const d = artDims(a);
@@ -4434,7 +4533,7 @@ function attachPointer(cv, side) {
         : hitCtx.isPointInPath(elementPath(el), mm2px(mx), mm2px(my));
       if (inEl) return { kind: "shapeel", index: i, x: el.cx, y: el.cy, side: "front" };
     }
-    return ledHit(false); // other-side ghost units last
+    return null;
   };
   // A resize/rotate handle of the current selection under the cursor.
   const handleAt = (mx, my) => {
@@ -5068,6 +5167,17 @@ function removeItem(kind, i, label) {
   return true;
 }
 
+// Clicking a layer's card selects it on the canvas. Parts are drawn (and
+// grabbed) above artwork, so a layer parked entirely under a unit has no
+// clickable pixels of its own; without this the arrow-key nudge could never
+// be aimed at it and the layer would be stuck where it landed.
+function selectFromCard(div, kind, i) {
+  div.addEventListener("pointerdown", e => {
+    if (e.target.closest("button, select, input, textarea, label")) return;
+    setSelection(kind, i, "front");
+    draw();
+  });
+}
 function renderArtList() {
   picking = null;
   artHL = null;
@@ -5132,6 +5242,7 @@ function renderArtList() {
       bindPair(div, "sd", v => { a.sides = Math.round(v); draw(); });
       bindPair(div, "wd", v => { a.wmm = v; draw(); });
       bindPair(div, "hh", v => { a.h = v; draw(); });
+      selectFromCard(div, "art", i);
       wrap.appendChild(div);
       return;
     }
@@ -5285,6 +5396,7 @@ function renderArtList() {
     hover(div.querySelector(".th"), { type: "threshold" });
     hover(div.querySelector(".inv"), { type: "threshold" });
     div.querySelectorAll(".ovchips .chip2").forEach((chip, j) => hover(chip, { type: "override", j }));
+    selectFromCard(div, "art", i);
     wrap.appendChild(div);
   });
 }
@@ -5390,7 +5502,7 @@ function blockingProblems() {
       out.push([`Text ${i + 1} hangs over the board edge or a hole`, "text", i]);
     }
   });
-  if (customActive() && state.shape.outlineEmpty) {
+  if (boardCarved() && state.shape.outlineEmpty) {
     out.push(["the custom outline is empty", "shapeel", -1]);
   }
   return out;
@@ -5506,7 +5618,7 @@ function refreshWarnings() {
         + "red); drag it somewhere clear.", "jumper", -1]);
     }
   }
-  if (customActive()) {
+  if (boardCarved()) {
     state.shape.elements.forEach((el, i) => {
       if (el.kind === "image" && el.empty) {
         want.push([`w:el-${i}`, `Outline part ${i + 1}`,
@@ -5520,6 +5632,14 @@ function refreshWarnings() {
         + "or fix the parts above; downloads are blocked until it has one.",
         "shapeel", -1]);
     }
+  }
+  if (artHasCut() && state.shape.cutIgnored) {
+    // The hole closes itself back up with no explanation otherwise.
+    const i = state.art.findIndex(usesCut);
+    want.push(["w:artcut", "Cut artwork",
+      "this cut-through layer isn't removing any board: it sits off the board, "
+      + "or only where a connector pad keeps its tab of material. Move or "
+      + "enlarge it.", "art", i < 0 ? -1 : i]);
   }
   // Identical problems collapse into one toast ("LED 1, LED 2: no solid
   // board..."): four copies of the same warning bury the very board the
@@ -5818,7 +5938,7 @@ function renderTextList() {
           ${FONTS.map(f => opt(f.key, f.label, t.font)).join("")}
         </select></div>
         <div style="flex:2"><select class="mat" title="Material"${t.font === "kicad" ? " disabled" : ""}>
-          ${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, t.material)).join("")}
+          ${Object.entries(MATERIALS).filter(([v]) => v !== "cut").map(([v, l]) => opt(v, l, t.material)).join("")}
         </select></div>
       </div>
       <div class="sub">Rotation (&deg;, clockwise); double-click the text on the board for +90</div>
@@ -6180,9 +6300,16 @@ $("addled").addEventListener("click", () => {
   const led = {x: 10, y: 10, color: "red", side: "back", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null};
   const spot = spotForNewLed(led);
   if (!spot) {
-    setStatus(`No room for another LED: ${state.leds.length} unit`
-      + `${state.leds.length === 1 ? "" : "s"} already fill this board. Drag units `
-      + "closer together, switch some to the smaller 0603 size, or enlarge the board.", true);
+    // Blaming crowding is a lie when nothing is on the board yet: then the
+    // shape itself (a thin outline, or a cut eating the only wide part) is
+    // what leaves no unit-sized patch of solid board. Say which it is.
+    setStatus(state.leds.length
+      ? `No room for another LED: ${state.leds.length} unit`
+        + `${state.leds.length === 1 ? "" : "s"} already fill this board. Drag units `
+        + "closer together, switch some to the smaller 0603 size, or enlarge the board."
+      : "No room for an LED: no part of this board is wide enough for a unit. "
+        + (artHasCut() ? "Shrink or move the cut-through artwork, or " : "")
+        + "enlarge the board shape.", true);
     return;
   }
   [led.x, led.y] = spot;
@@ -6255,6 +6382,18 @@ $("tenting").addEventListener("change", () => {
   draw(); // vias crossing windows repaint as mask caps or bare annuli
 });
 
+// Art layer metadata as /generate, /render and /outline take it.
+function artParams() {
+  return state.art.map(a => ({
+    kind: a.kind || "image", side: a.side || "front",
+    mode: a.mode,
+    material: a.material, threshold: a.threshold, invert: a.invert,
+    palette: (a.palette || []).map(p => ({ rgb: p.rgb, material: p.material })),
+    rot: a.rot, sides: a.sides, flip: a.flip,
+    overrides: (a.overrides || []).map(o => ({ u: o.u, v: o.v, material: o.material })),
+    cx: a.cx, cy: a.cy, w: a.wmm, h: a.h,
+  }));
+}
 function designFormData() { // the full design, as /generate and /render take it
   const fd = new FormData();
   state.art.forEach((a, i) => {
@@ -6277,15 +6416,7 @@ function designFormData() { // the full design, as /generate and /render take it
            ...(state.clk.x != null && state.clk.y != null
                ? { x: state.clk.x, y: state.clk.y } : {}) },
     shape: shapeParams(),
-    art: state.art.map(a => ({
-      kind: a.kind || "image", side: a.side || "front",
-      mode: a.mode,
-      material: a.material, threshold: a.threshold, invert: a.invert,
-      palette: (a.palette || []).map(p => ({ rgb: p.rgb, material: p.material })),
-      rot: a.rot, sides: a.sides, flip: a.flip,
-      overrides: (a.overrides || []).map(o => ({ u: o.u, v: o.v, material: o.material })),
-      cx: a.cx, cy: a.cy, w: a.wmm, h: a.h,
-    })),
+    art: artParams(),
     leds: state.leds,
     texts: state.texts.filter(t => t.text.trim()),
   }));
@@ -6732,6 +6863,7 @@ const TIPS = {
     <li>The same helmet PNG, added as artwork, loads in <b>By color</b> mode with a material guessed per color — check every row and fix the guesses (here the body is set to <i>Ignore</i>: plain soldermask).</li>
     <li>Hover a color row to light up exactly which pixels it controls.</li>
     <li>PNG/JPG snap to a 0.18 mm grid; SVG art stays exact at any size.</li>
+    <li><b>Cut through board</b> removes the board itself — a real hole through copper, mask and laminate. The connector pads always keep a tab of board, and parts get moved off the hole (or flagged) automatically.</li>
   </ul>` },
   wand: { title: "Step 3: the visor, with the magic wand", img: "wand.webp", html: `<ul>
     <li>The visor is the same black as the body, but only the visor should glow: pick <b>Glow window</b>, press <b>Pick region</b>, click the visor. Just that connected patch changes; <b>Esc</b> cancels.</li>

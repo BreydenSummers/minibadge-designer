@@ -686,6 +686,238 @@ def test_cut_only_carves_standard_square(client):
     assert 7.0 < min(hx) and max(hx) < 13.3  # the Ø6 hole
 
 
+# ---------------------------------------------------------------------------
+# Cut-material artwork.
+#
+# "cut" is the one art material that is not ink on a layer: it is the absence
+# of board.  Those regions are subtracted from the outline *before* the
+# connector-pad tabs are unioned in, so a fab routs a real hole through
+# copper, mask and laminate while the pads keep the material that holds them.
+# ---------------------------------------------------------------------------
+def _routed_board(board_text):
+    """The shape a fab would rout: outer Edge.Cuts contour minus its holes.
+
+    Contours are read through the public ``Board.graphics``; walking the
+    s-expression children by name here (rather than borrowing invariants'
+    private ``_kid``/``_edge_polygon``) keeps this working when those get
+    renamed.
+    """
+    from shapely.geometry import Polygon
+
+    from minibadge_designer import pcb
+
+    board = invariants.assert_parses(board_text)
+    rings = []
+    for g in board.graphics("Edge.Cuts"):
+        if g[0] != "gr_poly":
+            continue
+        pts = next(c for c in g if isinstance(c, list) and c and c[0] == "pts")
+        rings.append(Polygon([(float(p[1]) - pcb.ORIGIN, float(p[2]) - pcb.ORIGIN)
+                              for p in pts[1:]]))
+    assert rings, "no gr_poly contour on Edge.Cuts"
+    outer = max(rings, key=lambda p: p.area)
+    for ring in rings:
+        if ring is not outer:
+            outer = outer.difference(ring)
+    return outer
+
+
+def _generated_board(client, params, slug, files=None):
+    data = {"params": json.dumps(params), **(files or {})}
+    resp = client.post("/generate", data=data, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    return zf.read(f"{slug}/{slug}.kicad_pcb").decode()
+
+
+_HEX30 = {"mode": "custom", "elements": [
+    {"kind": "hex", "op": "add", "cx": 10.16, "cy": 10.16, "w": 30,
+     "rot": 0, "sides": 6}]}
+
+
+@pytest.mark.parametrize(
+    "shape, layer, upload, hole_probe, solid_probe",
+    [
+        # The default square, a front circle in the middle.
+        (None,
+         {"kind": "circle", "material": "cut", "side": "front",
+          "cx": 10.16, "cy": 10.16, "w": 7, "h": 7, "rot": 0},
+         False, (10.16, 10.16), (10.16, 5.66)),
+        # Nothing about the rule is special to a circle, to the front face, to
+        # an unrotated layer, or to the standard square: a rotated polygon on
+        # the BACK of a custom hex outline cuts exactly the same way.
+        (_HEX30,
+         {"kind": "hex", "sides": 6, "material": "cut", "side": "back",
+          "cx": 6.5, "cy": 13.0, "w": 6, "h": 6, "rot": 25},
+         False, (6.5, 13.0), (6.5, 17.4)),
+        # An UPLOADED bitmap reaches the cut through a different pipeline
+        # (threshold -> pixel grid -> merged rects) than the vector shapes
+        # above.  Both cases passed while that pipeline read the wrong
+        # material key, which is what put this case here.
+        (None,
+         {"kind": "image", "material": "cut", "side": "front", "mode": "threshold",
+          "threshold": 128, "invert": False, "cx": 10.16, "cy": 10.16, "w": 8},
+         True, (10.16, 10.16), (10.16, 6.0)),
+    ],
+    ids=["square-circle-front", "hex-outline-polygon-back-rotated",
+         "uploaded-bitmap-threshold"],
+)
+def test_art_assigned_the_cut_material_is_routed_out_of_the_board(
+        client, shape, layer, upload, hole_probe, solid_probe):
+    # If this breaks the fab ships a solid badge where the user drew a
+    # cut-out (or, worse, routs one somewhere else).
+    from shapely.geometry import Point
+
+    params = _params(name="cut", leds=[], art=[layer])
+    if shape is not None:
+        params["shape"] = shape
+    files = {"art0": (io.BytesIO(_logo_bytes()), "cut.png")} if upload else None
+    board = _routed_board(_generated_board(client, params, "cut", files))
+    assert not board.contains(Point(*hole_probe)), (
+        f"{hole_probe} is under the cut layer but is still solid board; "
+        "the cut-out was not routed")
+    assert board.contains(Point(*solid_probe)), (
+        f"{solid_probe} is clear of the cut layer but is not board; the cut "
+        "removed more than the user drew")
+
+
+def test_the_previewed_outline_carries_the_cut_the_board_is_routed_with(client):
+    # The preview is the only thing the user sees before ordering.  A hole in
+    # the canvas that the fab does not rout (or the reverse) is a lie that
+    # costs a board run, and /outline and /generate reach it by different
+    # call paths.
+    from shapely.geometry import Polygon
+
+    layer = {"kind": "star", "material": "cut", "side": "front",
+             "cx": 10.16, "cy": 10.16, "w": 9, "h": 9, "rot": 15}
+    params = _params(name="cut", leds=[], art=[layer], shape=_HEX30)
+
+    resp = client.post(
+        "/outline",
+        data={"params": json.dumps({"shape": _HEX30, "art": [layer]})},
+        content_type="multipart/form-data",
+    )
+    data = resp.get_json()
+    assert data["rings"], "preview returned no outline at all"
+    assert data["cutIgnored"] is False, (
+        "the preview reported this cut as having no effect, but it lands "
+        "in the middle of the board")
+    previewed = Polygon(data["rings"][0], data["rings"][1:])
+    routed = _routed_board(_generated_board(client, params, "cut"))
+
+    # Agreement, not coordinates: whatever the shapes are, they must be the
+    # same shape.
+    disagreement = previewed.symmetric_difference(routed).area
+    assert disagreement < 1e-3 * routed.area, (
+        f"preview and routed board disagree over {disagreement:.4f} mm^2; "
+        "the canvas is not showing the board that would be made")
+
+
+def test_a_cut_never_removes_the_board_under_a_kept_connector_pad(client):
+    # The pads are how the badge mounts to its host.  A cut is allowed to eat
+    # the middle of the board, but the tab a kept pad pair stands on is
+    # unioned back in afterwards and must survive a cut aimed straight at it.
+    from shapely.geometry import Point
+
+    from minibadge_designer import pcb
+
+    kept = ["1", "2", "9", "10"]  # a subset: dropped pairs claim no tab
+    aimed = [pcb.PAD_PAIRS[pair]["plate"] for pair in pcb.active_pairs(kept)]
+    art = [
+        # one cut that must work, so a board where cuts do nothing at all
+        # cannot pass this test...
+        {"kind": "circle", "material": "cut", "side": "front",
+         "cx": 10.16, "cy": 10.16, "w": 8, "h": 8, "rot": 0},
+        # ...and one deliberately centred on every kept pad tab, which must
+        # not.
+        *[{"kind": "circle", "material": "cut", "side": "front",
+           "cx": (x0 + x1) / 2, "cy": (y0 + y1) / 2, "w": 4, "h": 4, "rot": 0}
+          for x0, y0, x1, y1 in aimed],
+    ]
+    params = _params(name="cut", leds=[], pins=kept, art=art)
+    board = _routed_board(_generated_board(client, params, "cut"))
+
+    assert not board.contains(Point(10.16, 10.16)), (
+        "the middle cut was not routed, so this test would pass even if cuts "
+        "were ignored entirely")
+    pairs = pcb.active_pairs(kept)
+    assert len(pairs) >= 2, (
+        f"pins {kept} were expected to keep several pad pairs, got {pairs}; "
+        "with none kept the loop below would assert nothing at all")
+    for pair in pairs:
+        x0, y0, x1, y1 = pcb.PAD_PAIRS[pair]["plate"]
+        centre = Point((x0 + x1) / 2, (y0 + y1) / 2)
+        assert board.contains(centre), (
+            f"a cut removed the board under kept pad pair {pair}; the badge "
+            "cannot be soldered to its host")
+
+
+@pytest.mark.parametrize(
+    "shape, cut_w",
+    [
+        # Room left over: the unit is expected to be relocated onto board.
+        (_HEX30, 8.0),
+        # A Ø8 hole in the 20 mm square leaves only ~6 mm bands, too narrow
+        # for a unit anywhere: the only honest answer left is a refusal.
+        (None, 8.0),
+    ],
+    ids=["board-has-room-elsewhere", "board-has-no-room-left"],
+)
+def test_a_unit_is_never_shipped_standing_on_a_cut(client, shape, cut_w):
+    # Two outcomes are acceptable — move the unit onto solid board, or refuse
+    # the download naming it.  The third, shipping a board whose pads hang
+    # over a routed hole, passes checkout and fails at the fab.
+    from shapely.geometry import Point
+
+    cut = {"kind": "circle", "material": "cut", "side": "front",
+           "cx": 10.16, "cy": 10.16, "w": cut_w, "h": cut_w, "rot": 0}
+    params = _params(name="cut", art=[cut],
+                     leds=[{"x": 10.16, "y": 10.16, "side": "back", "color": "red"}])
+    if shape is not None:
+        params["shape"] = shape
+
+    resp = client.post("/generate", data={"params": json.dumps(params)},
+                       content_type="multipart/form-data")
+    if resp.status_code != 200:
+        assert "LED 1" in resp.get_json()["error"], (
+            "the refusal must name the unit so the UI can point at it")
+        return
+
+    text = zipfile.ZipFile(io.BytesIO(resp.data)).read("cut/cut.kicad_pcb").decode()
+    board = _routed_board(text)
+    parsed = invariants.assert_parses(text)
+    unit_pads = [p for p in parsed.pads if p.ref and p.ref[0] in ("D", "R")]
+    assert unit_pads, "no unit pads on a board that was accepted with an LED"
+    for pad in unit_pads:
+        assert board.contains(Point(pad.x, pad.y)), (
+            f"pad {pad.ref}.{pad.num} sits over the routed cut-out; the unit "
+            "was shipped standing on a hole")
+
+
+@pytest.mark.parametrize(
+    "cx, cy, w",
+    [
+        (17.7, 18.6, 2.0),   # wholly inside a kept pad pair's tab
+        (60.0, 60.0, 4.0),   # nowhere near the board
+    ],
+    ids=["under-a-pad-tab", "off-the-board"],
+)
+def test_the_preview_says_so_when_a_cut_removes_nothing(client, cx, cy, w):
+    # Otherwise the hole the canvas drew while dragging simply closes itself
+    # again on the server's answer, with no reason given, and the user is left
+    # dragging a layer that cannot work where they are putting it.
+    layer = {"kind": "circle", "material": "cut", "side": "front",
+             "cx": cx, "cy": cy, "w": w, "h": w, "rot": 0}
+    resp = client.post(
+        "/outline",
+        data={"params": json.dumps({"shape": _HEX30, "art": [layer]})},
+        content_type="multipart/form-data",
+    )
+    assert resp.get_json()["cutIgnored"] is True, (
+        "a cut that changes nothing about the outline was reported as if it "
+        "had worked")
+
+
 def test_font_file_served_and_unknown_404(client):
     resp = client.get("/fonts/archivo.ttf")
     assert resp.status_code == 200

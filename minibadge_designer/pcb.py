@@ -2360,7 +2360,11 @@ class Text:
 #            window that back-side LED light diffuses through
 #   bare   - copper removed AND mask opened on both sides: raw FR4 laminate,
 #            the brightest light window
-ART_MATERIALS = ("silk", "copper", "glow", "bare")
+#   cut    - the board itself removed: the region becomes a real cutout
+#            through copper, mask and laminate. Cut regions never become an
+#            ArtLayer; the webapp subtracts them from the outline instead,
+#            so everything downstream sees the true board shape.
+ART_MATERIALS = ("silk", "copper", "glow", "bare", "cut")
 
 
 @dataclass

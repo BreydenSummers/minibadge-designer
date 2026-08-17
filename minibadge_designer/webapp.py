@@ -553,7 +553,8 @@ def _shape_geometry(shape_meta: dict, uploads: dict, rasters: dict):
     return None if shape.is_empty else shape
 
 
-def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict):
+def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict,
+                     cuts=None):
     """Board outline rings from the shape params: (rings, bridged) or (None, False).
 
     The combined shape unions with a minimal board tab per kept connector
@@ -561,12 +562,24 @@ def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict):
     everywhere except directly under the pads. A tab the shape doesn't
     reach solidly gets a 3 mm bridge to the shape's nearest point rather
     than silently falling apart; leftover floating pieces are dropped.
+
+    `cuts` is extra geometry to carve out of the board (art layers whose
+    material is "cut"). Like the shape's own cut parts it subtracts before
+    the pad tabs, so the connector pads always keep solid board under them.
     """
     from shapely.geometry import LineString, Polygon
     from shapely.geometry import box as sbox
     from shapely.ops import nearest_points, unary_union
 
     shape = _shape_geometry(shape_meta, uploads, rasters)
+    if cuts is not None and not cuts.is_empty:
+        if shape is None:
+            # Cut-only art carves the standard square, exactly like a
+            # cut-only shape composition does.
+            shape = sbox(0.16, 0.16, 20.16, 20.16)
+        shape = shape.difference(cuts).simplify(0.02)
+        if shape.is_empty:
+            return None, False
     if shape is None:
         return None, False
     # Only corners that still carry a pin need a tab holding them.
@@ -593,6 +606,225 @@ def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict):
     if not isinstance(outline, Polygon) or outline.is_empty:
         return None, False
     return _geom_rings(outline), bool(bridges)
+
+
+def _rings_signature(rings) -> tuple:
+    """Ring count + total enclosed area + bbox, for "did this change?" tests.
+
+    Comparing vertex lists is not safe: recomputing an identical union can
+    reorder them. Area moves whenever a cut lands on the board, whether it
+    opens a hole (a new ring) or bites a notch out of the edge.
+    """
+    if not rings:
+        return (0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    area = 0.0
+    xs: list[float] = []
+    ys: list[float] = []
+    for ring in rings:
+        a2 = 0.0
+        for i, (x1, y1) in enumerate(ring):
+            x2, y2 = ring[(i + 1) % len(ring)]
+            a2 += x1 * y2 - x2 * y1
+            xs.append(x1)
+            ys.append(y1)
+        area += abs(a2) / 2
+    return (len(rings), round(area, 2), round(min(xs), 1), round(min(ys), 1),
+            round(max(xs), 1), round(max(ys), 1))
+
+
+def _art_uploads() -> tuple[dict, dict]:
+    """Every art layer's upload, read once into memory.
+
+    Werkzeug's file streams can only be read once (`_read_upload` closes them
+    behind it), but classification has to be repeatable: a cut-material layer
+    is classified to find the hole, and if that hole moves the board's bounds
+    the whole set is classified again against the corrected art box. Reading
+    up front is what makes the second pass possible.
+    """
+    uploads: dict = {}
+    rasters: dict = {}
+    for i in range(MAX_ART):
+        data = _read_upload(f"art{i}")
+        if data is not None:
+            uploads[i] = data
+        raster = _read_upload(f"art{i}_raster")
+        if raster is not None:
+            rasters[i] = raster
+    return uploads, rasters
+
+
+def _classify_art_entry(i: int, meta: dict, art_board, uploads: dict,
+                        rasters: dict):
+    """Classify one art layer from the request into its material regions.
+
+    Returns (source, window, art_side) — `source` is a {material: geometry}
+    dict (basic shapes, exact SVG) or a ClassifiedImage grid — or None when
+    the layer contributes nothing (no upload, empty geometry). Shared by the
+    decor/window emit passes and the outline's cut-material extraction, so a
+    layer's cut regions land exactly where its silk/copper regions do.
+    """
+    # One "side" value drives everything: front/back place the ink
+    # (and open a one-sided bare window there); "through" opens the
+    # bare window on both faces with the ink on the front. A legacy
+    # explicit bare_side still wins if a client sends it.
+    raw_side = meta.get("side")
+    if raw_side not in ("front", "back", "through"):
+        raw_side = None  # absent/invalid: classic through window
+    window = str(meta.get("bare_side", ""))
+    if window not in ("through", "front", "back"):
+        window = raw_side if raw_side in ("front", "back") else "through"
+    art_side = "back" if raw_side == "back" else "front"
+    kind = str(meta.get("kind", "image"))
+    if kind in SHAPE_KINDS and kind != "image":
+        # A basic-shape art layer: exact vector geometry, no upload.
+        material = str(meta.get("material", "bare"))
+        if material not in pcb.ART_MATERIALS:
+            material = "bare"
+        geom = _element_geometry(
+            {"kind": kind, "cx": meta.get("cx", 10.16), "cy": meta.get("cy", 10.16),
+             "w": meta.get("w", 10), "h": meta.get("h", 10),
+             "rot": meta.get("rot", 0), "sides": meta.get("sides", 6)},
+            None, None, 0.0,
+        )
+        if geom is None or geom.is_empty:
+            return None
+        if art_side == "back":
+            # Mirror so it reads correctly from the back face.
+            from shapely.affinity import scale as _mirror
+
+            geom = _mirror(geom, xfact=-1, yfact=1,
+                           origin=(float(meta.get("cx", 10.16)), 0))
+        return {material: geom}, window, art_side
+    if uploads.get(i) is None:
+        return None
+    rot = float(meta.get("rot", 0)) % 360
+    overrides = []
+    for ov in list(meta.get("overrides", []))[:12]:
+        mat = str(ov.get("material", "ignore"))
+        if mat not in (*pcb.ART_MATERIALS, "ignore"):
+            mat = "ignore"
+        u = min(max(float(ov.get("u", 0.5)), 0.0), 1.0)
+        if art_side == "back":
+            u = 1.0 - u  # the placed image is mirrored on the back
+        overrides.append((
+            u,
+            min(max(float(ov.get("v", 0.5)), 0.0), 1.0),
+            mat,
+        ))
+    common = {
+        "cx": float(meta.get("cx", 10.16)),
+        "cy": float(meta.get("cy", 10.16)),
+        "width_mm": float(meta.get("w", 14)),
+        "rot": rot,
+        # Back-side art mirrors so it reads correctly from the back.
+        "flip": bool(meta.get("flip", False)) != (art_side == "back"),
+        "overrides": overrides,
+        "board": art_board,
+    }
+    if meta.get("mode") == "palette":
+        # Each palette color carries its own material assignment.
+        palette = []
+        for entry in list(meta.get("palette", []))[:MAX_PALETTE]:
+            rgb = [min(max(int(v), 0), 255) for v in list(entry.get("rgb", []))[:3]]
+            if len(rgb) != 3:
+                continue
+            mat = str(entry.get("material", "ignore"))
+            if mat not in (*pcb.ART_MATERIALS, "ignore"):
+                mat = "ignore"
+            palette.append((tuple(rgb), mat))
+        if not palette:
+            return None
+        mode_kw = {"mode": "palette", "palette": palette}
+    else:
+        material = str(meta.get("material", "silk"))
+        if material not in pcb.ART_MATERIALS:
+            material = "silk"
+        mode_kw = {
+            "mode": "threshold",
+            "threshold": int(meta.get("threshold", 128)),
+            "invert": bool(meta.get("invert", False)),
+            "material": material,
+        }
+    data = uploads.get(i)
+    if svgart.is_svg(data):
+        # Exact vector pipeline; the browser's raster render of the
+        # same SVG is the fallback for gradients etc.
+        try:
+            _check_svg_complexity(data)
+            return _svg_classify(data, **mode_kw, **common), window, art_side
+        except Exception as exc:  # any parse issue: fall back to the raster render
+            data = rasters.get(i)
+            if data is None:
+                if isinstance(exc, _TooComplex):
+                    raise
+                raise ValueError("could not parse an SVG artwork layer") from None
+    return classify_image(data, **mode_kw, **common), window, art_side
+
+
+def _uses_cut(meta) -> bool:
+    """Whether one art meta assigns the board-cutout material anywhere."""
+    if not isinstance(meta, dict):
+        return False
+    kind = str(meta.get("kind", "image"))
+    if kind in SHAPE_KINDS and kind != "image":
+        return str(meta.get("material", "")) == "cut"
+    if any(str(o.get("material", "")) == "cut"
+           for o in list(meta.get("overrides", []) or [])[:12]
+           if isinstance(o, dict)):
+        return True
+    if meta.get("mode") == "palette":
+        return any(str(e.get("material", "")) == "cut"
+                   for e in list(meta.get("palette", []) or [])[:MAX_PALETTE]
+                   if isinstance(e, dict))
+    return str(meta.get("material", "")) == "cut"
+
+
+def _art_board_of(outline_rings):
+    """The art placement box for an outline: its bbox ∪ the standard square."""
+    if not outline_rings:
+        return (0.16, 0.16, 20.16, 20.16)
+    xs = [x for x, _y in outline_rings[0]]
+    ys = [y for _x, y in outline_rings[0]]
+    return (min(0.16, *xs), min(0.16, *ys), max(20.16, *xs), max(20.16, *ys))
+
+
+def _art_cut_geometry(sources: list, art_board):
+    """Union of the cut-material regions in classified art sources, or None.
+
+    `sources` are _classify_art_entry results ({material: geometry} dicts or
+    ClassifiedImage grids), the same objects the decor/window passes consume,
+    so a cut region lands exactly where the layer's other materials say it
+    is — and each upload stream is still read exactly once. Raster cut edges
+    get the same gentle smoothing an image silhouette part gets, so the
+    Edge.Cuts contour is a fab-able curve rather than a pixel staircase.
+    """
+    from shapely.geometry import box as sbox
+    from shapely.ops import unary_union
+
+    geoms = []
+    for source in sources:
+        if isinstance(source, dict):
+            g = source.get("cut")
+            if g is not None and not g.is_empty:
+                geoms.append(g)
+            continue
+        rects = grid_to_rects(source, "cut", [], board=art_board)
+        if rects:
+            # Pad each pixel rect slightly so rounded coordinates can't
+            # slice the union into ribbons (same trick as _svg_classify's
+            # raster silhouette).
+            geoms.append(unary_union(
+                [sbox(x - 0.02, y - 0.02, x + w + 0.02, y + h + 0.02)
+                 for x, y, w, h in rects]))
+            smooth = 0.12
+            geoms[-1] = (geoms[-1]
+                         .buffer(smooth, quad_segs=3)
+                         .buffer(-2 * smooth, quad_segs=3)
+                         .buffer(smooth, quad_segs=3))
+    if not geoms:
+        return None
+    g = unary_union(geoms).simplify(0.02)
+    return None if g.is_empty else g
 
 
 def _read_upload(field: str) -> bytes | None:
@@ -671,7 +903,38 @@ def outline_preview():
         rings, bridged = _compute_outline(shape_meta, uploads, pins, rasters)
     except _GEOMETRY_ERRORS:
         return {"rings": None, "bridged": False}
-    return {"rings": rings, "bridged": bridged}
+    # Art layers with cut-material regions carve the outline too; the client
+    # sends those layers (meta + files) along so the preview hole is the
+    # exact contour /generate will put on Edge.Cuts.
+    cut_ignored = False
+    try:
+        art_meta = list(params.get("art", []))[:MAX_ART]
+        if any(_uses_cut(m) for m in art_meta):
+            board = _art_board_of(rings)
+            art_uploads, art_rasters = _art_uploads()
+            sources = []
+            for i, meta in enumerate(art_meta):
+                if not _uses_cut(meta):
+                    continue
+                entry = _classify_art_entry(i, meta, board, art_uploads,
+                                            art_rasters)
+                if entry is not None:
+                    sources.append(entry[0])
+            cut_geom = _art_cut_geometry(sources, board)
+            if cut_geom is not None:
+                before = _rings_signature(rings)
+                rings, bridged = _compute_outline(
+                    shape_meta, uploads, pins, rasters, cuts=cut_geom)
+                # A cut that lands off the board, or only where a connector
+                # pad's tab reclaims it, leaves the outline untouched. The
+                # preview would just close the hole again with no reason
+                # given, so hand the UI something to say.
+                cut_ignored = _rings_signature(rings) == before
+            else:
+                cut_ignored = True  # every cut region classified to nothing
+    except (_TooComplex, *_GEOMETRY_ERRORS):
+        pass  # a bad art layer never hides the board; /generate reports it
+    return {"rings": rings, "bridged": bridged, "cutIgnored": cut_ignored}
 
 
 @app.post("/generate")
@@ -1047,6 +1310,55 @@ def _generate_impl(render: bool):
 
         outline_poly = _Poly(outline_rings[0], outline_rings[1:])
 
+    # Classify every art layer ONCE, up front — each upload stream can be
+    # read exactly once, and the decor/window passes reuse these sources.
+    # Regions assigned the "cut" material carve the board itself: they
+    # subtract from the outline before the pad tabs and bridges run, so the
+    # connector pads always keep solid board and everything downstream
+    # (fills, keepouts, routing, unit checks) sees the true board shape.
+    try:
+        art_meta = list(params.get("art", []))[:MAX_ART]
+    except TypeError:
+        return {"error": "invalid art parameters"}, 400
+    art_uploads, art_rasters = _art_uploads()
+    classified = []  # (index, source, bare-window side, board face)
+
+    def _classify_all(board):
+        out = []
+        for i, meta in enumerate(art_meta):
+            entry = _classify_art_entry(i, meta, board, art_uploads, art_rasters)
+            if entry is not None:
+                out.append((i, *entry))
+        return out
+
+    art_box = _art_board_of(outline_rings)
+    try:
+        classified = _classify_all(art_box)
+        cut_geom = _art_cut_geometry([src for _i, src, _w, _s in classified], art_box)
+    except _TooComplex as exc:
+        return {"error": f"artwork: {exc}"}, 400
+    except _GEOMETRY_ERRORS:
+        return {"error": "could not process an artwork image"}, 400
+    if cut_geom is not None:
+        try:
+            outline_rings, _bridged = _compute_outline(
+                shape_meta, uploads, pins, rasters, cuts=cut_geom)
+            # A cut that bites the board's edge shrinks its bounding box, and
+            # the art box (which sizes and places every layer) is derived from
+            # it. Classify again against the corrected box, or the exported
+            # art would sit at a different scale than the preview drew.
+            if _art_board_of(outline_rings) != art_box:
+                classified = _classify_all(_art_board_of(outline_rings))
+        except _TooComplex as exc:
+            return {"error": f"artwork: {exc}"}, 400
+        except _GEOMETRY_ERRORS:
+            return {"error": "could not process the board shape"}, 400
+        outline_poly = None
+        if outline_rings:
+            from shapely.geometry import Polygon as _Poly
+
+            outline_poly = _Poly(outline_rings[0], outline_rings[1:])
+
     # LED units may go anywhere the board goes: the safe rect follows the
     # custom outline's bounds instead of the standard square.
     spec_probe = pcb.BadgeSpec(pins=pins, outline=outline_rings)
@@ -1323,7 +1635,9 @@ def _generate_impl(render: bool):
             if font != "kicad" and font not in textpoly.FONTS:
                 font = "kicad"
             material = str(raw.get("material", "silk"))
-            if material not in pcb.ART_MATERIALS or font == "kicad":
+            # "cut" is art-only: letters cut through the board would drop
+            # their counters on the floor, so texts never get it.
+            if material not in ("silk", "copper", "glow", "bare") or font == "kicad":
                 material = "silk"  # the stroke font only exists as silkscreen
             tx0, ty0, tx1, ty1 = (0.8, 0.8, 19.5, 19.5)
             if outline_poly is not None:
@@ -1518,114 +1832,9 @@ def _generate_impl(render: bool):
         return {"error": "could not work out where the artwork may go; check "
                           "the LED and text positions, rotations and sizes"}, 400
 
-    try:
-        art_meta = list(params.get("art", []))[:MAX_ART]
-    except TypeError:
-        return {"error": "invalid art parameters"}, 400
     text_keepouts = carve_rects["front"]
-    # (index, source, bare-window side, board face for silk/copper)
-    classified = []
+    # `classified` was built up front (art uploads read exactly once).
     try:
-        for i, meta in enumerate(art_meta):
-            # One "side" value drives everything: front/back place the ink
-            # (and open a one-sided bare window there); "through" opens the
-            # bare window on both faces with the ink on the front. A legacy
-            # explicit bare_side still wins if a client sends it.
-            raw_side = meta.get("side")
-            if raw_side not in ("front", "back", "through"):
-                raw_side = None  # absent/invalid: classic through window
-            window = str(meta.get("bare_side", ""))
-            if window not in ("through", "front", "back"):
-                window = raw_side if raw_side in ("front", "back") else "through"
-            art_side = "back" if raw_side == "back" else "front"
-            kind = str(meta.get("kind", "image"))
-            if kind in SHAPE_KINDS and kind != "image":
-                # A basic-shape art layer: exact vector geometry, no upload.
-                material = str(meta.get("material", "bare"))
-                if material not in pcb.ART_MATERIALS:
-                    material = "bare"
-                geom = _element_geometry(
-                    {"kind": kind, "cx": meta.get("cx", 10.16), "cy": meta.get("cy", 10.16),
-                     "w": meta.get("w", 10), "h": meta.get("h", 10),
-                     "rot": meta.get("rot", 0), "sides": meta.get("sides", 6)},
-                    None, None, 0.0,
-                )
-                if geom is not None and not geom.is_empty:
-                    if art_side == "back":
-                        # Mirror so it reads correctly from the back face.
-                        from shapely.affinity import scale as _mirror
-
-                        geom = _mirror(geom, xfact=-1, yfact=1,
-                                       origin=(float(meta.get("cx", 10.16)), 0))
-                    classified.append((i, {material: geom}, window, art_side))
-                continue
-            upload = request.files.get(f"art{i}")
-            if not upload or not upload.filename:
-                continue
-            rot = float(meta.get("rot", 0)) % 360
-            overrides = []
-            for ov in list(meta.get("overrides", []))[:12]:
-                mat = str(ov.get("material", "ignore"))
-                if mat not in (*pcb.ART_MATERIALS, "ignore"):
-                    mat = "ignore"
-                u = min(max(float(ov.get("u", 0.5)), 0.0), 1.0)
-                if art_side == "back":
-                    u = 1.0 - u  # the placed image is mirrored on the back
-                overrides.append((
-                    u,
-                    min(max(float(ov.get("v", 0.5)), 0.0), 1.0),
-                    mat,
-                ))
-            common = {
-                "cx": float(meta.get("cx", 10.16)),
-                "cy": float(meta.get("cy", 10.16)),
-                "width_mm": float(meta.get("w", 14)),
-                "rot": rot,
-                # Back-side art mirrors so it reads correctly from the back.
-                "flip": bool(meta.get("flip", False)) != (art_side == "back"),
-                "overrides": overrides,
-                "board": art_board,
-            }
-            if meta.get("mode") == "palette":
-                # Each palette color carries its own material assignment.
-                palette = []
-                for entry in list(meta.get("palette", []))[:MAX_PALETTE]:
-                    rgb = [min(max(int(v), 0), 255) for v in list(entry.get("rgb", []))[:3]]
-                    if len(rgb) != 3:
-                        continue
-                    mat = str(entry.get("material", "ignore"))
-                    if mat not in (*pcb.ART_MATERIALS, "ignore"):
-                        mat = "ignore"
-                    palette.append((tuple(rgb), mat))
-                if not palette:
-                    continue
-                mode_kw = {"mode": "palette", "palette": palette}
-            else:
-                material = str(meta.get("material", "silk"))
-                if material not in pcb.ART_MATERIALS:
-                    material = "silk"
-                mode_kw = {
-                    "mode": "threshold",
-                    "threshold": int(meta.get("threshold", 128)),
-                    "invert": bool(meta.get("invert", False)),
-                    "material": material,
-                }
-            data = _read_upload(f"art{i}")
-            if svgart.is_svg(data):
-                # Exact vector pipeline; the browser's raster render of the
-                # same SVG is the fallback for gradients etc.
-                try:
-                    _check_svg_complexity(data)
-                    classified.append((i, _svg_classify(data, **mode_kw, **common), window, art_side))
-                    continue
-                except Exception as exc:  # any parse issue: fall back to the raster render
-                    data = _read_upload(f"art{i}_raster")
-                    if data is None:
-                        if isinstance(exc, _TooComplex):
-                            raise
-                        raise ValueError("could not parse an SVG artwork layer") from None
-            classified.append((i, classify_image(data, **mode_kw, **common), window, art_side))
-
         # Pass 1: non-silk materials; their mask openings then carve silk.
         from shapely.geometry import box as sbox
         from shapely.ops import unary_union
