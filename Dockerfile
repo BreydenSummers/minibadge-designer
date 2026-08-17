@@ -1,7 +1,7 @@
 # minibadge-designer: Flask UI + KiCad's command line tools.
 #
 # kicad-cli is what turns a generated board into the interactive 3D view
-# (`pcb export glb`), so the image needs a real KiCad — not just Python.
+# (`pcb export glb`), so the image needs a real KiCad, not just Python.
 # Debian's packages are used rather than the official kicad/kicad image
 # because they ship the 3D model libraries in both STEP and VRML, and
 # because pulling only the parts we place keeps this ~20x smaller than
@@ -82,8 +82,8 @@ COPY --chown=badge:badge . /app
 RUN chown -R badge:badge /app
 
 # Smoke-test the 3D pipeline at build time. Every way this has broken before
-# was silent — a missing model, a format kicad-cli's VRML reader rejects, a
-# KiCad major version that no longer defines KICAD9_3DMODEL_DIR — and each
+# was silent (a missing model, a format kicad-cli's VRML reader rejects, a
+# KiCad major version that no longer defines KICAD9_3DMODEL_DIR), and each
 # one yields a *successful* export of a board with no components on it. Fail
 # the build instead of shipping an image that quietly renders a bare PCB.
 RUN python3 - <<'PY'
@@ -109,7 +109,7 @@ with tempfile.TemporaryDirectory() as td:
               if n.get("name") and not n["name"].startswith("=>")}
     missing = {"D1", "D2", "R1", "R2", "J1"} - bodies
     if missing:
-        sys.exit(f"3D models did not resolve — missing {sorted(missing)}. "
+        sys.exit(f"3D models did not resolve: missing {sorted(missing)}. "
                  f"Check pcb.MODEL_EXT and the models copied above.")
     # Colour check: this board exports 10 materials when the part colours
     # survive and ~7 when they are stripped (which is what kicad-cli builds

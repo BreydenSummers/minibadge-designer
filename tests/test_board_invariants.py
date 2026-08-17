@@ -5,7 +5,7 @@ Why this file exists
 ``tests/invariants.py`` ships 44 checks, each with a measured true- and
 false-positive rate over a 259-board sweep. Until this file landed, the suite
 called exactly **two** of them. The battery was validated in a throwaway harness
-and then never wired to anything that runs — so a defect it was built to catch
+and then never wired to anything that runs, so a defect it was built to catch
 would still have shipped. Measured at the time: dropping *every copper fill on
 the board* was caught by three incidental assertions in ``test_webapp.py`` and by
 real DRC, and by none of the invariants, purely because nothing invoked them.
@@ -23,7 +23,7 @@ fast tier, and names each case in its test id so a failure says which
 combination broke without anyone reading a shrink report.
 
 Every row deliberately moves off a default (decision D6). The whole point is
-that ``size="0805"`` — the value every pre-existing example test used — is where
+that ``size="0805"`` (the value every pre-existing example test used) is where
 a board-shorting defect hid on lines that already had 100% line coverage.
 """
 
@@ -97,7 +97,7 @@ CORPUS = [
     # --- axes this corpus originally missed entirely ------------------------
     # Line-tracing the battery showed 0 of 26 rows set farled, novia, texts or
     # a custom outline, so several checks were *called* on every row and
-    # evaluated no assertion on any of them — reachable and inert. Adding a row
+    # evaluated no assertion on any of them: reachable and inert. Adding a row
     # per axis is the cheap fix; the gate below now measures execution rather
     # than trusting that a call means a check ran.
     ("far-side-led", _spec(leds=[pcb.Led(10.0, 10.0, "red", farled=True)])),
@@ -114,6 +114,70 @@ CORPUS = [
                         material="copper")])),
     ("custom-outline", _spec(leds=[pcb.Led(10.0, 10.0, "red")], art=[],
                              outline=_octagon_outline())),
+    # --- CLK drive: units running off the badge's blink clock ---------------
+    # Off-default on purpose: a 0603 at 90 deg and an inline back unit, so the
+    # supply reroute is exercised somewhere other than the stacked-0805-rot-0
+    # path every example test walks.
+    ("clk-jumper", _spec(leds=[pcb.Led(6.5, 6.0, "red", size="0603", rot=90,
+                                       clk=True),
+                               pcb.Led(14.0, 13.0, "blue", side="back",
+                                       layout="inline", clk=True)])),
+    ("clk-trace", _spec(clk_jumper=False,
+                        leds=[pcb.Led(6.5, 6.0, "red", rot=45, clk=True),
+                              pcb.Led(14.0, 13.0, "blue", side="back",
+                                      clk=True)])),
+    # The jumper dragged somewhere else and stood on end; its link to pin 9
+    # has to route across half the board.
+    ("clk-jumper-moved", _spec(jumper=(5.0, 10.0), jumper_rot=90,
+                               leds=[pcb.Led(13.0, 6.0, "red", clk=True),
+                                     pcb.Led(13.5, 13.5, "blue", side="back",
+                                             size="1206", clk=True)])),
+    # Back-face-only blinkers (the classic glow badge): the rail via is the
+    # ONLY thing carrying the jumper's centre pad to their layer, so this row
+    # is the one that notices it keyed to the wrong side.
+    ("clk-back-only", _spec(leds=[pcb.Led(7.0, 10.0, "red", side="back",
+                                          clk=True),
+                                  pcb.Led(14.0, 13.0, "blue", side="back",
+                                          rot=180, clk=True)])),
+    # The jumper mounted on the BACK: its pads live in the GND pour's layer,
+    # its 3V3 pad reaches the front pour through its own via, and the FRONT
+    # blinker now needs the rail via instead of the back one.
+    ("clk-jumper-back", _spec(jumper_side="back",
+                              leds=[pcb.Led(6.5, 6.0, "red", clk=True),
+                                    pcb.Led(14.0, 13.0, "blue", side="back",
+                                            clk=True)])),
+    # The back jumper's steady pad fed by a same-face TRACE instead of its
+    # via (jumper_via off): the 3V3 run lands on a pin's plated hole, and
+    # the front blinker still crosses through the rail via.
+    ("clk-jumper-back-traced", _spec(jumper_side="back", jumper_via=False,
+                                     leds=[pcb.Led(6.5, 6.0, "red", clk=True),
+                                           pcb.Led(14.0, 13.0, "blue",
+                                                   side="back", clk=True)])),
+    # The 3V3 trace sent to a hand-picked pin (15) while pin 7 is nearer
+    # to the mid-board jumper: the choice must win over the automatic
+    # nearest. (Placement matters: a long chosen-pin channel across the
+    # back pour can fence a kept GND pad, and the app correctly refuses
+    # such boards; this layout ships clean.)
+    ("clk-v3pin-chosen", _spec(jumper_side="back", jumper_via=False,
+                               jumper_v3pin="15", jumper=(9.0, 10.0),
+                               leds=[pcb.Led(6.5, 6.0, "blue", side="back",
+                                             clk=True)])),
+    # Hand-placed bends on both of the jumper's routed links.
+    ("clk-link-bends", _spec(jumper_side="back", jumper_via=False,
+                             jumper_nodes=((4.0, 14.0),),
+                             jumper_v3nodes=((14.0, 16.0),),
+                             leds=[pcb.Led(7.0, 8.0, "red", side="back",
+                                           clk=True)])),
+    # A unit that is BOTH via-less and blinking: two routed runs, no via.
+    ("clk-with-novia", _spec(leds=[pcb.Led(6.0, 6.0, "red", clk=True,
+                                           novia=True),
+                                   pcb.Led(14.0, 13.0, "blue")])),
+    # Pin 9 dropped: the flag must be inert, the board indistinguishable from
+    # a non-CLK one (the invariants assert no jumper, no CLK nets, pin 9 row
+    # absent). The webapp refuses this with a 400; the generator must still
+    # not ship a supply pad wired to a pin that is not there.
+    ("clk-pin9-dropped-inert", _spec(pins=("1", "2", "7", "8", "10", "15", "16"),
+                                     leds=[pcb.Led(6.5, 6.0, "red", clk=True)])),
 ]
 
 
@@ -123,12 +187,12 @@ def test_every_board_in_the_corpus_satisfies_every_invariant(spec):
     """Whatever the user builds, the board obeys every rule we can check cheaply.
 
     A failure here means a real badge would be wrong in the way the raised
-    message names — a severed power plane, a via that does not cross the board,
+    message names: a severed power plane, a via that does not cross the board,
     a track carrying a net its pads do not, copper over the edge. The message is
     the diagnosis; read it rather than this docstring.
 
     The spec goes through ``resolved_spec`` first because ``generate_pcb`` is not
-    responsible for DRC cleanliness — the webapp's placement backstop is
+    responsible for DRC cleanliness; the webapp's placement backstop is
     (decision D12). Feeding hand-written coordinates straight in and asserting
     would test this file's arithmetic instead of the generator.
     """
@@ -166,7 +230,7 @@ def _shift_emitted_copper(text: str, dx: float) -> str:
 
     Reproduces, at the text level, an emission-path bug: the pour is computed
     correctly and written somewhere else. The same defect injected at
-    ``pcb.py:2027`` produces 46 real kicad-cli DRC violations — clearance
+    ``pcb.py:2027`` produces 46 real kicad-cli DRC violations: clearance
     ``actual 0.0000 mm`` to other-net pads, i.e. a board that shorts.
     """
     def bump(m):
@@ -181,7 +245,7 @@ def test_the_battery_fails_when_the_pour_is_written_where_it_was_not_computed():
     """Copper in the wrong place is caught, not just copper that is missing.
 
     The failure this pins: every pour invariant used to read
-    ``pcb._fill_geometry`` — the function the generator itself calls — so it
+    ``pcb._fill_geometry`` (the function the generator itself calls), so it
     verified what the generator *would* compute and never what it *wrote*.
     Measured at the time: the whole fast tier stayed green (397 passed, 0
     failed with kicad-cli disabled) on a board with 46 DRC violations.
@@ -197,7 +261,7 @@ def test_the_battery_fails_when_the_pour_is_written_where_it_was_not_computed():
     bad = _shift_emitted_copper(good, 5.0)
     assert bad != good, (
         "the injected mutation changed nothing in the board text, so this test "
-        "proves nothing — the filled_polygon syntax must have moved")
+        "proves nothing; the filled_polygon syntax must have moved")
     assert bad.count("(filled_polygon") == good.count("(filled_polygon"), (
         "the mutation removed copper instead of moving it; that is the easier "
         "defect and it is already covered")
@@ -209,8 +273,8 @@ def test_the_battery_fails_when_the_pour_is_written_where_it_was_not_computed():
     # Naming them is the point. `assert_pours_actually_contain_copper` compares
     # emitted bounds against intended bounds and would fire on its own, which
     # would let the geometry checks quietly go back to reading `Board.fills`
-    # while this test stayed green. These three describe copper — where it
-    # spills, what it shorts, what it floods — and each must see it itself.
+    # while this test stayed green. These three describe copper (where it
+    # spills, what it shorts, what it floods) and each must see it itself.
     want = {"assert_pours_stay_inside_the_outline",
             "assert_pours_keep_fab_clearance",
             "assert_light_windows_are_clear_of_copper"}
@@ -233,8 +297,8 @@ def test_the_battery_fails_when_a_whole_board_collection_is_missing(collection):
 
     Measured before this test existed: emptying ``b.tracks``, ``b.vias`` or
     ``b.footprints`` left **26 of 26 checks green**. Every invariant in the
-    library is a ``for`` loop over one of these, and a loop over ``[]`` passes
-    — so a generator regression that emitted no tracks (every LED unconnected),
+    library is a ``for`` loop over one of these, and a loop over ``[]`` passes,
+    so a generator regression that emitted no tracks (every LED unconnected),
     no vias, or no footprints at all went through the whole in-process battery
     without a murmur.
 
@@ -246,7 +310,7 @@ def test_the_battery_fails_when_a_whole_board_collection_is_missing(collection):
     b = invariants.Board(pcb.generate_pcb(spec))
     assert getattr(b, collection), (
         f"the calibration board has no {collection} to remove, so this case "
-        "cannot demonstrate anything — pick a spec that produces some")
+        "cannot demonstrate anything; pick a spec that produces some")
 
     if collection in ("fills", "emitted_fills"):
         setattr(b, collection, lambda *a, **k: [])
@@ -257,7 +321,7 @@ def test_the_battery_fails_when_a_whole_board_collection_is_missing(collection):
              if _fails(fn, b, spec)]
     assert fired, (
         f"a board with no {collection} at all passes every one of the "
-        f"{len(invariants.ALL_CHECKS)} invariants — the battery is blind to "
+        f"{len(invariants.ALL_CHECKS)} invariants; the battery is blind to "
         "the entire collection being absent, which is the catastrophic version "
         "of the defect each of those checks describes")
 
@@ -276,7 +340,7 @@ def _fails(fn, b, spec) -> bool:
 
 #: A far-side unit whose pad lands on a coordinate ``pcb._n`` cannot write
 #: exactly. Every structured corpus in this repo places units on values like
-#: 3.925 / 4.075, which *are* exact at four decimals — which is why a
+#: 3.925 / 4.075, which *are* exact at four decimals, which is why a
 #: 445-board randomised sweep was the first thing to fire.
 _FIFTH_DECIMAL_FAR_UNIT = pcb.Led(7.8959963, 11.4417900, "red", rot=270,
                                   layout="inline", size="1206", farled=True)
@@ -297,7 +361,7 @@ def test_a_far_side_via_is_found_when_its_pad_needs_a_fifth_decimal():
     The regression this pins: the check compared the emitted via against the
     intended position with ``_EPS`` (1e-6) while ``pcb._n`` writes coordinates
     at four decimals. Measured over a 445-board sweep, **52 far-side pads were
-    reported as having no via when every one of them did** — worst offset
+    reported as having no via when every one of them did**; worst offset
     4.914e-5 mm, i.e. inside the file's own quantum. 22 boards' worth of false
     accusation sitting in the safety library.
 
@@ -315,16 +379,16 @@ def test_a_far_side_via_is_found_when_its_pad_needs_a_fifth_decimal():
         f"the nearest emitted via is {off} mm from the intended pad centre. "
         "This case only means something while that gap is non-zero (the file "
         "genuinely cannot write the coordinate) and under one rounding "
-        "quantum (the via genuinely is in the pad) — move the LED back onto a "
+        "quantum (the via genuinely is in the pad); move the LED back onto a "
         "coordinate needing a fifth decimal")
 
 
 def test_a_far_side_via_displaced_past_the_file_precision_is_still_caught():
     """Widening the tolerance to the file's precision did not switch the check off.
 
-    The red-proof for the fix above. 3e-4 mm is three rounding quanta — far
+    The red-proof for the fix above. 3e-4 mm is three rounding quanta (far
     below anything a human would notice and far above what the emitter can
-    excuse — and the check must still call it a missing via. A real defect
+    excuse), and the check must still call it a missing via. A real defect
     moves a via by a pad pitch (~1 mm), four orders of magnitude past this.
     """
     spec = invariants.resolved_spec(_spec(leds=[_FIFTH_DECIMAL_FAR_UNIT], art=[]))
@@ -342,7 +406,7 @@ def test_a_far_side_via_displaced_past_the_file_precision_is_still_caught():
 
     assert _fails(invariants.assert_far_side_leds_have_a_via_in_each_pad,
                   invariants.Board(bad), spec), (
-        "a via 3e-4 mm out of its pad — three times the file's own precision — "
+        "a via 3e-4 mm out of its pad (three times the file's own precision) "
         "was accepted. The rounding tolerance has been widened into a hole")
 
 
@@ -370,7 +434,7 @@ _SLIT_STRANDS_THE_RAIL = pcb.BadgeSpec(
 #: across both pours, and unit 1's rail ends up on an island of its own.
 #: ``pcb.resolve_novia`` is the only rail-reachability gate in the product, and
 #: it used to ask each via-less unit only whether *its own* contact and the
-#: connector pads share a fill polygon — never whether the copper it can reach
+#: connector pads share a fill polygon, never whether the copper it can reach
 #: actually gets to a pad, and never about a unit the channel merely passed by.
 #:
 #: Measured through the real endpoint, before and after the fix:
@@ -393,7 +457,7 @@ _SLIT_STRANDS_THE_RAIL = pcb.BadgeSpec(
 #: **400**, not a clean board.
 #:
 #: The coordinates are a fixed point of the placement backstop (asserted below),
-#: so nothing here rests on this file's arithmetic — the D12 trap. The
+#: so nothing here rests on this file's arithmetic: the D12 trap. The
 #: placement is also free of unit-vs-unit overlap and of pad conflicts, which
 #: is what leaves the via-less channel as the only available explanation.
 _NOVIA_RUNS_STRAND_A_NEIGHBOUR = pcb.BadgeSpec(
@@ -419,8 +483,8 @@ def test_every_units_rail_contact_reaches_a_connector_pad(spec):
     """No LED ships with its power fenced onto an isolated copper island.
 
     This spec is a minimised survivor of a 445-board randomised sweep in which
-    8 boards failed this way. It passed every gate ``/generate`` applies —
-    ``power_missing`` and ``resolve_novia`` both said yes — so the user
+    8 boards failed this way. It passed every gate ``/generate`` applies
+    (``power_missing`` and ``resolve_novia`` both said yes), so the user
     downloaded it and the LED did not light.
 
     Its mechanism was the pour's own hole-venting slit, which ran out to the
@@ -439,8 +503,8 @@ def test_a_stranded_rail_island_is_confirmed_by_real_drc(spec, kicad_cli,
     """The external oracle agrees, which is what made this a product defect.
 
     Broken, this board produced **exactly one** kicad-cli violation,
-    ``unconnected_items``, on the same net and layer the in-process check names
-    — no shorts, no clearance, nothing else to confound it. Both oracles run;
+    ``unconnected_items``, on the same net and layer the in-process check names:
+    no shorts, no clearance, nothing else to confound it. Both oracles run;
     neither is optional (decision D13).
     """
     invariants.assert_drc_clean(spec, kicad_cli, tmp_path=tmp_path)
@@ -452,7 +516,7 @@ def test_a_unit_whose_via_less_run_strands_its_rail_is_refused_not_shipped():
 
     The value at stake is the whole download: this board used to come back 200
     with a zip whose first LED was wired to copper that reaches no connector
-    pad. Nobody finds that until the badge is soldered — and kicad-cli on the
+    pad. Nobody finds that until the badge is soldered, and kicad-cli on the
     downloaded file says so in one line, ``[unconnected_items]``.
 
     The assertion names the **index**, not merely "some problem". The old gate
@@ -461,8 +525,8 @@ def test_a_unit_whose_via_less_run_strands_its_rail_is_refused_not_shipped():
     would pass on a gate that blamed the wrong LED, and the message the user
     reads names the LED by number.
 
-    ``slow``: this board pays ~1 s in ``novia_route``'s visibility search —
-    three via-less units against a two-pin connector is the expensive corner —
+    ``slow``: this board pays ~1 s in ``novia_route``'s visibility search
+    (three via-less units against a two-pin connector is the expensive corner)
     and the fast tier has a 10 s budget.
     """
     spec = invariants.resolved_spec(_NOVIA_RUNS_STRAND_A_NEIGHBOUR)
@@ -482,13 +546,13 @@ def test_a_unit_whose_via_less_run_strands_its_rail_is_refused_not_shipped():
 
 
 #: Separation the backstop owes any two units, stated here rather than read
-#: from ``resolve_overlap``'s `gap` default — a check sourcing its expectation
+#: from ``resolve_overlap``'s `gap` default: a check sourcing its expectation
 #: from the constant the code reads cannot detect an edit to that constant.
 UNIT_SEPARATION_MM = 0.2
 
 #: Pairs ``resolve_overlap`` used to give up on. Its four candidate slides each
 #: clear the other unit's whole axis-aligned ENVELOPE, which two big tilted
-#: packages cannot afford inside ``unit_safe`` — so it returned the unit exactly
+#: packages cannot afford inside ``unit_safe``, so it returned the unit exactly
 #: where it was and shipped a pad-to-pad short. Measured over 600 random
 #: two-unit boards: 35 shorted, and all 35 were give-ups rather than bad slides.
 #:
@@ -521,7 +585,7 @@ def test_the_backstop_separates_two_units_it_used_to_give_up_on(leds):
     Deliberately off every default: 1206 and 5x2mm rather than 0805, tilted
     22.5 and 45 degrees rather than square, inline as well as stacked, and one
     pair on opposite faces. The separation is measured on the TIGHT rotated
-    footprints (``unit_poly``), which is what the resolver promises — not on
+    footprints (``unit_poly``), which is what the resolver promises, not on
     the axis-aligned envelope, which would pass a pair that genuinely touches.
     """
     spec = invariants.resolved_spec(
@@ -532,13 +596,13 @@ def test_the_backstop_separates_two_units_it_used_to_give_up_on(leds):
     gap = polys[0].distance(polys[1])
     assert gap >= UNIT_SEPARATION_MM - 1e-9, (
         f"the two units end up {gap:.4f} mm apart (rule "
-        f"{UNIT_SEPARATION_MM} mm) — the backstop ran out of slide candidates "
+        f"{UNIT_SEPARATION_MM} mm); the backstop ran out of slide candidates "
         "and shipped the pair overlapping")
 
 
 # The three through-hole rows used to leave a copper sliver between the two
 # units' pad keepouts, on every THT package and at two independent coordinate
-# pairs — while a single THT unit, the same pair on opposite faces, and one THT
+# pairs, while a single THT unit, the same pair on opposite faces, and one THT
 # beside an 0805 were all clean, which is what showed it was the geometry and
 # not this file's coordinates. It came from the pour's hole-venting slit
 # grazing a neighbouring void and leaving a hair of copper beside it; the vent
@@ -552,8 +616,8 @@ def test_the_backstop_separates_two_units_it_used_to_give_up_on(leds):
 def test_every_board_in_the_corpus_passes_real_drc(spec, kicad_cli, tmp_path):
     """KiCad's own DRC finds nothing wrong with any board in the corpus.
 
-    The external oracle. It sees what the in-process battery cannot — courtyard
-    overlap, silk over copper, mask bridges, slivers, pad-to-pad shorts — while
+    The external oracle. It sees what the in-process battery cannot (courtyard
+    overlap, silk over copper, mask bridges, slivers, pad-to-pad shorts), while
     the battery sees via layer spans, stackup and track-vs-pad net agreement
     that DRC cannot. Both run; neither is optional (decision D13).
 
@@ -564,7 +628,7 @@ def test_every_board_in_the_corpus_passes_real_drc(spec, kicad_cli, tmp_path):
     my own arbitrary coordinates, not the generator: it produced 12 failures,
     every one a `warning`-severity `silk_overlap` / `silk_over_copper` /
     `copper_sliver` from a placeholder rectangle overlapping an LED's
-    silkscreen. That is the D12 trap in a second costume — the first is
+    silkscreen. That is the D12 trap in a second costume: the first is
     hand-placed LEDs, this is hand-placed art. `tests/test_kicad_integration.py`
     owns DRC over deliberately laid-out artwork; this test owns DRC over the
     placement and routing axes, which is what actually varies here.

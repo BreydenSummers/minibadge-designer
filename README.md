@@ -15,44 +15,52 @@ typefaces and any material, and download a ready-to-fab KiCad project.
 The download is a zip with a complete KiCad 7+ project:
 
 - **A minibadge v2 board** on the official connector footprint (pad geometry follows
-  [lukejenkins/minibadge](https://github.com/lukejenkins/minibadge), Apache-2.0) — the
-  standard 20 × 20 mm square or a **custom outline composed from parts** — image
+  [lukejenkins/minibadge](https://github.com/lukejenkins/minibadge), Apache-2.0), the
+  standard 20 × 20 mm square or a **custom outline composed from parts**: image
   silhouettes and basic shapes (circle, rectangle, triangle, hexagon, star), each
-  adding board material or cutting a hole — scaling to roughly 120 × 124 mm (three
+  adding board material or cutting a hole; the outline scales to roughly 120 × 124 mm (three
   badge-widths beyond the square in every direction; the editor zooms to fit), with
   **adjustable edge smoothing** for raster images (0 = keep raw pixels). Keep or
-  drop each connector pin individually — a whole corner, a row, or a single pad;
+  drop each connector pin individually: a whole corner, a row, or a single pad;
   the app warns if the LEDs lose 3V3 or GND. Shapes that don't reach a kept
   connector pad are bridged automatically
-- **Layered PCB art** from PNG/JPG/SVG — **SVG art is exact**: its vector paths land
+- **Layered PCB art** from PNG/JPG/SVG. **SVG art is exact**: its vector paths land
   on the board (and can be traced into the board outline) with no pixelation at any
   size, while rasters use a 0.18 mm pixel grid. Flat-color images load in *By color*
   mode where every color gets its own material: **silkscreen**
   (white ink), **exposed copper** (mask opened over the copper plane), **glow windows**
   (copper stripped from both layers so back-side LED light shines through the tinted
-  laminate), **bare board** (mask opened too — raw FR4), or *Ignore*. Photos use a
-  threshold mode instead. A **magic wand** retargets a single connected region — e.g.
-  make a skull's eyes see-through while the same-colored background stays solid — and
+  laminate), **bare board** (mask opened too: raw FR4), or *Ignore*. Photos use a
+  threshold mode instead. A **magic wand** retargets a single connected region (e.g.
+  make a skull's eyes see-through while the same-colored background stays solid), and
   layers can be rotated, mirrored, duplicated, and reordered. Silk auto-carves around
   mask openings, text, pads, and parts; windows keep a perimeter copper ring and a
   corridor to every LED unit so the power planes always stay connected
-- **Text** wherever you drop it, front or back, scaled 0.8–5 mm — KiCad's stroke font
-  on the silkscreen, or a dozen display typefaces (fetched on setup — see
-  [Third-party assets](#third-party-assets) — from arcade to blackletter)
+- **Text** wherever you drop it, front or back, scaled 0.8–5 mm: KiCad's stroke font
+  on the silkscreen, or a dozen display typefaces (from arcade to blackletter;
+  fetched on setup, see [Third-party assets](#third-party-assets))
   rendered as exact polygons in **any material**: silk, exposed copper,
   glow window, or bare board
-- **LED circuits** (LED + series resistor each — SMD 0603/0805/1206, or **through-hole**
+- **LED circuits** (LED + series resistor each: SMD 0603/0805/1206, or **through-hole**
   1.8 mm / 3 mm domes and the 5×2 mm rectangular bar, whose resistor stays an 0805) wired
   3V3 → R → LED → GND through precomputed copper pours (3V3 plane on the front, GND
-  plane on the back) — passes KiCad DRC out of the box. Each unit can mount on either
+  plane on the back); passes KiCad DRC out of the box. Each unit can mount on either
   side, rotate in 90° steps,
   and use a **stacked** (compact block) or **in-line** (thin end-to-end strip) layout
-  to fit around the artwork. Units go anywhere the board goes — across the whole of a
+  to fit around the artwork. Units go anywhere the board goes: across the whole of a
   custom outline, and into the connector strips between the pad pairs; only the pads
   themselves are kept clear
+- **Blink with the badge clock**: any LED can run its supply off the connector's
+  CLK pin instead of the 3V3 pour, so it pulses with the host badge. Hook it up
+  through the classic **3-pad solder jumper** (draggable on the board; the builder
+  bridges the 3V3 side for steady light or the CLK side to blink — never both), or
+  as a **direct trace to pin 9** that always blinks. Front CLK units keep their GND
+  via and fetch supply through a routed trace; back CLK units drop their 3V3 via and
+  route to a plated hole instead
 - **BOM.csv** and a **README.txt** with fab/assembly steps
 
-VBATT, CLK, and NC pins are left unconnected per the standard.
+VBATT and NC pins are left unconnected per the standard; CLK joins the netlist
+only when an LED runs on it.
 
 ## How It Works
 
@@ -61,16 +69,16 @@ VBATT, CLK, and NC pins are left unconnected per the standard.
    preview at high resolution because the board gets their exact vector geometry.
 2. On download, Flask (`minibadge_designer/webapp.py`) converts raster art to
    run-length-merged rectangles (`minibadge_designer/logo.py`) and SVG art to exact
-   polygons (`minibadge_designer/svgart.py` — fill rules, paint order, and occlusion
+   polygons (`minibadge_designer/svgart.py`: fill rules, paint order, and occlusion
    included), then emits the `.kicad_pcb` s-expressions with shapely-computed
    zone fills (`minibadge_designer/pcb.py`).
 3. Open the project in KiCad, press **B** to refill zones, run DRC, and plot Gerbers.
    The shipped fills are already DRC-clean; refilling just replaces the thin
    slits the file format forces (a fill is stored as one hole-free outline)
    with proper holes. Light windows carry keepout areas so the refill leaves
-   them clear — the 3D view shows the board in this refilled state.
+   them clear; the 3D view shows the board in this refilled state.
 4. Or skip KiCad: the **⬇ Gerbers for fab** button has the server refill the
-   zones and plot the fab package itself (`kicad-cli` required) — a flat zip
+   zones and plot the fab package itself (`kicad-cli` required): a flat zip
    of RS-274X Gerbers with Protel extensions plus a merged Excellon drill
    file, ready to upload as-is to JLCPCB or PCBWay. OSH Park users should
    upload the `.kicad_pcb` from the project zip instead, which OSH Park
@@ -91,7 +99,7 @@ Docker is the supported way to run minibadge-designer and the only one that is
 feature-complete out of the box. The image carries KiCad's command line tools,
 so the interactive **3D view** works, generated boards are **DRC-clean**, and
 the 3D model shows the **populated board** in real part colours. The host needs
-nothing but Docker — no KiCad, no Python.
+nothing but Docker: no KiCad, no Python.
 
 ### Requirements
 
@@ -120,10 +128,10 @@ side of the `ports` mapping in `docker-compose.yml` (`"9000:8000"`).
 ### What the build does
 
 1. Pulls KiCad 9.x from Debian and keeps **only the ten 3D models** this app
-   can place — the stock library is ~5 GB, this is half a megabyte. The result
+   can place; the stock library is ~5 GB, this is half a megabyte. The result
    is ~800 MB rather than the 6.3 GB of the official `kicad/kicad:9.0-full`.
 2. Fetches the third-party runtime assets (typefaces, `<model-viewer>`) by
-   pinned version and SHA-256 — see [Third-party assets](#third-party-assets).
+   pinned version and SHA-256; see [Third-party assets](#third-party-assets).
 3. Runs a **smoke test**: it exports a two-LED board and fails the build if
    the component models did not resolve or lost their colours. Every way this
    has broken before was silent, producing a perfectly valid export of an
@@ -136,17 +144,17 @@ file is picked up if present but is not required.
 
 The container serves through **gunicorn with 4 single-threaded worker
 processes** (`gunicorn.conf.py`), so simultaneous users get parallel workers
-rather than queueing behind one interpreter — process isolation is also what
+rather than queueing behind one interpreter. Process isolation is also what
 makes concurrent exports safe by construction, since every request works in
 its own temp directory with its own kicad-cli. Tune per host via `.env`:
 
-- `WEB_CONCURRENCY` — worker count (default 4; ~100 MB each, 2 × cores is a
+- `WEB_CONCURRENCY`: worker count (default 4; ~100 MB each, 2 × cores is a
   sane ceiling)
-- `WORKER_TIMEOUT` — per-request ceiling in seconds (default 300; the GLB
+- `WORKER_TIMEOUT`: per-request ceiling in seconds (default 300; the GLB
   export and zone refill each carry a 120 s subprocess budget, and the
   timeout doubles as the backstop that recycles a worker stuck on a
   pathological upload)
-- `PORT` — bind port inside the container (default 8000)
+- `PORT`: bind port inside the container (default 8000)
 
 ## Running it with local Python (development)
 
@@ -163,7 +171,7 @@ Good for fast edit/reload cycles, but not feature-complete unless you also
 install **KiCad 9.x**: without it the 3D view returns an error pointing at the
 downloaded project, and the DRC tests skip instead of running. The app looks
 for `kicad-cli` in `$KICAD_CLI`, on `PATH`, and at the standard macOS and Linux
-install paths. Everything else — the editor, artwork, and project download —
+install paths. Everything else (the editor, artwork, and project download)
 works with Python alone.
 
 ## Third-party assets
@@ -188,7 +196,7 @@ installing. The script records what it fetched, and under which licence, in
 | Special Elite | [google/fonts](https://github.com/google/fonts) (pinned commit) | Apache License 2.0 |
 | `<model-viewer>` 4.0.0 | [google/model-viewer](https://github.com/google/model-viewer) | BSD 3-Clause |
 
-KiCad's 3D model libraries are likewise never vendored — the Docker image
+KiCad's 3D model libraries are likewise never vendored: the Docker image
 installs them from Debian at build time (CC-BY-SA-4.0 with the KiCad library
 exception).
 
@@ -200,5 +208,5 @@ minibadge-designer [--host HOST] [--port PORT] [--debug]
 
 ## Credits
 
-Minibadge standard, spec, and connector footprint: Luke Jenkins and contributors —
+Minibadge standard, spec, and connector footprint: Luke Jenkins and contributors,
 [lukejenkins/minibadge](https://github.com/lukejenkins/minibadge) (Apache-2.0).

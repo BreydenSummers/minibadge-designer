@@ -3,7 +3,7 @@
 An image is downsampled to ~0.18 mm pixels and classified per pixel in one
 of two modes:
 
-- threshold: flatten onto white, grayscale, threshold — every "on" pixel
+- threshold: flatten onto white, grayscale, threshold; every "on" pixel
   belongs to a single material (the classic one-color logo path).
 - palette: each opaque pixel snaps to its nearest palette color, and each
   palette color carries a material assignment ("silk", "copper", "glow",
