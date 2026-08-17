@@ -1,6 +1,6 @@
 # minibadge designer
 
-A web-based designer for [SAINTCON minibadges](https://saintcon.org/minibadges/): upload a
+A web-based designer for [minibadges](https://github.com/lukejenkins/minibadge): upload a
 logo, drop as many LEDs as fit on the board (front or back side), add text in a dozen
 typefaces and any material, and download a ready-to-fab KiCad project.
 

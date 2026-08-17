@@ -8,7 +8,7 @@ import argparse
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="minibadge-designer",
-        description="Web UI for designing SAINTCON minibadges (logo + LEDs -> KiCad project).",
+        description="Web UI for designing minibadges (logo + LEDs -> KiCad project).",
     )
     parser.add_argument("--host", default="127.0.0.1", help="bind address (default: %(default)s)")
     parser.add_argument("--port", type=int, default=8000, help="port (default: %(default)s)")
