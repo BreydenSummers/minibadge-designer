@@ -1841,11 +1841,21 @@ def test_trace_bends_stay_reachable_on_a_custom_outline(ui):
                                 nodes: [], v3nodes: [], v3pin: null});
       renderLedList(); draw();
     }""")
+    # The leg whose midpoint sits farthest from the jumper: the final leg
+    # dives into the jumper's pads, and midpoints inside its dead zone no
+    # longer offer the "+" -- by design, so a click there moves the part
+    # (test_clicking_a_jumper_pad_grabs_the_jumper_and_never_drops_a_bend).
     mid = ui.js("""() => {
       const r = clkRoute(state.leds[0]);
-      const n = r.pts.length;
-      return [(r.pts[n-2][0] + r.pts[n-1][0]) / 2,
-              (r.pts[n-2][1] + r.pts[n-1][1]) / 2];
+      const [jx, jy] = clkInfo().jumper;
+      let best = null, away = -1;
+      for (let k = 0; k + 1 < r.pts.length; k++) {
+        const m = [(r.pts[k][0] + r.pts[k+1][0]) / 2,
+                   (r.pts[k][1] + r.pts[k+1][1]) / 2];
+        const d = Math.hypot(m[0] - jx, m[1] - jy);
+        if (d > away) { away = d; best = m; }
+      }
+      return best;
     }""")
     sx, sy = ui.board_to_client(mid[0], mid[1], "front")
     page.mouse.move(sx, sy)
@@ -1875,6 +1885,112 @@ def test_trace_bends_stay_reachable_on_a_custom_outline(ui):
     assert moved != [10.16, 10.16], (
         "the shape no longer drags at all; the bend fix overcorrected")
     ui.assert_clean("bends on a custom outline")
+
+
+#: Every hand-placed bend in the design, one number.  A click that was meant
+#: to grab the jumper but fell on a bend "+" leaves its mark here.
+_BEND_COUNT = ("() => (state.clk.nodes || []).length"
+               " + (state.clk.v3nodes || []).length"
+               " + state.leds.reduce((n, L) => n + (L.cnodes || []).length"
+               "     + (L.nodes || []).length + (L.anodes || []).length"
+               "     + (L.vnodes || []).length, 0)")
+
+#: Midpoints of every routed CLK leg, and whether the bend "+" is offered
+#: there: proof the dead zone did not swallow the hint everywhere.
+_HINT_STILL_OFFERED = """() => {
+  const legs = [];
+  const grab = r => { if (r && r.pts) for (let k = 0; k + 1 < r.pts.length; k++)
+    legs.push([(r.pts[k][0] + r.pts[k+1][0]) / 2,
+               (r.pts[k][1] + r.pts[k+1][1]) / 2]); };
+  grab(clkLink()); grab(clkV3Link());
+  for (const L of state.leds) if (L.clk)
+    grab(L.side === "back" ? noviaRoute(L) : clkRoute(L));
+  return {legs: legs.length,
+          offered: legs.filter(([x, y]) => traceNodeHint(x, y)).length};
+}"""
+
+#: The worst places to click: for each CLK leg midpoint, the grabbable point
+#: on the jumper nearest to it (its grab box is |ux|<2.4, |uy|<1.2 in the
+#: local frame; 2.3/1.1 stays safely inside).  Kept when the midpoint is
+#: within the 1.6 mm hint radius, because there the "+" competes with the
+#: grab even though the pointer -- not the midpoint -- is on the body.
+_FRINGE_CLICKS = """() => {
+  const ci = clkInfo();
+  const [jx, jy, rot] = ci.jumper;
+  const legs = [];
+  const grab = r => { if (r && r.pts) for (let k = 0; k + 1 < r.pts.length; k++)
+    legs.push([(r.pts[k][0] + r.pts[k+1][0]) / 2,
+               (r.pts[k][1] + r.pts[k+1][1]) / 2]); };
+  grab(clkLink()); grab(clkV3Link());
+  for (const L of state.leds) if (L.clk)
+    grab(L.side === "back" ? noviaRoute(L) : clkRoute(L));
+  const pts = [];
+  for (const [mxx, myy] of legs) {
+    const [ux, uy] = rotOff(mxx - jx, myy - jy, -rot);
+    const gx = Math.max(-2.3, Math.min(2.3, ux));
+    const gy = Math.max(-1.1, Math.min(1.1, uy));
+    if (Math.hypot(ux - gx, uy - gy) < 1.6) {
+      const [dx, dy] = rotOff(gx, gy, rot);
+      pts.push([jx + dx, jy + dy]);
+    }
+  }
+  return pts;
+}"""
+
+
+@pytest.mark.browser
+def test_clicking_a_jumper_pad_grabs_the_jumper_and_never_drops_a_bend(ui):
+    """A click on any of the jumper's three pads selects the jumper -- it
+    never lands on a bend "+" -- while the "+" is still offered along the
+    same traces away from the body.
+
+    Several traces end on the jumper by construction (its pin-9 and 3V3
+    links, a back blinker's supply run into the rail via), so their first-leg
+    midpoints crowd the body.  Shipped broken once: hovering the pads showed
+    the "+", and the click meant to drag the jumper instead recorded a
+    permanent hand-bend in the trace -- the user's intent silently rewritten
+    into copper they never asked for, with the jumper stranded where it was.
+    """
+    cases = [
+        # the reported repro: default jumper, front face, rot 0; the trace
+        # crowding the body is the back unit's supply run into the rail via
+        ([_js_led(x=14.0, y=12.0, side="back", clk=True)], {}),
+        # everything off default: jumper dragged, quarter-turned and mounted
+        # on the BACK with the traced 3V3 hookup, an oblique front unit; the
+        # crowding traces are the jumper's own links, in a rotated frame
+        ([_js_led(x=6.0, y=6.0, rot=37, clk=True)],
+         {"x": 12.0, "y": 10.0, "rot": 90, "side": "back", "via": False}),
+    ]
+    for leds, clk_state in cases:
+        _set_design(ui, _clamped(leds), None, clk=clk_state)
+        label = _describe(leds[0]) + f" jumper={clk_state or 'default'}"
+        side = clk_state.get("side", "front")
+        pads = ui.js("() => clkInfo().pads.map(p => [p[0], p[1], p[2]])")
+        assert len(pads) == 3, f"{label}: the jumper lost a pad: {pads}"
+        bends_before = ui.js(_BEND_COUNT)
+        fringe = ui.js(_FRINGE_CLICKS)
+        assert fringe, (
+            f"{label}: no CLK leg midpoint competes with the grab box, so "
+            "the fringe half of this test is vacuous; move the parts until "
+            "a trace crowds the jumper again")
+        spots = list(pads) + [("fringe", x, y) for x, y in fringe]
+        assert len(spots) >= 4, f"{label}: 3 pads + >=1 fringe spot, got {spots}"
+        for name, px, py in spots:
+            ui.click_mm(px, py, side=side)
+            sel = ui.selected()
+            assert sel and sel["kind"] == "jumper", (
+                f"{label}: clicking the {name} spot at ({px:.2f},{py:.2f}) "
+                f"selected {sel and sel['kind']} instead of the jumper; the "
+                "click meant to move the part went somewhere else")
+        assert ui.js(_BEND_COUNT) == bends_before, (
+            f"{label}: clicking the pads silently added "
+            f"{ui.js(_BEND_COUNT) - bends_before} hand-bend(s) to a trace; "
+            "that copper ships on the board and the user never asked for it")
+        offered = ui.js(_HINT_STILL_OFFERED)
+        assert offered["offered"] > 0, (
+            f"{label}: no '+' anywhere along {offered['legs']} routed legs; "
+            "the dead zone overcorrected and bends are unreachable")
+    ui.assert_clean("jumper pads vs bend hint")
 
 
 @pytest.mark.browser
