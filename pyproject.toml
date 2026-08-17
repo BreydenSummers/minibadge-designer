@@ -1,7 +1,7 @@
 [project]
 name = "minibadge-designer"
 version = "0.1.0"
-description = "Web UI that turns a logo + LED picks into a fab-ready SAINTCON minibadge KiCad project."
+description = "Web UI that turns a logo + LED picks into a fab-ready minibadge KiCad project."
 requires-python = ">=3.11"
 dependencies = [
     "flask>=3.0",

@@ -109,7 +109,7 @@ CORPUS = [
         pcb.Led(13.5, 12.5, "blue", novia=True, term=("pad", "16"))])),
     ("text-front-and-back", _spec(
         leds=[pcb.Led(6.0, 6.0, "red")], art=[],
-        texts=[pcb.Text(10.0, 15.0, "SAINTCON", size=1.5),
+        texts=[pcb.Text(10.0, 15.0, "MINIBADGE", size=1.5),
                pcb.Text(10.0, 5.0, "back", size=1.2, side="back",
                         material="copper")])),
     ("custom-outline", _spec(leds=[pcb.Led(10.0, 10.0, "red")], art=[],

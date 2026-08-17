@@ -101,8 +101,8 @@ from minibadge_designer import pcb
 # NOT read from pcb.py. See the module docstring.
 # ---------------------------------------------------------------------------
 
-#: The minibadge v2 connector pinout, from https://saintcon.org/minibadges/ and
-#: lukejenkins/minibadge. ``None`` means "must carry no net at all".
+#: The minibadge v2 connector pinout, from the lukejenkins/minibadge
+#: standard. ``None`` means "must carry no net at all".
 STANDARD_PINOUT = {"1": None, "2": "GND", "7": "3V3", "8": "GND",
                    "9": None, "10": None, "15": "3V3", "16": "GND"}
 
@@ -132,7 +132,7 @@ def clk_supply_net(spec) -> str:
     """The net a CLK unit's resistor input must carry, per the hookup style."""
     return CLK_RAIL_NET if spec.clk_jumper else CLK_NET
 
-#: The SAINTCON minibadge outline is 20 mm square. ``pcb.OUTLINE`` says the same
+#: The standard minibadge outline is 20 mm square. ``pcb.OUTLINE`` says the same
 #: thing in page coordinates; this is the physical fact.
 STANDARD_BOARD_MM = 20.0
 STANDARD_BOARD_TOL = 1e-3
@@ -1398,7 +1398,7 @@ def assert_board_is_the_standard_size(b: Board, spec) -> None:
     w, h = x1 - x0, y1 - y0
     assert (abs(w - STANDARD_BOARD_MM) < STANDARD_BOARD_TOL
             and abs(h - STANDARD_BOARD_MM) < STANDARD_BOARD_TOL), (
-        f"the default badge outline measures {w:.4f} x {h:.4f} mm, the SAINTCON "
+        f"the default badge outline measures {w:.4f} x {h:.4f} mm, the "
         f"minibadge standard is {STANDARD_BOARD_MM} x {STANDARD_BOARD_MM} mm; "
         "a badge off this size does not seat in the host")
 
