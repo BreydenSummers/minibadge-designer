@@ -2379,3 +2379,164 @@ def test_the_first_session_defaults_never_greet_the_user_with_a_warning(ui):
     hint = ui.js("() => document.getElementById('ledlist').innerText.trim()")
     assert hint, "the emptied LED panel is a blank void with no next step"
     ui.assert_clean("first-session defaults")
+
+
+# ===========================================================================
+# Stacking order: the parts are on top of the board, on the canvas as in life
+# ===========================================================================
+@pytest.mark.browser
+@pytest.mark.parametrize(
+    "cover",
+    [
+        # The board-shape part: on a custom outline it covers the whole board,
+        # which is what made this reachable everywhere at once.
+        "shapeel",
+        # An artwork layer spread over the same ground.
+        "art",
+    ],
+)
+def test_a_far_side_units_ghost_is_grabbed_before_the_board_under_it(ui, cover):
+    """Dragging a component never drags the board out from under it.
+
+    A unit mounted on the far face is drawn as a dashed ghost and is meant to
+    be draggable from either view.  Both the custom-outline part and a
+    full-board art layer sit under every ghost, so if either wins the hit
+    test the user reaches for an LED on a custom-shaped board and moves the
+    entire outline (or a logo) instead -- a destructive answer to an ordinary
+    drag, and one that is only obvious after the board redraws.
+    """
+    ui.custom_square_board(30)
+
+    # One unit on the BACK face: from the FRONT view it is only a ghost, so
+    # this is the weakest case for the component and the strongest for
+    # whatever is underneath it.
+    ui.js(
+        """(cover) => {
+            state.leds.length = 0;
+            state.leds.push({x: 10.16, y: 6.0, color: 'red', side: 'back',
+                             rot: 0, layout: 'inline', size: '0805',
+                             reverse: false, novia: false, farled: false,
+                             adv: null});
+            state.art.length = 0;
+            if (cover === 'art') {
+                state.art.push({kind: 'rect', material: 'silk', side: 'front',
+                                cx: 10.16, cy: 10.16, wmm: 26, h: 26, rot: 0,
+                                overrides: []});
+            }
+            renderLedList(); renderArtList(); draw();
+        }""",
+        cover,
+    )
+    ui.wait_state("state.leds.length === 1")
+
+    before = ui.js("() => [state.leds[0].x, state.leds[0].y]")
+    el_before = ui.js("() => state.shape.elements.map(e => [e.cx, e.cy])")
+    art_before = ui.js("() => state.art.map(a => [a.cx, a.cy])")
+
+    # The ghost really is over the thing that must not win, or the drag would
+    # prove nothing at all.
+    assert ui.js("([x, y]) => unitHit(state.leds[0], x, y)", before), (
+        "the probe point is not on the unit; this drag would test nothing")
+
+    ui.drag_mm(before, (before[0] + 4.0, before[1]), side="front")
+
+    assert ui.js("() => selected && selected.kind") == "led", (
+        f"the drag grabbed {ui.js('() => selected && selected.kind')!r} "
+        f"instead of the unit standing on top of the {cover}")
+    after = ui.js("() => [state.leds[0].x, state.leds[0].y]")
+    assert after[0] - before[0] > 2.0, (
+        f"the ghost did not follow the pointer: {before} -> {after}")
+    assert ui.js("() => state.shape.elements.map(e => [e.cx, e.cy])") == el_before, (
+        "dragging a component moved the board outline")
+    assert ui.js("() => state.art.map(a => [a.cx, a.cy])") == art_before, (
+        "dragging a component moved an artwork layer")
+    ui.assert_clean("ghost over board grab")
+
+
+#: How much of a part's own ink must still be visible once decoration is
+#: added beneath it.  Not 100 %: a 40 %-alpha dashed outline has a few pixels
+#: that composite over pale silk to the silk colour by coincidence.
+_PART_STAYS_VISIBLE = 0.95
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("under", ["art", "text"])
+def test_decoration_added_under_a_part_never_rubs_the_part_out(ui, under):
+    """Artwork and text are printed ON the board; the parts sit on top of it.
+
+    The interesting case is a unit mounted on the FAR face.  Its copper is
+    carved out of this face's decoration already, but the dashed ghost that
+    says "a part stands here" is not -- and the ghost is what the user
+    reaches for to drag it.  Decoration painted over it leaves the user
+    dragging something they cannot see, which is a lying preview: the class
+    of failure DRC can never catch.
+
+    Measured as a relationship, so no colour or coordinate is asserted: count
+    the pixels the part inks on a bare board, then require nearly all of them
+    to still differ from the decoration-only render once the decoration is
+    added underneath.  "Nearly" because the ghost outline is a 40 %-alpha
+    dash, and a handful of its pixels composite over pale silk to exactly the
+    silk colour by coincidence.  Calibrated on this board: 646-648 of 648
+    ghost pixels survive with the parts painted last, and 417 of 648 with the
+    text pass moved back after them, so the bar sits far from both.
+    """
+    ui.js(
+        """(under) => {
+            state.leds.length = 0; state.art.length = 0; state.texts.length = 0;
+            // Back face: from the front view this unit is only its ghost.
+            const led = {x: 10.16, y: 10.16, color: 'red', side: 'back',
+                         rot: 0, layout: 'inline', size: '0805',
+                         reverse: false, novia: false, farled: false,
+                         adv: null};
+            state.leds.push(led);
+            window.__led = {...led};
+            window.__patch = unitBBox(led);   // the whole unit footprint
+            window.__deco = under === 'art'
+                ? {kind: 'rect', material: 'silk', side: 'front', cx: 10.16,
+                   cy: 10.16, wmm: 14, h: 14, rot: 0, overrides: []}
+                : {x: 10.16, y: 10.16, text: 'MMMMMMMMM', size: 7,
+                   side: 'front', font: 'archivo', material: 'silk', rot: 0};
+            state.leds.length = 0;
+            renderLedList(); draw();
+        }""",
+        under,
+    )
+    # A web font inks nothing until it has loaded.
+    ui.page.wait_for_function("() => document.fonts.status === 'loaded'",
+                              timeout=ELEMENT_TIMEOUT)
+
+    shot = """(mode) => {
+        const [x0, y0, x1, y1] = window.__patch;
+        state.leds.length = 0; state.art.length = 0; state.texts.length = 0;
+        if (mode.includes('deco')) {
+            if (window.__deco.kind) state.art.push(window.__deco);
+            else state.texts.push(window.__deco);
+        }
+        if (mode.includes('part')) state.leds.push({...window.__led});
+        renderLedList(); renderArtList(); renderTextList(); draw();
+        const px = Math.round(VIEW.tx + x0 * SCALE);
+        const py = Math.round(VIEW.ty + y0 * SCALE);
+        const w = Math.max(1, Math.round((x1 - x0) * SCALE));
+        const h = Math.max(1, Math.round((y1 - y0) * SCALE));
+        return [...cvF.getContext('2d').getImageData(px, py, w, h).data];
+    }"""
+    bare = ui.js(shot, "bare")
+    part_only = ui.js(shot, "part")
+    deco_only = ui.js(shot, "deco")
+    both = ui.js(shot, "deco+part")
+
+    pixels = range(0, len(bare), 4)
+    ghost = [i for i in pixels if bare[i:i + 3] != part_only[i:i + 3]]
+    assert ghost, "the unit inks nothing over its own footprint; nothing to test"
+    assert [i for i in pixels if bare[i:i + 3] != deco_only[i:i + 3]], (
+        f"the {under} inks nothing over the unit's footprint, so it could "
+        "not hide the part even if it were drawn on top")
+
+    survived = [i for i in ghost if deco_only[i:i + 3] != both[i:i + 3]]
+    assert len(survived) >= _PART_STAYS_VISIBLE * len(ghost), (
+        f"adding {under} under the unit rubbed out "
+        f"{len(ghost) - len(survived)} of the {len(ghost)} pixels the unit "
+        f"draws ({100 * len(survived) / len(ghost):.1f}% left): the {under} "
+        "is painted over the part, and the user is left dragging something "
+        "the preview does not show")
+    ui.assert_clean(f"part over {under}")
