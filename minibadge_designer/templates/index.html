@@ -454,6 +454,9 @@
     cursor: pointer; padding: 0; vertical-align: 1px; flex: 0 0 auto;
   }
   .qm:hover { color: var(--accent); border-color: var(--accent); }
+  /* .itemhead button styles the remove ×; a ? inside a card header keeps its ring */
+  .itemhead button.qm { font-size: 11px; border: 1px solid var(--edge); padding: 0; }
+  .itemhead button.qm:hover { color: var(--accent); border-color: var(--accent); }
   #tippop {
     position: fixed; z-index: 50; width: 560px; max-width: calc(100vw - 24px);
     max-height: calc(100vh - 16px); overflow-y: auto;
@@ -5559,13 +5562,13 @@ function renderLedList() {
       </div>
       ${L.side === "back" && !L.reverse && !L.farled ? `<div class="sub">Faces the host badge; only shows from behind.</div>` : ""}
       ${(PKG[L.size] || PKG["0805"]).drill && !L.reverse ? `<div class="sub">Leads pass through; solder on the far face. Short lead toward the bar.</div>` : ""}
-      <div class="sub">Rotation (&deg;); double-click the unit on the board for +90</div>
+      <div class="sub">Rotation (&deg;)</div>
       ${pairHTML("r", 0, 359, 1, L.rot)}
       <div class="check" style="margin-top:6px"><input type="checkbox" class="clk" id="clk${i}"${L.clk ? " checked" : ""}${pinOn("9") ? "" : " disabled"}><label for="clk${i}">Blink with the badge clock (CLK)</label> <button class="qm" tabindex="-1" data-tip="clk" title="How blinking works">?</button></div>
       ${L.clk && pinOn("9")
-        ? `<div class="sub">Supply routes to ${state.clk.jumper
-            ? `the CLK/3V3 solder jumper on the ${state.clk.side === "back" ? "back" : "front"} (drag it on the board; the builder bridges one side)`
-            : "pin 9, so it always blinks"}. Hover the trace to add a bend (+), drag bends to move them, select one and press Delete to remove it.</div>`
+        ? `<div class="sub">${state.clk.jumper
+            ? `Routes to the solder jumper on the ${state.clk.side === "back" ? "back" : "front"}.`
+            : "Routes to pin 9; always blinks."}</div>`
         : !pinOn("9")
         ? `<div class="sub">Needs connector pin 9 (CLK); it's unchecked under Board shape.</div>` : ""}
       <details class="advbox"${L.reverse || L.novia || L.adv || L.farled ? " open" : ""}>
@@ -5734,7 +5737,7 @@ function renderClkOpts() {
   const needsVia = state.leds.some(L => L.clk && L.side === farFace);
   wrap.innerHTML = `
     <div class="item">
-      <div class="itemhead"><span>CLK hookup</span></div>
+      <div class="itemhead"><span>CLK hookup <button class="qm" tabindex="-1" data-tip="clk" title="How blinking works">?</button></span></div>
       <div class="check"><input type="radio" name="clkhook" class="cj" id="clkjump"${state.clk.jumper ? " checked" : ""}><label for="clkjump">Solder jumper (choose when soldering)</label></div>
       <div class="check"><input type="radio" name="clkhook" class="ct" id="clktrace"${state.clk.jumper ? "" : " checked"}><label for="clktrace">Direct trace to pin 9 (always blinks)</label></div>
       ${state.clk.jumper ? `
@@ -5744,10 +5747,10 @@ function renderClkOpts() {
       </div>
       ${jside === "back" ? `<div class="check" style="margin-top:6px"><input type="checkbox" class="jvia" id="clkjvia"${state.clk.via !== false ? " checked" : ""}><label for="clkjvia">Feed 3V3 through a via</label></div>
       <div class="sub">${state.clk.via !== false
-        ? "The 3V3 pad drops straight into the front power plane through its own via."
-        : "The 3V3 pad is wired by a trace to a 3V3 connector pin on this face instead of a via. Drag its &#9670; endpoint onto either 3V3 pin; double-click it for the nearest."}</div>` : ""}
+        ? "The 3V3 pad drops into the front power plane through its own via."
+        : "Traced to a 3V3 pin on this face; drag the &#9670; endpoint to pick which."}</div>` : ""}
       ${needsVia ? `<div class="sub">A blinking LED sits on the ${farFace}; the rail via beside the jumper carries its supply through the board.</div>` : ""}
-      <div class="sub">Drag the jumper like a part; double-click for +90&deg;. Its traces grow bends when you hover them (+), just like a unit's. Bridge its centre pad to the 3V3 side for steady light or the CLK side to blink with the badge; bridge exactly ONE side. Unbridged, those LEDs stay dark.</div>`
+      <div class="sub">Bridge ONE side when soldering: 3V3 = steady, CLK = blinks. Unbridged, those LEDs stay dark.</div>`
       : `<div class="sub">Those LEDs pulse with the badge clock; there is no steady option without reworking the board.</div>`}
     </div>`;
   wrap.querySelector(".cj").onchange = () => {
@@ -6737,7 +6740,9 @@ const TIPS = {
   </ul>` },
   clk: { title: "Blinking with the host badge", img: "clk.webp", html: `<ul>
     <li>CLK feeds the LED from the host badge's clock pin instead of steady 3V3, so it pulses in time with the badge.</li>
-    <li>The <b>solder jumper</b> (drag it anywhere on the board) leaves the choice to whoever solders it: bridge the 3V3 side for steady light, the CLK side to blink — never both. <b>Direct trace to pin 9</b> (the CLK pad) always blinks.</li>
+    <li>The <b>solder jumper</b> leaves the choice to whoever solders it: bridge its centre pad to the 3V3 side for steady light, the CLK side to blink — exactly one, never both. <b>Direct trace to pin 9</b> (the CLK pad) always blinks.</li>
+    <li>Drag the jumper like a part; double-click for +90&deg;. Hover any of its traces to add a bend (+), drag bends to move them, select one and press <b>Delete</b> to remove it — just like a unit's traces.</li>
+    <li>A back-side jumper feeds its 3V3 pad through a via by default; untick <b>Feed 3V3 through a via</b> to run a surface trace instead, then drag its &#9670; endpoint onto either 3V3 pin (double-click it for the nearest).</li>
   </ul>` },
   text: { title: "Step 5: your handle on the back", img: "text.webp", html: `<ul>
     <li>"made by half" in <b>Black Ops One</b>, Side set to <b>Back</b>: the bundled typefaces work in any material; KiCad's own stroke font is silkscreen-only.</li>
