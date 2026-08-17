@@ -536,7 +536,7 @@
       <div class="sub" style="margin-top:0">Board shape</div>
       <input type="file" id="shapefile" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml,.svg">
       <div id="shapeopts"></div>
-      <label class="field">Connector pins</label>
+      <label class="field">Connector pins <button class="qm" tabindex="-1" data-tip="pins" title="Which pins to keep">?</button></label>
       <div id="pingrid"></div>
       <div class="sub" id="pinnote">Untick any pin your design doesn't need.</div>
     </div>
@@ -5560,7 +5560,7 @@ function renderLedList() {
       ${(PKG[L.size] || PKG["0805"]).drill && !L.reverse ? `<div class="sub">Leads pass through; solder on the far face. Short lead toward the bar.</div>` : ""}
       <div class="sub">Rotation (&deg;); double-click the unit on the board for +90</div>
       ${pairHTML("r", 0, 359, 1, L.rot)}
-      <div class="check" style="margin-top:6px"><input type="checkbox" class="clk" id="clk${i}"${L.clk ? " checked" : ""}${pinOn("9") ? "" : " disabled"}><label for="clk${i}">Blink with the badge clock (CLK)</label></div>
+      <div class="check" style="margin-top:6px"><input type="checkbox" class="clk" id="clk${i}"${L.clk ? " checked" : ""}${pinOn("9") ? "" : " disabled"}><label for="clk${i}">Blink with the badge clock (CLK)</label> <button class="qm" tabindex="-1" data-tip="clk" title="How blinking works">?</button></div>
       ${L.clk && pinOn("9")
         ? `<div class="sub">Supply routes to ${state.clk.jumper
             ? `the CLK/3V3 solder jumper on the ${state.clk.side === "back" ? "back" : "front"} (drag it on the board; the builder bridges one side)`
@@ -5575,7 +5575,7 @@ function renderLedList() {
           return on.length
             ? ` <span class="advon">· ${on.join(" · ")}</span>`
             : ` <span class="advsum">· reverse mount, routing, placement</span>`;
-        })()}</summary>
+        })()} <button class="qm" tabindex="-1" data-tip="placement" title="Free placement and routing">?</button></summary>
         <div class="check"><input type="checkbox" class="rev" id="rev${i}"${L.reverse ? " checked" : ""}><label for="rev${i}">Reverse mount (shines through the board)</label></div>
         ${L.reverse ? `<div class="sub">Solder upside-down over the hole; glows out the ${L.side === "back" ? "front" : "back"}. 1206 only.</div>` : ""}
         <div class="check" style="margin-top:6px"><input type="checkbox" class="nvia" id="nvia${i}"${L.novia ? " checked" : ""}><label for="nvia${i}">No power via</label></div>
@@ -6691,55 +6691,62 @@ window.addEventListener("keydown", e => {
 });
 
 // ---- illustrated tooltips (the "?" buttons) ----
+// The animation carries the "how"; the bullets keep only what a picture
+// cannot show (numbers, constraints, warnings). Every tip walks the same
+// helmet badge, in order, so the pictures read as one continuing build.
 const TIPS = {
   basics: { title: "Getting around: meet the helmet badge", img: "rotate.webp", html: `
-    <p>Every "?" on this page walks through building the same thing: a helmet-shaped
-    badge with copper stripes, a glowing visor, and a stencil name.</p><ul>
-    <li>Drag anything on <b>either view</b>; parts on the other side show as dashed ghosts and can be grabbed there too.</li>
-    <li>Click to select, then: <b>arrow keys</b> nudge (Shift = 1 mm), <b>Delete</b> removes, corner squares <b>resize</b>, the round knob <b>rotates</b> (Shift snaps 15°).</li>
-    <li><b>Double-click</b> an LED or artwork layer for a quick +90°.</li>
+    <p>Every "?" on this page builds the same badge: a helmet board with
+    copper stripes, a glowing visor, and a stencil name.</p><ul>
+    <li>Drag anything on either view; dashed ghosts live on the other side and can be grabbed here too.</li>
+    <li>Click to select, then: <b>arrows</b> nudge (Shift = 1 mm), <b>Delete</b> removes, corner squares resize art and text, the round knob rotates (Shift snaps 15°), <b>double-click</b> = +90°.</li>
   </ul>` },
   shape: { title: "Step 1: a helmet-shaped board", img: "parts.webp", html: `<ul>
-    <li>Add the helmet PNG as an outline part (<b>+ Silhouette…</b> under Board shape): dark pixels become the board, so the badge IS the helmet (raise the threshold if bright details get punched out). No parts = the standard square.</li>
-    <li>Each connector row carries 3V3 + GND, so one row alone powers the badge: <b>uncheck the top row</b> and the helmet's crown stays clean; the kept row's tabs are bridged in automatically.</li>
-    <li>Parts compose: any part can also be switched to <b>Cuts a hole</b> to punch openings.</li>
-    <li>SVG silhouettes trace exactly; <b>Edge smoothing</b> melts raster pixel stairs.</li>
+    <li><b>+ Silhouette…</b> turns a picture into the board: dark pixels become material, so the badge IS the helmet. Raise the threshold if bright details get punched out.</li>
+    <li>Parts stack; switch one to <b>Cuts a hole</b> to punch openings. SVGs trace exactly; <b>Edge smoothing</b> melts raster pixel stairs.</li>
+  </ul>` },
+  pins: { title: "Connector pins: keep only what you use", img: "pins.webp", html: `<ul>
+    <li>Each row carries 3V3 + GND, so one row alone powers every LED — untick the top row and the helmet's crown stays clean.</li>
+    <li>Board parts that miss a kept pad are bridged in automatically; dropping the last 3V3 or GND pin blocks downloads until a rail comes back.</li>
   </ul>` },
   art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
-    <li>Add the same helmet PNG as artwork; it loads in <b>By color</b> mode, one material per color: the yellow stripes become <b>exposed copper</b>, the light vents become <b>silkscreen</b>, and the body stays plain soldermask (<i>Ignore</i>).</li>
-    <li><b>Hover a color row or wand chip</b> to light up exactly which pixels it controls.</li>
-    <li>SVG art stays exact at any size and angle; PNG/JPG use a 0.18 mm pixel grid.</li>
+    <li>The same helmet PNG, added as artwork, loads in <b>By color</b> mode with a material guessed per color — check every row and fix the guesses (here the body is set to <i>Ignore</i>: plain soldermask).</li>
+    <li>Hover a color row to light up exactly which pixels it controls.</li>
+    <li>PNG/JPG snap to a 0.18 mm grid; SVG art stays exact at any size.</li>
   </ul>` },
   wand: { title: "Step 3: the visor, with the magic wand", img: "wand.webp", html: `<ul>
-    <li>The visor is the same "ignore" black as the body, but only the visor should glow. Pick <b>Glow window</b>, press <b>Pick region</b>, hover the visor (it lights up), and click: just that connected patch becomes a window. <b>Esc</b> cancels.</li>
-    <li>Every pick becomes a chip below; change its material or remove it anytime.</li>
+    <li>The visor is the same black as the body, but only the visor should glow: pick <b>Glow window</b>, press <b>Pick region</b>, click the visor. Just that connected patch changes; <b>Esc</b> cancels.</li>
+    <li>Retarget or remove any pick from the chip under the layer.</li>
   </ul>` },
   materials: { title: "What the helmet is made of", img: "materials.png", html: `<ul>
-    <li><b>Silkscreen</b>. The white vents (ink printed on the mask).</li>
-    <li><b>Exposed copper</b>. The stripes: mask opened so the metal shines. <b>Gold or silver</b> comes from the Surface finish picker in the top bar (ENIG = gold, HASL = silver); one finish for all exposed metal, pads included.</li>
-    <li><b>Glow window</b>. The visor: copper stripped from both layers, mask kept, so back-side LED light shines through.</li>
-    <li><b>Bare board</b>. Like glow, but the mask opens too: raw laminate, the brightest window. A bare layer's <b>Side</b> select gains a <b>Through</b> option (both faces, the default for shape windows); Front/Back opens one face only, e.g. a bigger back-only window behind a small front graphic.</li>
-    <li>Windows always keep a copper ring at the board edge, and every LED ties to that ring with a hairline copper bridge; where one crosses a window it stays under a thin strip of soldermask (vias keep their mask cap too, unless you pick exposed vias in Shape).</li>
+    <li><b>Silkscreen</b> — white ink (the vents).</li>
+    <li><b>Exposed copper</b> — bare metal (the stripes); gold or silver follows the Finish picker, pads included.</li>
+    <li><b>Glow window</b> — copper stripped so back-side LED light shines through the tinted board (the visor). The canvas shows it as a lightened tint; the real board stays dark until the LED behind it lights.</li>
+    <li><b>Bare board</b> — not used on this badge: like glow but the mask opens too, raw laminate, the brightest window. Its Side select adds <b>Through</b> (both faces) next to Front/Back.</li>
+    <li>Windows can't cut off power: a metal ring always survives at the board edge, with thin copper links to every LED.</li>
   </ul>` },
   leds: { title: "Step 4: a red LED behind the visor", img: "leds.webp", html: `<ul>
-    <li>Drop a <b>back-side</b> LED and drag its dashed ghost behind the visor on the front view; its light will shine through the glow window when the badge is powered.</li>
-    <li>Each LED brings its series resistor, wired 3V3 → R → LED → GND through the pours. No routing needed.</li>
-    <li><b>In line</b> = thin strip (fits behind the visor), <b>Stacked</b> = compact block,  <b>Reverse mount</b> is the badgelife trick: a 1206 soldered upside-down over a routed hole so it glows out the other face (works with either layout). Double-click for +90°, drag the knob for any angle; tilted units only claim the room they really need.</li>
-    <li><b>Size</b> picks the part package: 0603 is compact but fiddly to hand-solder, 0805 is the minibadge standard, 1206 is bigger, brighter, and easiest to solder. The <b>TH</b> entries are through-hole LEDs that stand off the board: 1.8 mm (tiny dome, barely bigger than a 1206), 3 mm (the classic), and the 5×2 mm rectangular bar (great for eyes, mouths, and light strips). Their series resistor stays an 0805.</li>
-    <li><b>Advanced placement</b> unlocks the whole unit: the LED, resistor, and via each drag on their own (double-click a part for +90&deg;, or type offsets and angles) when the standard layouts don't fit around your art. The card warns if a placement would short copper.</li>
-    <li><b>No power via</b> runs a trace to a connector pad instead, and its ◆ endpoint is draggable: every legal destination lights up (any same-net pad, or another unit's pad to share one run), the drop snaps to the nearest one, and double-clicking goes back to the automatic choice.</li>
-    <li><b>Blink with the badge clock</b> feeds the LED from the connector's CLK pin instead of 3V3, so it pulses with the host badge. A <b>CLK hookup</b> choice appears below the list: the classic 3-pad solder jumper (drag it on the board; the builder bridges the 3V3 side for steady light or the CLK side to blink; NEVER both), or a direct trace to pin 9 (always blinks).</li>
+    <li>An LED with Side set to <b>Back</b> glows in the window on the Back view; the front view shows only its dashed ghost.</li>
+    <li>Each LED arrives with its series resistor, pre-wired — nothing to route.</li>
+    <li><b>In line</b> is a thin strip (fits behind the visor); 0805 is the minibadge standard. The Layout and Size selects carry the rest.</li>
+  </ul>` },
+  placement: { title: "When the standard layouts don't fit", img: "placement.webp", html: `<ul>
+    <li><b>Move parts freely</b> unlocks the LED, resistor, and via to drag one by one; the card warns if a spot would short copper.</li>
+    <li><b>No power via</b> runs a surface trace to a connector pad instead: drag its &#9670; endpoint — every legal target lights up — or double-click it to go back to automatic.</li>
+    <li><b>Reverse mount</b> and <b>LED on the other side</b> shine through the board; each explains itself on the card as you tick it.</li>
+  </ul>` },
+  clk: { title: "Blinking with the host badge", img: "clk.webp", html: `<ul>
+    <li>CLK feeds the LED from the host badge's clock pin instead of steady 3V3, so it pulses in time with the badge.</li>
+    <li>The <b>solder jumper</b> (drag it anywhere on the board) leaves the choice to whoever solders it: bridge the 3V3 side for steady light, the CLK side to blink — never both. <b>Direct trace to pin 9</b> (the CLK pad) always blinks.</li>
   </ul>` },
   text: { title: "Step 5: your handle on the back", img: "text.webp", html: `<ul>
-    <li>Sign your work: "made by half" in <b>Black Ops One</b>, with Side set to <b>Back</b>; the bundled typefaces become exact polygons and can use any material; KiCad's own stroke font is silkscreen-only.</li>
-    <li>Back text reads correctly when you flip the badge over; glow/bare text cuts through the board and shows mirrored from the far side.</li>
-    <li>Keep decorative fonts <b>≥ 1.2 mm</b> so thin strokes survive fabrication.</li>
+    <li>"made by half" in <b>Black Ops One</b>, Side set to <b>Back</b>: the bundled typefaces work in any material; KiCad's own stroke font is silkscreen-only.</li>
+    <li>Text hanging past the board edge blocks downloads — drag it fully onto the board.</li>
+    <li>Back text reads correctly once the badge is flipped over; keep decorative fonts <b>≥ 1.2 mm</b> so thin strokes survive fabrication.</li>
   </ul>` },
   download: { title: "Step 6: the finished board", img: "final.png", html: `<ul>
-    <li>The actual KiCad renders, front and back: clean crown (bottom row only), visor dark until its LED lights it, and the maker's mark on the back. The zip holds the board, project file, BOM, and a README with ordering notes (including your soldermask color).</li>
-    <li>Open the <b>.kicad_pro</b>, press <b>B</b> to refill zones (the hairline slits in copper areas vanish), then export Gerbers.</li>
-    <li>Or skip KiCad entirely: <b>⬇ Gerbers for fab</b> plots that exact package on the server: a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the .kicad_pcb itself). Order 1.6 mm, 2 layers, your mask color and finish.</li>
-    <li>Silk is carved around pads, parts, text, and mask openings automatically; the project arrives DRC-clean.</li>
+    <li>The visor stays dark until the host badge lights its LED. The zip is a complete KiCad project (board, BOM, a README with ordering notes) that already passes KiCad's design checks. Open the <b>.kicad_pro</b>, press <b>B</b> to refill zones, plot Gerbers.</li>
+    <li>Or skip KiCad: <b>⬇ Gerbers for fab</b> plots a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the .kicad_pcb itself). Order 1.6 mm, 2 layers, your mask color and finish.</li>
   </ul>` },
 };
 const tipPop = document.createElement("div");
@@ -6753,6 +6760,8 @@ document.addEventListener("click", e => {
     if (!tipPop.contains(e.target)) hideTip();
     return;
   }
+  // A "?" inside a <details> summary must not also toggle the details.
+  e.preventDefault();
   const key = btn.dataset.tip;
   if (tipOpen === key) { hideTip(); return; }
   const t = TIPS[key];
