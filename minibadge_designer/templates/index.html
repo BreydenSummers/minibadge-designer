@@ -969,11 +969,11 @@ window.addEventListener("beforeunload", e => {
 
 const state = {
   art: [],   // {file, img, iw, ih, cx, cy, wmm, threshold, invert, material, cache}
-  // The starter LED is front-side on purpose: the first thing on screen
-  // should be visible from the side the viewer is looking at. Back-side
-  // (the glow-through-a-window classic) is one click away, and its card
-  // says plainly that it only shows from behind.
-  leds: [{x: 7.5, y: 6.5, color: "red", side: "front", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null}],
+  // The starter LED is back-side on purpose: back is how minibadges are
+  // actually built (the glow-through-a-window classic, facing the host
+  // badge), so the default should match. Front is one click away, and the
+  // card says plainly which face the unit shows from.
+  leds: [{x: 7.5, y: 6.5, color: "red", side: "back", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null}],
   texts: [], // {x, y, text, size, side, rot}
   mask: "green",
   finish: "enig",  // surface finish: what color the exposed metal plates
@@ -6155,11 +6155,10 @@ $("addled").addEventListener("click", () => {
       + "Remove one before adding another.", true);
     return;
   }
-  // Front is the default: a new LED should be visible from the side the
-  // user is looking at. Back-side (glowing through a window, facing the
-  // host badge) is a deliberate choice, one click away; the old back
-  // default meant the first thing a newcomer ever placed was invisible.
-  const led = {x: 10, y: 10, color: "red", side: "front", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null};
+  // Back is the default: back-side LEDs (glowing through a window, facing
+  // the host badge) are the standard minibadge build, so a new unit should
+  // start there. Front is a deliberate choice, one click away on the card.
+  const led = {x: 10, y: 10, color: "red", side: "back", rot: 0, layout: "inline", size: "0805", reverse: false, novia: false, farled: false, adv: null};
   const spot = spotForNewLed(led);
   if (!spot) {
     setStatus(`No room for another LED: ${state.leds.length} unit`

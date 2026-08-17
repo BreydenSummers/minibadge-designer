@@ -427,8 +427,8 @@ def test_flow_upload_assign_material_drag_add_led_and_download(ui, logo):
     assert ui.panel() == "art"
 
     # --- add an LED and split the two across both faces -----------------
-    # New units default to the front (visible side); this flow needs one on
-    # each face, so the second is switched to back explicitly.
+    # New units default to the back (the standard minibadge build); this
+    # flow needs one on each face, so both sides are set explicitly.
     ui.show_panel("leds")
     assert ui.add_led() is True
     ui.wait_state("state.leds.length === 2")
@@ -2221,20 +2221,20 @@ def test_the_trace_endpoint_drags_only_onto_valid_targets(ui):
 # First-session defaults (dogfood findings F1/F2/F5/F6)
 # ===========================================================================
 def test_the_first_session_defaults_never_greet_the_user_with_a_warning(ui):
-    """A fresh design's defaults compose cleanly: the starter LED is on the
-    face the viewer is looking at, a newly added text lands clear of parts
-    instead of on top of them, an emptied LED panel says what to do next,
-    and text answers the same double-click-to-rotate gesture as everything
-    else on the canvas.
+    """A fresh design's defaults compose cleanly: the starter LED sits on
+    the back (the standard minibadge build: glowing through a window at the
+    host badge), a newly added text lands clear of parts instead of on top
+    of them, an emptied LED panel says what to do next, and text answers the
+    same double-click-to-rotate gesture as everything else on the canvas.
 
-    These were the top dogfood findings: the old defaults meant the first
-    thing a newcomer ever saw was an invisible back-side part, and the first
-    thing adding text produced was an overlap warning the app caused itself.
+    The text/panel/gesture checks were top dogfood findings; the back-side
+    LED default is a deliberate owner decision that reversed the dogfood-era
+    front default.
     """
     page = ui.page
-    # The starter LED faces the viewer.
-    assert ui.js("() => state.leds[0].side") == "front", (
-        "the very first part on screen is on the invisible side")
+    # The starter LED defaults to the back face.
+    assert ui.js("() => state.leds[0].side") == "back", (
+        "LED units should default to the back side")
 
     # A new text lands on solid board AND clear of the starter LED: no
     # self-inflicted warning. The app's own predicates are the oracle.
