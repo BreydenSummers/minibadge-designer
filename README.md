@@ -131,9 +131,21 @@ its own temp directory with its own kicad-cli. Tune per host via `.env`:
 - `EXPORT_BUDGET_S`: wall clock one `/gerbers` or `/model3d` request may spend
   in subprocesses (default `240`). Keep it comfortably under `WORKER_TIMEOUT`,
   or a slow export is killed before it can report that it was slow.
-- `FORWARDED_ALLOW_IPS`: which peer may set `X-Forwarded-For` (default
-  `127.0.0.1`, the reverse proxy on this host). Without it the access log
-  records the proxy's address for every request instead of the client's.
+- `FORWARDED_ALLOW_IPS`: which peer gunicorn accepts forwarded headers from
+  (default `127.0.0.1`, the reverse proxy on this host)
+
+The visitor's address comes from Cloudflare's `CF-Connecting-IP`, not from
+counting positions in `X-Forwarded-For`. Counting does not work here: the local
+proxy's two usual configurations either append its peer (making the rightmost
+entry Cloudflare's edge) or overwrite the header outright (losing the visitor
+entirely), and both were measured resolving to the edge address rather than the
+person. `CF-Connecting-IP` is a single value that Cloudflare overwrites on every
+request, so there is no chain to count.
+
+That is only sound while the app is unreachable except through Cloudflare, which
+is what the loopback-only `ports` mapping buys. **If the origin is ever exposed
+directly, the header becomes forgeable** and the check has to become "is the peer
+a Cloudflare address".
 
 ### Limits on what one request can spend
 

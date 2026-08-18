@@ -404,6 +404,105 @@ def test_every_subprocess_in_one_export_draws_on_the_same_deadline():
 
 
 # ---------------------------------------------------------------------------
+# Who the request came from
+# ---------------------------------------------------------------------------
+
+# A visitor, and the Cloudflare edge that relayed them. Documentation-range
+# addresses so nothing here could ever be a real host.
+_VISITOR = "203.0.113.9"
+_CF_EDGE = "198.51.100.7"
+
+
+def _address_the_app_sees(flask_app, headers) -> str:
+    """What `request.remote_addr` resolves to for one set of forwarded headers.
+
+    Observed through the `request_started` signal rather than a probe route: the
+    app is session-scoped and Flask locks route registration after its first
+    request, and more importantly this way the request travels the *real*
+    middleware chain in its real order. That order is the thing under test --
+    the first version of this fix had ProxyFix and the Cloudflare shim wrapped
+    the wrong way round, so ProxyFix ran second and put the edge address back.
+    A test that rebuilt the chain itself would have agreed with the bug.
+    """
+    from flask import request, request_started
+
+    seen = {}
+
+    def record(sender, **extra):
+        seen["addr"] = request.remote_addr
+
+    request_started.connect(record, flask_app)
+    try:
+        # Any path will do; the signal fires before the route is dispatched, and
+        # a 404 costs nothing next to rendering the designer.
+        resp = flask_app.test_client().get(
+            "/__forwarded_probe", headers=headers,
+            environ_base={"REMOTE_ADDR": "127.0.0.1"})
+        resp.close()
+    finally:
+        request_started.disconnect(record, flask_app)
+    return seen["addr"]
+
+
+@pytest.mark.parametrize("label,headers", [
+    # nginx's `$proxy_add_x_forwarded_for`: appends the peer, so the rightmost
+    # entry -- the only one it is safe to count from -- is Cloudflare, not the
+    # visitor.
+    ("local proxy appends the peer",
+     {"X-Forwarded-For": f"{_VISITOR}, {_CF_EDGE}", "CF-Connecting-IP": _VISITOR}),
+    # nginx's `$remote_addr`: overwrites, so the visitor is not in X-F-F at all.
+    ("local proxy overwrites the header",
+     {"X-Forwarded-For": _CF_EDGE, "CF-Connecting-IP": _VISITOR}),
+    # No local proxy in the way; still has to work.
+    ("cloudflare straight to the app",
+     {"X-Forwarded-For": _VISITOR, "CF-Connecting-IP": _VISITOR}),
+])
+@pytest.mark.webapp
+def test_the_log_records_the_visitor_not_the_proxy_in_front_of_them(
+        flask_app, label, headers):
+    """The address the app reports is the person, whatever the chain looks like.
+
+    Without this the access log said `127.0.0.1` for every request, so an
+    availability incident arrived with no way to tell who caused it or what to
+    block. The first attempt -- `ProxyFix(x_for=1)` -- did not deliver it:
+    `X-Forwarded-For` positions depend on the local proxy's configuration, and in
+    both of its usual configurations the entry it is safe to count from is
+    Cloudflare's edge rather than the visitor. Measured, not reasoned about.
+
+    So the address comes from `CF-Connecting-IP`, which Cloudflare sets as a
+    single value, overwriting whatever the client sent. All three chain shapes
+    are here because the bug was invisible in the third one -- which is the only
+    shape a test written from the happy path would have covered.
+    """
+    got = _address_the_app_sees(flask_app, headers)
+    assert got == _VISITOR, (
+        f"with the {label}, the app saw {got} instead of the visitor "
+        f"{_VISITOR}; abuse from that address cannot be attributed or blocked")
+
+
+@pytest.mark.parametrize("bogus", [
+    "not-an-address",
+    f"{_VISITOR}, 10.0.0.1",         # a chain smuggled into a single-value header
+    '1.2.3.4 10.0.0.1 "GET /" 200',  # extra tokens, aimed at the access log
+    "   ",
+])
+@pytest.mark.webapp
+def test_a_forwarded_address_that_is_not_an_address_is_ignored(flask_app, bogus):
+    """Only something that parses as an IP may become the client.
+
+    `REMOTE_ADDR` is interpolated into the access log by gunicorn's `%(h)s`, so a
+    value reaching it unchecked would let whoever set it write its own log lines.
+    Cloudflare would never send these, and a newline cannot cross an HTTP header
+    at all, so this is depth rather than the last line -- but validating costs
+    less than depending on every hop being correct.
+    """
+    got = _address_the_app_sees(flask_app, {"CF-Connecting-IP": bogus})
+    assert got == "127.0.0.1", (
+        f"{bogus!r} was accepted as a client address ({got!r}); only a "
+        f"parseable IP may reach the access log")
+
+
+# ---------------------------------------------------------------------------
 # Response headers
 # ---------------------------------------------------------------------------
 

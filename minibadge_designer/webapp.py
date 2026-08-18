@@ -394,16 +394,69 @@ def _check_svg_complexity(data: bytes) -> None:
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD
 
-# The app is served behind a reverse proxy on the same host, which means every
-# peer address it sees is that proxy's loopback address. Without this, the
-# gunicorn access log recorded 127.0.0.1 for all traffic -- so when the site
-# fell over there was no way to tell who had done it or what to block. One hop
-# only: trusting more than the number of proxies actually in front of you lets
-# a client forge its own address by sending its own X-Forwarded-For.
+# The app is served behind a reverse proxy on the same host, which is itself
+# behind Cloudflare, so every peer address the app sees is the proxy's loopback
+# address. Without any of this the gunicorn access log recorded 127.0.0.1 for
+# all traffic -- and when the site fell over there was no way to tell who had
+# done it or what to block.
 #
-# Gunicorn also has to be told the proxy is allowed to set that header; see
-# `forwarded_allow_ips` in gunicorn.conf.py.
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+# ProxyFix alone does NOT solve it here, and counting hops is the wrong tool for
+# the job. `X-Forwarded-For` positions depend on the local proxy's config, and
+# both usual configs get it wrong: nginx's `$proxy_add_x_forwarded_for` appends
+# the peer, so the chain is "<visitor>, <cloudflare-edge>" and the rightmost
+# entry -- the only one it is safe to count from -- is Cloudflare's edge, not
+# the visitor; nginx's `$remote_addr` overwrites the header outright and the
+# visitor's address is not in it at all. Measured both ways: x_for=1 yields the
+# Cloudflare edge IP, which varies enough to look plausible in a log and is
+# useless for blocking anyone.
+#
+# `CF-Connecting-IP` is the header that answers the question. Cloudflare sets it
+# on every request as a single address, *overwriting* whatever the client sent,
+# and a local proxy passes it through untouched, so there is no chain to count.
+#
+# What makes trusting it sound is the topology, not the header: compose
+# publishes only on 127.0.0.1, gunicorn accepts forwarded headers only from
+# loopback, and nothing but the proxy can reach the app. If the origin is ever
+# exposed directly -- a LAN bind, a port opened on the host -- this becomes
+# forgeable and the check has to become "is the peer a Cloudflare address".
+#
+# ProxyFix still runs, for `x_proto`/`x_host` (the scheme and host the visitor
+# actually used) and as the fallback when the header is absent, which is what
+# happens when the app is reached without Cloudflare in front of it.
+class _CloudflareClientIP:
+    """Set REMOTE_ADDR from `CF-Connecting-IP`, when Cloudflare supplied one.
+
+    The value is parsed as an IP address before it is used, and dropped if it
+    is not one. Cloudflare would never send anything else, but REMOTE_ADDR is
+    interpolated straight into the access log by gunicorn's `%(h)s`, and a
+    header that reached that unchecked would be a log-injection primitive: one
+    newline and an attacker writes their own log lines. Validating is cheaper
+    than trusting the whole path.
+    """
+
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        raw = environ.get("HTTP_CF_CONNECTING_IP")
+        if raw:
+            import ipaddress
+
+            try:
+                environ["REMOTE_ADDR"] = str(ipaddress.ip_address(raw.strip()))
+            except ValueError:
+                pass  # not an address: keep whatever ProxyFix worked out
+        return self.wsgi_app(environ, start_response)
+
+
+# Order matters and is easy to get backwards. WSGI middleware runs
+# outermost-first, so ProxyFix has to be the OUTER wrapper and this the inner
+# one: ProxyFix works out scheme, host and a fallback address from
+# X-Forwarded-*, then this overrides the address with Cloudflare's answer. Wrap
+# them the other way round and ProxyFix runs second and puts the Cloudflare edge
+# IP back -- which is exactly what the first version of this did.
+app.wsgi_app = ProxyFix(_CloudflareClientIP(app.wsgi_app),
+                        x_for=1, x_proto=1, x_host=1)
 
 
 #: Response headers added to everything this app serves.
