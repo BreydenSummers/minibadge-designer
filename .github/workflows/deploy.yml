@@ -1,0 +1,76 @@
+# Deploy: push to main, and the self-hosted runner rebuilds the stack it is
+# sitting on. The runner user (breyden) owns /opt/minibadge-designer, is in the
+# docker group, and its origin remote already authenticates, so this needs no
+# secrets beyond what is on the box.
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Never cancel a deploy half-way through a compose restart, and never let two
+# overlap on the same directory.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 60
+    env:
+      DEPLOY_DIR: /opt/minibadge-designer
+      GIT_TERMINAL_PROMPT: "0"
+
+    steps:
+      # Deploy from the /opt clone rather than the runner's workspace: that is
+      # where the server's own .env lives, and compose reads .env from the
+      # directory of the compose file.
+      - name: Move the deploy checkout to this commit
+        run: |
+          cd "$DEPLOY_DIR"
+          git fetch --prune origin
+          git cat-file -e "${GITHUB_SHA}^{commit}" 2>/dev/null || {
+            echo "::error::${GITHUB_SHA} is not in the deploy clone after fetch."
+            echo "origin here is $(git remote get-url origin) -- is it the same repo?"
+            exit 1
+          }
+          git checkout -f main
+          git reset --hard "$GITHUB_SHA"
+          echo "deploying $(git log --oneline -1)"
+
+      # --wait holds until the compose healthcheck passes, so a container that
+      # builds and then dies on startup fails the job instead of reporting a
+      # green deploy.
+      - name: Rebuild and restart
+        run: |
+          cd "$DEPLOY_DIR"
+          docker compose up -d --build --remove-orphans --wait --wait-timeout 300
+
+      - name: Report what is running
+        run: |
+          cd "$DEPLOY_DIR"
+          docker compose ps
+          {
+            echo "### Deployed \`${GITHUB_SHA:0:7}\`"
+            echo ''
+            echo '```'
+            docker compose ps --format '{{.Name}}  {{.Status}}  {{.Ports}}'
+            echo '```'
+            echo 'Published on 127.0.0.1:8000 — the reverse proxy on this host fronts it.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Container logs on failure
+        if: failure()
+        run: |
+          cd "$DEPLOY_DIR" || exit 0
+          docker compose ps || true
+          docker compose logs --tail 200 || true
+
+      - name: Reclaim disk from the previous image
+        if: always()
+        run: docker image prune -f >/dev/null 2>&1 || true

@@ -2,7 +2,7 @@
 """Download the third-party assets minibadge-designer serves at runtime.
 
 These are other people's files under other people's licences, so they are not
-kept in this repository — they are fetched, by exact version and verified
+kept in this repository; they are fetched, by exact version and verified
 against a SHA-256, into paths git ignores. Run this once after cloning (the
 Docker build runs it for you):
 
@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 PKG = ROOT / "minibadge_designer"
 
 # google/fonts is pinned to a commit so a re-fetch cannot silently change a
-# glyph — the checksums below are what that commit serves.
+# glyph; the checksums below are what that commit serves.
 FONTS_COMMIT = "73fc2ff52147e34a74804b500cf89ca219eac55d"
 FONTS_BASE = f"https://raw.githubusercontent.com/google/fonts/{FONTS_COMMIT}"
 
@@ -79,7 +79,7 @@ These files are NOT part of minibadge-designer and are not distributed in its
 repository. They are downloaded at setup time and remain under their own
 licences and copyrights.
 
-Fonts — from the Google Fonts collection (https://github.com/google/fonts),
+Fonts, from the Google Fonts collection (https://github.com/google/fonts),
 pinned to commit {commit}:
 
   SIL Open Font License 1.1 (https://openfontlicense.org)

@@ -7,7 +7,7 @@
 
 Nothing else. Never a specific status number, never an error string, never a
 response length. That is what lets this file grow without bound: adding a
-payload can only ever catch a new crash or a new hang — it can never go red
+payload can only ever catch a new crash or a new hang; it can never go red
 because someone legitimately changed what the app accepts or rejects.
 
 The rule is enforced by the API, not by good intentions: `probe()` performs the
@@ -73,7 +73,7 @@ DEFAULT_BUDGET_S = 20.0
 
 #: A board-shape or artwork SVG is a logo, not a mesh. Auto-traced art routinely
 #: carries tens of thousands of points, and a quarter-megabyte file has to come
-#: back while the user is still looking at the preview — /outline runs on every
+#: back while the user is still looking at the preview; /outline runs on every
 #: edit. A hang is invisible to a status check, so for these cases the clock is
 #: the assertion.
 #:
@@ -81,7 +81,7 @@ DEFAULT_BUDGET_S = 20.0
 #: an N-vertex <path> cost 1k = 0.05 s, 20k = 1.3 s, 40k = 5.2 s, 80k = 25.7 s,
 #: 200k = 493 s, and separate cubic-Bezier segments cost ~4 ms each on top
 #: (4 000 of them = 15.5 s at 200 KB). With the cap, the over-limit cases below
-#: are refused — or, when the client sent a `*_raster`, quietly served from it —
+#: are refused (or, when the client sent a `*_raster`, quietly served from it)
 #: in well under 0.2 s, so this budget keeps 10x+ headroom on every passing case
 #: while sitting far under the seconds a regression would cost.
 SVG_BUDGET_S = 2.0
@@ -96,7 +96,7 @@ SVG_BUDGET_S = 2.0
 # #5 uncapped SVG complexity, #6 NaN geometry raised outside every `try`, #12
 # non-object `params`, #13 non-iterable `pins`/`rows`) were all repaired in
 # webapp.py, and every one of the seventeen `crashes=` markers naming them
-# failed the run with `[XPASS(strict)]` the moment the fixes landed — which is
+# failed the run with `[XPASS(strict)]` the moment the fixes landed, which is
 # exactly the property that stops a marker outliving its defect. The payloads
 # stayed; only the markers went.
 #
@@ -156,14 +156,14 @@ def probe(client, route: str, case: Case) -> None:
     Asserts exactly: the response is not a 5xx (an exception propagated out of
     the app counts as a crash), and the request finished inside `case.budget`.
 
-    Returns None deliberately — the caller never gets a status code, so no test
+    Returns None deliberately: the caller never gets a status code, so no test
     over this corpus can grow an assertion about one.
     """
     data = case.form_data()
     started = time.monotonic()
     try:
         resp = client.post(route, data=data, content_type="multipart/form-data")
-    except Exception:  # noqa: BLE001 — PROPAGATE_EXCEPTIONS=True raises instead of 500ing
+    except Exception:  # noqa: BLE001; PROPAGATE_EXCEPTIONS=True raises instead of 500ing
         elapsed = time.monotonic() - started
         status, detail = 500, traceback.format_exc()[-700:]
     else:
@@ -177,7 +177,7 @@ def probe(client, route: str, case: Case) -> None:
     assert status < 500, (
         f"{route} [{case.id}] crashed the server: status {status}\n{detail}")
     assert elapsed <= case.budget, (
-        f"{route} [{case.id}] took {elapsed:.1f}s, budget {case.budget}s — "
+        f"{route} [{case.id}] took {elapsed:.1f}s, budget {case.budget}s; "
         f"a hang is invisible to a status check, so the budget is the assertion")
 
 
@@ -191,7 +191,7 @@ def route_cases(routes: Sequence[str] | None = None,
     * `xfail(strict=True)` naming the defect, for routes where the payload
       crashes today (`Case.crashes`);
     * `slow`, for the handful of cases measured over the fast-tier budget;
-    * `kicad` + `needs("kicad")` on every `/model3d` param — without kicad-cli
+    * `kicad` + `needs("kicad")` on every `/model3d` param: without kicad-cli
       that route answers an accepted design with a deliberate **501**, which is
       not a crash but would trip the `< 500` rule. Gating is the honest fix;
       loosening the rule to "not a 500, except 501" is not.
@@ -250,7 +250,7 @@ def svg_bytes(points: int = 0) -> bytes:
 
 @cache
 def cubic_svg(segments: int = 1000) -> bytes:
-    """Separate cubic-Bezier paths — the costliest shape per byte, because each
+    """Separate cubic-Bezier paths: the costliest shape per byte, because each
     long curve flattens to up to 256 chords."""
     ps = b"".join(b'<path fill="#000" d="M%d %d C%d %d %d %d %d %d Z"/>'
                   % (i % 97, (i * 3) % 97, i % 97, (i * 13) % 97,
@@ -399,6 +399,26 @@ WRONG_TYPES = [
     Case("led-x-string", params={"leds": [L(x="abc")]}),
     Case("led-nodes-scalar", params={"leds": [L(nodes=5)]}),
     Case("led-adv-string", params={"leds": [L(adv="str")]}),
+    Case("led-clk-dict", params={"leds": [L(clk={"a": 1})]}),
+    Case("led-cnodes-scalar", params={"leds": [L(clk=True, cnodes=7)]}),
+    Case("clk-string", params={"leds": [L(clk=True)], "clk": "abc"}),
+    Case("clk-list", params={"leds": [L(clk=True)], "clk": [1, 2]}),
+    Case("clk-x-string", params={"leds": [L(clk=True)],
+                                 "clk": {"x": "abc", "y": 5}}),
+    Case("clk-x-nan", params={"leds": [L(clk=True)],
+                              "clk": {"x": float("nan"), "y": float("nan")}}),
+    Case("clk-rot-huge", params={"leds": [L(clk=True)],
+                                 "clk": {"x": 5, "y": 5, "rot": 1e308}}),
+    Case("clk-jumper-dict", params={"leds": [L(clk=True)],
+                                    "clk": {"jumper": {"a": 1}}}),
+    Case("clk-side-garbage", params={"leds": [L(clk=True)],
+                                     "clk": {"side": ["x"], "via": "no"}}),
+    Case("clk-nodes-garbage", params={"leds": [L(clk=True)],
+                                      "clk": {"nodes": [[1], "x", [None, 2]],
+                                              "v3nodes": 5}}),
+    Case("clk-v3pin-garbage", params={"leds": [L(clk=True)],
+                                      "clk": {"side": "back", "via": False,
+                                              "v3pin": {"a": 1}}}),
     Case("texts-string", params={"texts": "abc"}),
     Case("texts-null-entry", params={"texts": [None]}),
     Case("text-body-dict", params={"texts": [T(text={"a": 1})]}),
@@ -463,7 +483,7 @@ STRINGS = [
     # s-expression injection. `name` is whitelisted by _slug and text content is
     # escaped by pcb._esc, both verified balanced. `mask_color` is neither
     # (defect #4): it does not crash, it ships a 200 whose board KiCad cannot
-    # open, which only a balanced-s-expr assertion on the zip can see — the
+    # open, which only a balanced-s-expr assertion on the zip can see; the
     # corpus's job here is just to prove none of the three 500s.
     Case("name-sexpr-injection", params={"name": 'x") (gr_text "PWN'}),
     Case("text-sexpr-injection", params={"texts": [T(text='x") (gr_text "PWN')]}),
@@ -488,7 +508,7 @@ UPLOADS = [
     Case("art-8000px", params={"art": [A()]}, files=[art_file(0, "big.png", huge_png)],
          slow=True),
     # More art files than declared, and fewer: the fewer case is a silent
-    # partial success today (lane-02 F7), which is a 200 — the corpus only says
+    # partial success today (lane-02 F7), which is a 200; the corpus only says
     # it must not crash.
     Case("art-3-declared-1-sent", params={"art": [A(), A(), A()]}, files=[art_file()]),
     Case("art-1-declared-3-sent", params={"art": [A()]},
@@ -512,8 +532,8 @@ SVG = [
     Case("svg-1k-point-art", params={"art": [A()]},
          files=[art_file(0, "p.svg", lambda: svg_bytes(1000))], budget=SVG_BUDGET_S),
     # The four cases below are the whole measurement of the complexity cap.
-    # 40k vertices is 272 KB — an ordinary auto-traced logo, far under the
-    # 24 MiB upload cap — and used to chew ~5.3 s on both routes; 60k ran ~12 s
+    # 40k vertices is 272 KB (an ordinary auto-traced logo, far under the
+    # 24 MiB upload cap) and used to chew ~5.3 s on both routes; 60k ran ~12 s
     # and 200k ran 493 s. The curve case is the shape that costs most per byte.
     #
     # Payloads stay under 500 KB deliberately: over that, werkzeug's *test

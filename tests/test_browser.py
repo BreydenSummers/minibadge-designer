@@ -1,4 +1,4 @@
-"""Browser tier — the canvas editor that lives inside index.html.
+"""Browser tier: the canvas editor that lives inside index.html.
 
 `minibadge_designer/templates/index.html` is ~5,200 lines, ~4,600 of which are a
 single inline classic `<script>`.  Line coverage cannot see one byte of it, so
@@ -14,7 +14,7 @@ Three rules make this layer non-flaky; the long form is in
     `selectionInfo()`, `customActive()`, `outlineBounds()`.  Every gesture ends
     in a synchronous `draw()`, so state is authoritative the instant the gesture
     returns.  If index.html ever becomes `type="module"` every test here breaks
-    at once — that is a deliberate tripwire, not a bug.
+    at once; that is a deliberate tripwire, not a bug.
 2.  **Compute mm->px in-page, at call time.**  `SCALE`, `VIEW.tx/ty` and
     `cvF.width` (440 <-> 620) all change at runtime.  `UI.board_to_client`
     inverts the app's own `boardCoords()` and refuses to emit an off-screen
@@ -68,10 +68,12 @@ NARROW = (1024, 768)
 WIDTH_SWEEP = [(1600, 1000), (1400, 1000), (1280, 900), (1024, 768), (900, 700)]
 
 # Controls that must stay reachable no matter what the app has to say.  The
-# canvases are on this list on purpose: they are the biggest control in the
-# app, and an overlay that eats a drag is the same defect as one that eats a
-# tab.  Anything absent at a given width is skipped by the probe.
-CONTROLS = ["viewtabs", "tab-3d", "restorebar", "legend", "cvF", "cvB",
+# message stack now floats at the top-left of the work area by design, so the
+# canvases are NOT on this list: partial canvas coverage is the accepted price
+# (grouping keeps the stack to one card per problem class), but a discrete
+# control a card covers is covered permanently.  Anything absent at a given
+# width is skipped by the probe.
+CONTROLS = ["viewtabs", "tab-3d", "restorebar", "legend",
             "download", "addled", "themebtn", "panelscroll"]
 
 
@@ -262,7 +264,7 @@ class UI:
 
     def drag_by_px(self, frm, dx, dy, side="front", steps=10):
         """Drag by a raw pixel delta that may leave the canvas.  pointerdown
-        calls setPointerCapture, so the handler still receives the moves — this
+        calls setPointerCapture, so the handler still receives the moves; this
         is how edge clamping is tested without tripping the viewport guard."""
         self.scroll_into_view(side)
         x0, y0 = self.board_to_client(frm[0], frm[1], side)
@@ -285,27 +287,31 @@ class UI:
     def set_view(self, v):
         """A REAL click, hit-testing included.  This used to need
         dispatch_event because the standing-warning toasts floated over the
-        centred view selector and swallowed the click; the messages now live in
-        their own box at the foot of the rail, so if this ever starts timing
-        out, something is covering the tabs again."""
+        centred view selector and swallowed the click; the stack now sits at
+        the top-left with a pointer-transparent container, so if this ever
+        starts timing out, something is covering the tabs again."""
         self.page.click(f'#viewtabs div[data-view="{v}"]', timeout=CONTROL_TIMEOUT)
         self.page.wait_for_function("(v) => view === v", arg=v, timeout=ELEMENT_TIMEOUT)
 
     def overlaps_controls(self, ids=CONTROLS):
-        """Which of `ids` the message dock currently intersects on screen.
-        Geometry, not a click: a click only proves the one control it hit."""
+        """Which of `ids` a toast CARD currently intersects on screen.
+        Geometry, not a click: a click only proves the one control it hit.
+        The probe measures the cards, not the #toasts container: the container
+        is pointer-transparent by design, so only the cards can eat a click."""
         return self.js(
             """(ids) => {
-                const t = document.getElementById('toasts').getBoundingClientRect();
-                if (!t.width && !t.height) return [];   // nothing to say = no box
+                const cards = [...document.querySelectorAll('#toasts .toast')]
+                    .map(el => el.getBoundingClientRect())
+                    .filter(r => r.width && r.height);
+                if (!cards.length) return [];   // nothing to say = no box
                 const hits = [];
                 for (const id of ids) {
                     const el = document.getElementById(id);
                     if (!el) continue;
                     const r = el.getBoundingClientRect();
                     if (!r.width && !r.height) continue;   // hidden at this width
-                    if (!(t.right <= r.left || r.right <= t.left
-                          || t.bottom <= r.top || r.bottom <= t.top)) hits.push(id);
+                    if (cards.some(t => !(t.right <= r.left || r.right <= t.left
+                          || t.bottom <= r.top || r.bottom <= t.top))) hits.push(id);
                 }
                 return hits;
             }""",
@@ -389,7 +395,7 @@ class UI:
 
 
 # ===========================================================================
-# Flow 1 — the happy path, end to end, ending in a real KiCad project
+# Flow 1: the happy path, end to end, ending in a real KiCad project
 # ===========================================================================
 def test_flow_upload_assign_material_drag_add_led_and_download(ui, logo):
     page = ui.page
@@ -421,8 +427,8 @@ def test_flow_upload_assign_material_drag_add_led_and_download(ui, logo):
     assert ui.panel() == "art"
 
     # --- add an LED and split the two across both faces -----------------
-    # New units default to the front (visible side); this flow needs one on
-    # each face, so the second is switched to back explicitly.
+    # New units default to the back (the standard minibadge build); this
+    # flow needs one on each face, so both sides are set explicitly.
     ui.show_panel("leds")
     assert ui.add_led() is True
     ui.wait_state("state.leds.length === 2")
@@ -459,7 +465,7 @@ def test_flow_upload_assign_material_drag_add_led_and_download(ui, logo):
 
 
 # ===========================================================================
-# Flow 2 — chaos monkey: every control in a hostile order
+# Flow 2, the chaos monkey: every control in a hostile order
 #
 # This flow asserts almost nothing about values.  Its job is that nothing
 # throws, nothing logs, and the app's own coherence predicates still hold
@@ -557,14 +563,14 @@ def test_chaos_hostile_control_ordering(ui):
 
 
 # ===========================================================================
-# Flow 3 — the custom outline: the debounced POST /outline round-trip
+# Flow 3, the custom outline: the debounced POST /outline round-trip
 # ===========================================================================
 def test_custom_outline_survives_slider_spam(ui, logo):
     page = ui.page
     ui.show_panel("shape")
 
     # With no outline parts the board is the standard square and nothing is
-    # fetched — there is no mode dropdown, parts alone drive the outline.
+    # fetched: there is no mode dropdown, parts alone drive the outline.
     assert ui.js("() => customActive()") is False
     ui.wait_outline()
 
@@ -589,7 +595,7 @@ def test_custom_outline_survives_slider_spam(ui, logo):
     assert ui.js("() => state.shape.outlineEmpty") is False
 
     # Back to square by removing the only part: rings dropped, nothing
-    # outstanding — deleting the last part is the "switch back".
+    # outstanding; deleting the last part is the "switch back".
     page.locator("#shapeopts .item .del").first.click(timeout=ELEMENT_TIMEOUT)
     ui.wait_state("state.shape.elements.length === 0")
     ui.wait_outline()
@@ -603,7 +609,7 @@ def test_custom_outline_survives_slider_spam(ui, logo):
 # ===========================================================================
 def test_add_led_refuses_out_loud_and_honestly_when_the_board_is_full(ui):
     """The refusal path is a contract: it must speak, it must not except, and
-    it must be TRUE — no orientation the app is willing to use may still have
+    it must be TRUE: no orientation the app is willing to use may still have
     a spot when the user is told there is none.  A false refusal is how a
     badge ends up with fewer LEDs than its owner asked for."""
     ui.show_panel("leds")
@@ -704,24 +710,52 @@ def test_the_text_layer_limit_refuses_out_loud_instead_of_ignoring_the_click(ui)
 def test_a_standing_warning_never_covers_a_control_at_any_width(ui):
     """A design warning lives exactly as long as the problem does -- it is
     re-raised on every draw -- so anything it covers is covered permanently.
-    It used to float over the centred FRONT/BACK/BOTH selector below ~1300 px
-    and make the view tabs unclickable for good."""
+    The stack sits at the top-left of the work area by design now, so canvas
+    overlap is accepted; what must hold is that no CARD sits on a discrete
+    control, and that the container between and below the cards stays
+    pointer-transparent -- the first overlay version made FRONT unclickable."""
     page = ui.page
 
-    # Provoke a standing warning: refreshWarnings() re-raises it on every draw.
+    # Provoke TWO different standing warnings: refreshWarnings() re-raises
+    # them on every draw, and the pointer-transparency probe below needs the
+    # gap between two cards to aim at.
     ui.drop_all_pins()
     ui.wait_toast(r"no 3V3 or GND pin")
+    ui.show_panel("text")
+    page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    ui.js("() => { state.texts[0].text = '\\u2603 snow';"
+          " renderTextList(); draw(); }")
+    ui.wait_toast(r"characters")
 
     for w, h in WIDTH_SWEEP:
         ui.set_viewport(w, h)
         hits = ui.overlaps_controls()
-        assert hits == [], f"the message dock covered {hits} at {w}x{h}"
+        assert hits == [], f"a toast card covered {hits} at {w}x{h}"
         # Geometry is the guarantee; a real click is the proof it is the right
         # geometry.  CONTROL_TIMEOUT, not the 30 s default: a covered control
         # must fail this test in seconds rather than hang the suite.
         page.click('#viewtabs div[data-view="front"]', timeout=CONTROL_TIMEOUT)
         page.wait_for_function("() => view === 'front'", timeout=ELEMENT_TIMEOUT)
         ui.set_view("both")
+        # The container itself must not eat clicks: the gap BETWEEN two cards
+        # shows the container, and a click there has to reach whatever lies
+        # underneath (the canvas), not the message layer.
+        gap_clear = ui.js(
+            """() => {
+                const cards = [...document.querySelectorAll('#toasts .toast')];
+                if (cards.length < 2) return 'need-two-cards';
+                const a = cards[0].getBoundingClientRect();
+                const b = cards[1].getBoundingClientRect();
+                const el = document.elementFromPoint(
+                    a.left + a.width / 2, (a.bottom + b.top) / 2);
+                return !el || !el.closest('#toasts');
+            }"""
+        )
+        assert gap_clear is True, (
+            f"the toast container swallowed a click between its cards at "
+            f"{w}x{h}: {gap_clear}"
+        )
 
     # ...and the warning is still standing, i.e. this was not a vacuous pass.
     assert ui.has_toast(r"no 3V3 or GND pin"), ui.toast_texts()
@@ -735,23 +769,28 @@ def test_a_new_message_is_visible_even_when_older_ones_fill_the_dock(ui):
     page = ui.page
     ui.set_viewport(*NARROW)
 
-    # Overfill the dock: five texts the board font cannot print, plus the
-    # no-power-rail warning.
+    # Overfill the dock.  Identical problems collapse into one card now, so
+    # the fill needs DISTINCT problem classes: unprintable characters, text
+    # off the board edge, both at once, and the missing power rail.
     ui.show_panel("text")
     for _ in range(5):
         page.click("#addtext", timeout=ELEMENT_TIMEOUT)
     ui.wait_state("state.texts.length === 5")
-    ui.js("() => { state.texts.forEach(t => t.text = '\\u2603 snow');"
+    ui.js("() => {"
+          " state.texts[0].text = state.texts[1].text = '\\u2603 snow';"
+          " state.texts[2].text = state.texts[3].text = 'off the edge';"
+          " state.texts[2].x = state.texts[3].x = -6;"
+          " state.texts[4].text = '\\u2603 off too'; state.texts[4].x = -6;"
           " renderTextList(); draw(); }")
     ui.drop_all_pins()
-    ui.wait_state("document.querySelectorAll('#toasts .toast').length >= 3")
+    ui.wait_state("document.querySelectorAll('#toasts .toast').length >= 4")
 
     # How many messages fit is a layout detail (toast padding, how many
     # warnings the app shows at once), so squeeze the window until the dock
     # genuinely overflows rather than assuming one size does it.
     overflows = "() => { const d = document.getElementById('toasts');" \
                 " return d.scrollHeight > d.clientHeight + 1; }"
-    for height in (NARROW[1], 640, 560, 480):
+    for height in (NARROW[1], 640, 560, 480, 420):
         ui.set_viewport(NARROW[0], height)
         if ui.js(overflows):
             break
@@ -774,6 +813,35 @@ def test_a_new_message_is_visible_even_when_older_ones_fill_the_dock(ui):
         }"""
     ), f"the newest message was scrolled out of the dock: {ui.toast_texts()}"
     ui.assert_clean("message visibility")
+
+
+def test_identical_standing_warnings_collapse_into_one_toast(ui):
+    """N copies of the same warning bury the board the stack sits over
+    without saying anything the first copy didn't (dogfood F3): the same
+    problem on several parts must arrive as ONE card naming all of them."""
+    page = ui.page
+    ui.show_panel("text")
+    for _ in range(3):
+        page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 3")
+    # The same problem three times, spread across both faces: the grouping
+    # key is the problem, not the card or the side it lives on.
+    ui.js("() => { state.texts.forEach(t => t.text = '\\u2603 snow');"
+          " state.texts[2].side = 'back';"
+          " renderTextList(); draw(); }")
+    ui.wait_toast(r"Text 1")
+
+    cards = ui.js(
+        "() => [...document.querySelectorAll('#toasts .toast.warn')]"
+        ".map(t => t.textContent).filter(t => /characters/.test(t))")
+    assert len(cards) == 1, (
+        f"the same unprintable-characters problem arrived as {len(cards)} "
+        f"cards instead of one: {ui.toast_texts()}"
+    )
+    assert re.search(r"Text 1.*Text 2.*Text 3", cards[0]), (
+        f"the grouped card must still name every affected text: {cards[0]!r}"
+    )
+    ui.assert_clean("warning grouping")
 
 
 # ===========================================================================
@@ -912,7 +980,7 @@ def test_deleting_a_card_never_throws_and_selection_info_stays_guarded(ui):
 #: A bridge start on a custom outline where the two implementations of
 #: BRIDGE_INSET genuinely disagree. Measured against HEAD: the pre-fix preview
 #: put this endpoint 2.58 mm from where the board puts it. Without a case like
-#: this the parity test passes vacuously — on a plain square with no obstacles
+#: this the parity test passes vacuously: on a plain square with no obstacles
 #: the nearest exit is always perpendicular, sin(angle) is 1, and the two
 #: formulas agree no matter which is wrong.
 _BRIDGE_CALIBRATION_START = (3.0, 3.5)
@@ -931,7 +999,7 @@ def test_the_previewed_bridge_lands_where_the_generated_one_does(page):
     A preview that lies is worse than either half being wrong on its own: the
     user approves a board they never saw. `bridgeRoute` in index.html and
     `pcb._bridge_route` are two hand-maintained copies of one algorithm, and
-    they have drifted before — the JS kept subtracting BRIDGE_INSET along the
+    they have drifted before: the JS kept subtracting BRIDGE_INSET along the
     ray after the generator started dividing it by sin(ray, edge), which put the
     drawn endpoint 2.58 mm from the real one on a custom outline.
 
@@ -956,7 +1024,7 @@ def test_the_previewed_bridge_lands_where_the_generated_one_does(page):
                               [list(s), _OCTAGON])
         assert (board is None) == (drawn is None), (
             f"from {s} the generator {'refuses' if board is None else 'routes'} "
-            f"but the preview {'refuses' if drawn is None else 'routes'} — the "
+            f"but the preview {'refuses' if drawn is None else 'routes'}; the "
             "user is shown a bridge that will not exist, or none where one will")
         if board is None:
             continue
@@ -966,7 +1034,7 @@ def test_the_previewed_bridge_lands_where_the_generated_one_does(page):
 
     assert not off_by, "\n".join(
         f"from {s} the board runs its bridge to {tuple(round(v, 3) for v in b)} "
-        f"but the canvas draws it to {tuple(round(v, 3) for v in d)} — {gap:.4f} mm out"
+        f"but the canvas draws it to {tuple(round(v, 3) for v in d)}, {gap:.4f} mm out"
         for s, (b, d, gap) in off_by.items())
 
 
@@ -992,7 +1060,7 @@ _LAYOUTS = ("stacked", "inline")
 #: branch, so a matrix of right angles never reaches the trig one at all.
 _ROTS = (0, 90, 180, 270, 37)
 #: Advanced placement moves the resistor and via off the layout and spins each
-#: part on its own centre — the branch that builds `bbox` from real copper
+#: part on its own centre: the branch that builds `bbox` from real copper
 #: rather than the package table.  Leaving it out makes half of `geomOf` dead.
 _ADV = (None, {"rx": 2.0, "ry": -1.5, "rrot": 30, "lrot": 45, "vx": -2.2, "vy": 1.1})
 
@@ -1011,7 +1079,8 @@ def _js_led(**kw):
     """One entry of `state.leds`, as the editor stores it."""
     led = {"x": 10.0, "y": 10.0, "color": "red", "side": "front", "rot": 0,
            "layout": "stacked", "size": "0805", "reverse": False,
-           "novia": False, "nodes": [], "farled": False, "adv": None}
+           "novia": False, "nodes": [], "farled": False, "adv": None,
+           "clk": False, "cnodes": []}
     led.update(kw)
     return led
 
@@ -1033,7 +1102,9 @@ def _py_led(d):
                    nodes=tuple(tuple(n) for n in d["nodes"]),
                    anodes=tuple(tuple(n) for n in d.get("anodes") or ()),
                    vnodes=tuple(tuple(n) for n in d.get("vnodes") or ()),
-                   term=term, farled=d["farled"], adv=d["adv"])
+                   term=term, farled=d["farled"], adv=d["adv"],
+                   clk=d.get("clk", False),
+                   cnodes=tuple(tuple(n) for n in d.get("cnodes") or ()))
 
 
 def _unit_matrix(sides=("front",), rots=_ROTS, advs=_ADV):
@@ -1075,9 +1146,12 @@ def _gap(a, b):
                default=0.0)
 
 
-_SET_DESIGN = """([leds, pins, rings]) => {
+_SET_DESIGN = """([leds, pins, rings, clk]) => {
     state.leds = leds;
     state.pins = pins ? pins : ALL_PINS.slice();
+    Object.assign(state.clk, {jumper: true, x: null, y: null, rot: 0,
+                              side: 'front', via: true,
+                              nodes: [], v3nodes: [], v3pin: null}, clk || {});
     if (rings) {
         state.shape.mode = 'custom';
         state.shape.elements = [{kind: 'rect', op: 'add'}];
@@ -1093,11 +1167,11 @@ _SET_DESIGN = """([leds, pins, rings]) => {
 
 #: Slide each unit along each ray until the canvas stops calling the spot solid
 #: board, then bisect 50 times.  What comes back is the very last placement
-#: the editor would let a user drop a unit on — the only place the client's
+#: the editor would let a user drop a unit on: the only place the client's
 #: 0.555 mm and the generator's 0.55 mm can be told apart.
 _EDGE_OF_ACCEPTANCE = """([leds, seeds, dirs]) => leds.map(L => {
     // A unit only has a boundary to find if some spot on the board suits it at
-    // all — a 5 mm bar does not fit beside this outline's cut-out in every
+    // all: a 5 mm bar does not fit beside this outline's cut-out in every
     // orientation, and pushing off a spot it never occupied proves nothing.
     const start = seeds.map(([x, y]) => ({...L, x, y})).find(unitInsideBoard);
     if (!start) return [];
@@ -1118,16 +1192,16 @@ _EDGE_OF_ACCEPTANCE = """([leds, seeds, dirs]) => leds.map(L => {
 })"""
 
 
-def _set_design(ui, leds, pins=None, rings=None):
+def _set_design(ui, leds, pins=None, rings=None, clk=None):
     """Install a design in the page without driving the canvas.
 
     These tests are about two implementations of one formula agreeing, so the
-    units are written straight into `state` — dragging them into place would
+    units are written straight into `state`; dragging them into place would
     add flakiness without adding evidence, which is the same reason the bridge
     test above reaches its function through an injected script.
     """
     ui.js(_SET_DESIGN, [leds, pins, [[list(p) for p in r] for r in rings]
-                        if rings else None])
+                        if rings else None, clk])
 
 
 @pytest.mark.browser
@@ -1135,8 +1209,8 @@ def test_the_previewed_unit_sits_where_the_generated_one_sits(ui):
     """The canvas puts every pad, via and hole where the board file puts it.
 
     `geomOf` in index.html and `pcb.led_geometry` are two copies of the unit
-    layout table.  Everything downstream reads from it — the drawn part, the
-    art keepouts, the bridge start, the via-less trace — so a drift here is
+    layout table.  Everything downstream reads from it (the drawn part, the
+    art keepouts, the bridge start, the via-less trace), so a drift here is
     not a wrong number, it is a badge whose resistor, via or reverse-mount
     hole is somewhere other than the picture the user approved.
     """
@@ -1163,8 +1237,8 @@ def test_the_previewed_unit_sits_where_the_generated_one_sits(ui):
                 off_by.append(
                     f"{_describe(d)}: {pk} is at "
                     f"{tuple(round(v, 4) for v in board[pk])} on the board but "
-                    f"{tuple(round(v, 4) for v in js[jk])} on the canvas "
-                    f"— {gap:.4f} mm out")
+                    f"{tuple(round(v, 4) for v in js[jk])} on the canvas, "
+                    f"{gap:.4f} mm out")
 
     assert not off_by, (
         f"{len(off_by)} differences across {len(leds)} units between where "
@@ -1182,7 +1256,7 @@ def test_a_dragged_unit_stops_where_the_board_would_stop_it(ui, rings):
     `clampLedFor`/`unitSafe` and `pcb.clamp_led_obj`/`pcb.unit_safe` decide how
     close to the board edge a unit may sit.  If they drift the user drags a
     unit to the rim, sees it stop, and the generator quietly moves it somewhere
-    else — or lets it hang over the edge and DRC rejects the board.  Custom
+    else, or lets it hang over the edge and DRC rejects the board.  Custom
     outlines are the interesting half: there the safe rect follows the
     outline's bounding box rather than the standard square.
     """
@@ -1207,7 +1281,7 @@ def test_a_dragged_unit_stops_where_the_board_would_stop_it(ui, rings):
             off_by.append(
                 f"{_describe(d)} dragged to ({d['x']}, {d['y']}): the canvas "
                 f"parks it at {tuple(round(v, 4) for v in js)}, the board at "
-                f"{tuple(round(v, 4) for v in board)} — {gap:.4f} mm out")
+                f"{tuple(round(v, 4) for v in board)}, {gap:.4f} mm out")
 
     assert not off_by, (
         f"{len(off_by)} of {len(leds)} drags settle in different places on the "
@@ -1224,7 +1298,7 @@ def test_art_is_carved_around_a_unit_the_same_way_it_is_on_the_board(ui):
     `unitCopperPieces` and `pcb.unit_copper_pieces` are the labelled quads that
     say how close artwork may come to a unit's pads, via, traces, reverse hole
     and through-hole silk.  Drift means the user sees a logo hugging an LED and
-    downloads a board where that logo is eaten — or, the expensive direction,
+    downloads a board where that logo is eaten; or, the expensive direction,
     sees it clear and gets copper art shorting a pad.
     """
     from minibadge_designer import pcb
@@ -1262,7 +1336,7 @@ def test_a_far_side_leds_keepout_is_carved_per_face_in_both(ui):
     the board: the LED face keeps only its pads, via and hole, while on the
     resistor face the departed pads shrink to their two via barrels. Drift
     here re-opens the ghost-pad bug on one side only: the preview erases a
-    window over copper the board keeps — or shows pad-shaped slabs the
+    window over copper the board keeps, or shows pad-shaped slabs the
     board no longer ships.
     """
     from minibadge_designer import pcb
@@ -1298,14 +1372,14 @@ def test_the_previewed_perimeter_bridges_match_the_generated_ones(ui):
     """The bridge decision the canvas makes is the one the board ships.
 
     `allBridges` and `pcb.unit_bridges` both decide, per unit and layer,
-    whether a thin power feed routes to the perimeter ring — and when either
+    whether a thin power feed routes to the perimeter ring, and when either
     copy answers None, the webapp reserves the fat 2 mm window corridor for
     that unit instead. The lower-level `bridgeRoute` parity test feeds both
     copies empty obstacle lists, so it cannot see this layer: which of the
     unit's own pieces count as obstacles on which copper layer (a back unit's
     SMD pads are not copper on F.Cu at all). Drift here lies in the expensive
     direction: the user sees a hairline bridge and a window hugging their
-    unit, then downloads a board with a corridor of pour across the window —
+    unit, then downloads a board with a corridor of pour across the window;
     or the reverse, a corridor drawn over art the board leaves alone.
     """
     from minibadge_designer import pcb
@@ -1343,7 +1417,7 @@ def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
     footprint lands on a kept connector pad pair.  The canvas refuses the drop;
     the generator slides the unit away (`resolve_pad_overlap`).  If they
     disagree the user places a unit against the header, and the board comes
-    back with it somewhere else — or worse, the canvas allows what the
+    back with it somewhere else; or worse, the canvas allows what the
     generator then has to move, silently.
 
     Dropped pins are the case worth having: dropping a pair frees its corner,
@@ -1376,7 +1450,7 @@ def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
 
     assert said_yes, (
         "no probe in the lattice landed on a connector pad, so this test "
-        "proved nothing — move the spots back over the corners")
+        "proved nothing; move the spots back over the corners")
     assert not disagree, (
         f"{len(disagree)} placements are judged differently by the canvas and "
         "the board; padConflict() and pcb.pad_conflict have drifted:\n"
@@ -1393,7 +1467,7 @@ def test_the_previewed_via_less_trace_takes_the_route_the_board_routes(ui):
     mitre pass, written twice and expected to pick the identical path down to
     the tie-breaks.  The trace is real copper on the badge and the preview is
     the only place a user ever sees it, so a drift ships a board whose power
-    run goes somewhere they never looked at — across a pad, or nowhere at all.
+    run goes somewhere they never looked at: across a pad, or nowhere at all.
 
     The matrix has to include a crowded board: on an empty one the straight
     shot clears and neither implementation's graph search ever runs.
@@ -1480,11 +1554,11 @@ def test_the_previewed_via_less_trace_takes_the_route_the_board_routes(ui):
             if gap > _PARITY_TOL:
                 off_by.append(
                     f"{_describe(d)} pins {'all' if pins is None else pins}: "
-                    f"the run is {gap:.4f} mm out — board "
+                    f"the run is {gap:.4f} mm out: board "
                     f"{[tuple(round(v, 3) for v in p) for p in board['pts']]}, "
                     f"canvas {[tuple(round(v, 3) for v in p) for p in js['pts']]}")
 
-    assert routed, ("no case produced a route, so this test proved nothing — "
+    assert routed, ("no case produced a route, so this test proved nothing; "
                     "check that the units still have novia set")
     assert not off_by, (
         f"{len(off_by)} differences across {routed} via-less runs between "
@@ -1492,6 +1566,431 @@ def test_the_previewed_via_less_trace_takes_the_route_the_board_routes(ui):
         "pcb.novia_route have drifted:\n"
         + "\n".join(off_by[:10]))
     ui.assert_clean("via-less route parity")
+
+
+@pytest.mark.browser
+def test_the_previewed_clk_supply_takes_the_route_the_board_routes(ui):
+    """A blinking unit's supply trace (and the jumper's link to pin 9) is
+    drawn along the copper that gets built.
+
+    clkRouteRaw / clkLink and pcb.clk_route / pcb.clk_link are the CLK third
+    of the twice-written router; a back unit's supply additionally flows
+    through noviaRouteRaw's supply branch. A drift ships a badge whose blink
+    hookup crosses copper the preview never showed, or lands the run on a
+    pad the user never picked.
+
+    The matrix moves off every default: both hookup styles, both faces, a
+    non-0805 package, an oblique rotation, a dragged and quarter-turned
+    jumper (which drags the rail via and both run targets with it), a
+    hand-bent supply run, and a unit that is via-less AND blinking.
+    """
+    from minibadge_designer import pcb
+
+    cases = [
+        # (leds, clk state) -- jumper hookup, front / back / both, off-default
+        ([_js_led(x=6.0, y=6.0, size="0603", rot=90, clk=True)], {}),
+        ([_js_led(x=14.0, y=12.0, side="back", layout="inline", clk=True)], {}),
+        ([_js_led(x=6.0, y=6.0, rot=37, clk=True),
+          _js_led(x=14.0, y=12.0, side="back", clk=True)], {}),
+        # direct-trace hookup: the runs chase pin 9 itself
+        ([_js_led(x=6.0, y=6.0, clk=True),
+          _js_led(x=14.0, y=12.0, side="back", size="1206", clk=True)],
+         {"jumper": False}),
+        # the jumper dragged and stood on end: targets, hazards and the rail
+        # via all move with it
+        ([_js_led(x=13.0, y=6.0, clk=True),
+          _js_led(x=13.5, y=13.5, side="back", clk=True)],
+         {"x": 5.0, "y": 10.0, "rot": 90}),
+        # hand-placed bends on the supply run win outright on both sides
+        ([_js_led(x=6.0, y=6.0, clk=True, cnodes=[[4.0, 12.0], [7.0, 15.0]])],
+         {}),
+        # via-less AND blinking: the GND run and the supply run coexist
+        ([_js_led(x=6.0, y=6.0, clk=True, novia=True),
+          _js_led(x=14.0, y=12.0, clk=True)], {}),
+        # the jumper mounted on the BACK: pads in the GND pour's layer, the
+        # front unit crossing through the rail via, the link on B.Cu
+        ([_js_led(x=6.0, y=6.0, clk=True),
+          _js_led(x=14.0, y=12.0, side="back", clk=True)], {"side": "back"}),
+        # traced steady hookup (back jumper, via off) with a far-face
+        # blinker: the rail via still feeds it, and the 3V3 link routes
+        ([_js_led(x=6.0, y=6.0, clk=True)], {"side": "back", "via": False}),
+        # the jumper's own links bent by hand, on the traced hookup
+        ([_js_led(x=7.0, y=8.0, side="back", clk=True)],
+         {"side": "back", "via": False,
+          "nodes": [[4.0, 14.0]], "v3nodes": [[14.0, 16.0]]}),
+        # the 3V3 endpoint dragged to the pin the auto route would NOT pick
+        ([_js_led(x=6.5, y=6.0, side="back", clk=True)],
+         {"side": "back", "via": False, "x": 9.0, "y": 10.0, "v3pin": "15"}),
+    ]
+
+    off_by, routed = [], 0
+    for design, clk_state in cases:
+        leds = _clamped(design)
+        _set_design(ui, leds, None, clk=clk_state)
+        drawn = ui.js(
+            "(Ls) => Ls.map((_, i) => {"
+            "  const L = state.leds[i];"
+            "  return { supply: L.side === 'back' ? noviaRouteRaw(L)"
+            "                                     : clkRouteRaw(L),"
+            "           gnd: L.side === 'back' ? null : noviaRouteRaw(L) };"
+            "})", leds)
+        link_js = ui.js("() => clkLink()")
+        v3_js = ui.js("() => clkV3Link()")
+        units = [_py_led(d) for d in leds]
+        spec = pcb.BadgeSpec(
+            leds=units,
+            clk_jumper=clk_state.get("jumper", True) is not False,
+            jumper=((clk_state["x"], clk_state["y"])
+                    if "x" in clk_state else None),
+            jumper_rot=clk_state.get("rot", 0),
+            jumper_side=clk_state.get("side", "front"),
+            jumper_via=clk_state.get("via", True) is not False,
+            jumper_nodes=tuple(tuple(n) for n in clk_state.get("nodes", [])),
+            jumper_v3nodes=tuple(tuple(n)
+                                 for n in clk_state.get("v3nodes", [])),
+            jumper_v3pin=clk_state.get("v3pin"))
+        clk = pcb.clk_info(spec)
+        assert clk is not None, "the case never armed CLK; it proves nothing"
+        for i, unit in enumerate(units):
+            if unit.side == "back":
+                board = pcb.novia_route(
+                    unit, spec.pins, None, units,
+                    term=pcb.novia_term(unit, units, spec.pins, None, clk),
+                    clk=clk)
+            else:
+                board = pcb.clk_route(unit, spec.pins, None, units, clk=clk)
+            js = drawn[i]["supply"]
+            for tag, bd, jd in (
+                ("supply", board, js),
+                ("gnd", pcb.novia_route(
+                    unit, spec.pins, None, units,
+                    term=pcb.novia_term(unit, units, spec.pins, None, clk),
+                    clk=clk) if unit.side != "back" else None,
+                 drawn[i]["gnd"]),
+            ):
+                if (bd is None) != (jd is None):
+                    off_by.append(
+                        f"{_describe(leds[i])} {tag}: the board "
+                        f"{'refuses' if bd is None else 'routes'} but the "
+                        f"canvas {'refuses' if jd is None else 'routes'}")
+                    continue
+                if bd is None:
+                    continue
+                routed += 1
+                if bool(jd.get("tight")) != bool(bd.get("tight")):
+                    off_by.append(
+                        f"{_describe(leds[i])} {tag}: only one side flags "
+                        "this run as too tight, so the warning the user sees "
+                        "does not match the copper")
+                if len(jd["pts"]) != len(bd["pts"]):
+                    off_by.append(
+                        f"{_describe(leds[i])} {tag}: the board bends the "
+                        f"run {len(bd['pts'])} times, the canvas draws "
+                        f"{len(jd['pts'])}")
+                    continue
+                gap = _gap(jd["pts"], bd["pts"])
+                if gap > _PARITY_TOL:
+                    off_by.append(
+                        f"{_describe(leds[i])} {tag}: the run is "
+                        f"{gap:.4f} mm out")
+        for tag, board_link, js_link in (
+            ("pin-9 link", pcb.clk_link(units, spec.pins, None, None, clk),
+             link_js),
+            ("3V3 link", pcb.clk_v3_link(units, spec.pins, None, None, clk),
+             v3_js),
+        ):
+            if (board_link is None) != (js_link is None):
+                off_by.append(f"only one side routes the jumper's {tag}")
+            elif board_link is not None:
+                routed += 1
+                if len(js_link["pts"]) != len(board_link["pts"]):
+                    off_by.append(
+                        f"jumper {tag}: the board bends it "
+                        f"{len(board_link['pts'])} times, the canvas draws "
+                        f"{len(js_link['pts'])}")
+                else:
+                    gap = _gap(js_link["pts"], board_link["pts"])
+                    if gap > _PARITY_TOL:
+                        off_by.append(
+                            f"jumper {tag}: the run is {gap:.4f} mm out")
+
+    assert routed, ("no case produced a CLK run, so this test proved "
+                    "nothing; check that the units still have clk set")
+    assert not off_by, (
+        f"{len(off_by)} differences across {routed} CLK runs between the "
+        "copper drawn and the copper built; the CLK routers have drifted:\n"
+        + "\n".join(off_by[:10]))
+    ui.assert_clean("CLK route parity")
+
+
+@pytest.mark.browser
+def test_clk_traces_follow_the_jumper_when_it_is_dragged(ui):
+    """Dragging the jumper takes every supply trace (and the rail via) with
+    it, and the routes drawn after release end exactly on its new pads.
+
+    The regression the first CLK build shipped: the route cache's mid-drag
+    shortcut reused each unit's previous path, and the last drag frame
+    stored that stale path under the final signature, so after release the
+    preview kept showing runs to the jumper's OLD home forever -- copper
+    the download would never build.
+    """
+    page = ui.page
+    leds = [_js_led(x=6.0, y=6.0, clk=True),
+            _js_led(x=14.0, y=12.0, side="back", clk=True)]
+    _set_design(ui, leds)
+    home = ui.js("() => clkInfo().jumper")
+    assert ui.js("() => clkRoute(state.leds[0]).pts.at(-1)") == home[:2], (
+        "the front supply run does not even start on the jumper's centre "
+        "pad; the drag below would prove nothing")
+
+    sx, sy = ui.board_to_client(home[0], home[1], "front")
+    tx, ty = ui.board_to_client(home[0] - 3.0, home[1] - 5.0, "front")
+    page.mouse.move(sx, sy)
+    page.mouse.down()
+    page.mouse.move(tx, ty, steps=8)
+    page.mouse.up()
+
+    moved = ui.js("() => clkInfo().jumper")
+    assert (moved[0], moved[1]) != (home[0], home[1]), (
+        "the drag did not move the jumper at all, so this test proved "
+        "nothing; did the hit test lose the jumper?")
+    assert ui.js("() => clkRoute(state.leds[0]).pts.at(-1)") == moved[:2], (
+        "the front unit's supply trace still ends somewhere other than the "
+        "jumper's new centre pad; the preview shows copper the download "
+        "does not build")
+    assert (ui.js("() => noviaRoute(state.leds[1]).pts.at(-1)")
+            == ui.js("() => clkInfo().via")), (
+        "the back unit's supply trace did not follow the rail via to the "
+        "jumper's new home")
+    ui.assert_clean("jumper drag re-route")
+
+
+@pytest.mark.browser
+def test_a_clk_supply_trace_grows_bends_without_free_placement(ui):
+    """Hovering a CLK unit's supply trace offers the "+", and the dropped
+    bend drags and deletes -- with "Move parts freely" OFF.
+
+    The other trace bends are deliberately gated behind free placement, but
+    the supply run is copper the blink option itself created (like the
+    jumper's links); a user who never opens Advanced still has to be able
+    to steer it. Shipped broken once: the gate hid the "+" and, separately,
+    the "c" trace was missing from the bend hit-test list entirely, so even
+    free placement could not grab an existing bend.
+    """
+    page = ui.page
+    # A back-side blinker, like the report: its supply run is the noviaRoute
+    # supply branch. adv stays null on purpose.
+    leds = [_js_led(x=10.0, y=4.0, side="back", layout="inline", clk=True)]
+    _set_design(ui, leds)
+    mid = ui.js("""() => {
+      const r = noviaRoute(state.leds[0]);
+      const k = Math.max(0, Math.floor(r.pts.length / 2) - 1);
+      return [(r.pts[k][0] + r.pts[k+1][0]) / 2,
+              (r.pts[k][1] + r.pts[k+1][1]) / 2];
+    }""")
+    sx, sy = ui.board_to_client(mid[0], mid[1], "back")
+    page.mouse.move(sx, sy)
+    assert ui.js("() => nodeHint && !nodeHint.jumper && nodeHint.trace") == "c", (
+        "no '+' offered over the supply trace without free placement; the "
+        "user cannot steer the copper the blink option added")
+    page.mouse.down()
+    tx, ty = ui.board_to_client(mid[0] + 2.0, mid[1] + 1.5, "back")
+    page.mouse.move(tx, ty, steps=5)
+    page.mouse.up()
+    got = ui.js("""() => ({
+      n: (state.leds[0].cnodes || []).length,
+      sel: selected && selected.kind, trace: selected && selected.trace,
+      manual: !!noviaRoute(state.leds[0]).manual })""")
+    assert got == {"n": 1, "sel": "lednode", "trace": "c", "manual": True}, (
+        f"the bend did not take: {got}; the trace ignored the user's hand")
+    # Double-click removal was retired (it fought the click-to-select and
+    # the grab on the same dot): a double-click on the bend must leave it
+    # alone, and Delete on the selected dot is the one removal path.
+    page.mouse.dblclick(tx, ty)
+    assert ui.js("() => (state.leds[0].cnodes || []).length") == 1, (
+        "double-click removed (or duplicated) the bend; that gesture is "
+        "retired and must be inert on a bend")
+    page.keyboard.press("Delete")
+    assert not ui.js("() => (state.leds[0].cnodes || []).length"), (
+        "Delete did not remove the selected bend")
+    assert not ui.js("() => !!noviaRoute(state.leds[0]).manual"), (
+        "the route still counts itself hand-shaped after its last bend went")
+    ui.assert_clean("clk supply bend without adv")
+
+
+@pytest.mark.browser
+def test_trace_bends_stay_reachable_on_a_custom_outline(ui):
+    """On a custom-shape board the "+" still appears over a trace, and the
+    click drops a bend instead of grabbing the shape part underneath.
+
+    A custom outline's shape element sits under EVERY trace by construction;
+    shipped broken once: the hint yielded to it, so off a part's body no
+    bend could ever be added -- every click just dragged the board shape.
+    Away from a trace the shape must still drag normally.
+    """
+    page = ui.page
+    ui.js("""() => {
+      state.shape.elements = [{kind: "rect", op: "add", cx: 10.16, cy: 10.16,
+                               w: 19, h: 19, rot: 0}];
+      state.leds = [{x: 6.5, y: 6.0, color: "red", side: "front", rot: 0,
+                     layout: "stacked", size: "0805", reverse: false,
+                     novia: false, farled: false, adv: null, clk: true,
+                     cnodes: [[13.0, 12.0]]}];
+      Object.assign(state.clk, {jumper: true, x: null, y: null, rot: 0,
+                                side: 'front', via: true,
+                                nodes: [], v3nodes: [], v3pin: null});
+      renderLedList(); draw();
+    }""")
+    # The leg whose midpoint sits farthest from the jumper: the final leg
+    # dives into the jumper's pads, and midpoints inside its dead zone no
+    # longer offer the "+" -- by design, so a click there moves the part
+    # (test_clicking_a_jumper_pad_grabs_the_jumper_and_never_drops_a_bend).
+    mid = ui.js("""() => {
+      const r = clkRoute(state.leds[0]);
+      const [jx, jy] = clkInfo().jumper;
+      let best = null, away = -1;
+      for (let k = 0; k + 1 < r.pts.length; k++) {
+        const m = [(r.pts[k][0] + r.pts[k+1][0]) / 2,
+                   (r.pts[k][1] + r.pts[k+1][1]) / 2];
+        const d = Math.hypot(m[0] - jx, m[1] - jy);
+        if (d > away) { away = d; best = m; }
+      }
+      return best;
+    }""")
+    sx, sy = ui.board_to_client(mid[0], mid[1], "front")
+    page.mouse.move(sx, sy)
+    assert ui.js("() => nodeHint && nodeHint.trace") == "c", (
+        "no '+' offered over the trace on a custom outline; the shape part "
+        "under it swallowed the hint and bends are unreachable")
+    page.mouse.down()
+    tx, ty = ui.board_to_client(mid[0] + 1.5, mid[1] - 1.5, "front")
+    page.mouse.move(tx, ty, steps=4)
+    page.mouse.up()
+    got = ui.js("""() => ({
+      bends: (state.leds[0].cnodes || []).length,
+      shape: [state.shape.elements[0].cx, state.shape.elements[0].cy] })""")
+    assert got["bends"] == 2, (
+        f"the click did not add a bend: {got}; it grabbed something else")
+    assert got["shape"] == [10.16, 10.16], (
+        f"the click dragged the board shape to {got['shape']} instead of "
+        "adding a bend; the outline walked away under the user's cursor")
+    # Away from any trace, the shape itself still drags.
+    ax, ay = ui.board_to_client(15.5, 5.0, "front")
+    page.mouse.move(ax, ay)
+    page.mouse.down()
+    bx, by = ui.board_to_client(14.5, 6.0, "front")
+    page.mouse.move(bx, by, steps=4)
+    page.mouse.up()
+    moved = ui.js("() => [state.shape.elements[0].cx, state.shape.elements[0].cy]")
+    assert moved != [10.16, 10.16], (
+        "the shape no longer drags at all; the bend fix overcorrected")
+    ui.assert_clean("bends on a custom outline")
+
+
+#: Every hand-placed bend in the design, one number.  A click that was meant
+#: to grab the jumper but fell on a bend "+" leaves its mark here.
+_BEND_COUNT = ("() => (state.clk.nodes || []).length"
+               " + (state.clk.v3nodes || []).length"
+               " + state.leds.reduce((n, L) => n + (L.cnodes || []).length"
+               "     + (L.nodes || []).length + (L.anodes || []).length"
+               "     + (L.vnodes || []).length, 0)")
+
+#: Midpoints of every routed CLK leg, and whether the bend "+" is offered
+#: there: proof the dead zone did not swallow the hint everywhere.
+_HINT_STILL_OFFERED = """() => {
+  const legs = [];
+  const grab = r => { if (r && r.pts) for (let k = 0; k + 1 < r.pts.length; k++)
+    legs.push([(r.pts[k][0] + r.pts[k+1][0]) / 2,
+               (r.pts[k][1] + r.pts[k+1][1]) / 2]); };
+  grab(clkLink()); grab(clkV3Link());
+  for (const L of state.leds) if (L.clk)
+    grab(L.side === "back" ? noviaRoute(L) : clkRoute(L));
+  return {legs: legs.length,
+          offered: legs.filter(([x, y]) => traceNodeHint(x, y)).length};
+}"""
+
+#: The worst places to click: for each CLK leg midpoint, the grabbable point
+#: on the jumper nearest to it (its grab box is |ux|<2.4, |uy|<1.2 in the
+#: local frame; 2.3/1.1 stays safely inside).  Kept when the midpoint is
+#: within the 1.6 mm hint radius, because there the "+" competes with the
+#: grab even though the pointer -- not the midpoint -- is on the body.
+_FRINGE_CLICKS = """() => {
+  const ci = clkInfo();
+  const [jx, jy, rot] = ci.jumper;
+  const legs = [];
+  const grab = r => { if (r && r.pts) for (let k = 0; k + 1 < r.pts.length; k++)
+    legs.push([(r.pts[k][0] + r.pts[k+1][0]) / 2,
+               (r.pts[k][1] + r.pts[k+1][1]) / 2]); };
+  grab(clkLink()); grab(clkV3Link());
+  for (const L of state.leds) if (L.clk)
+    grab(L.side === "back" ? noviaRoute(L) : clkRoute(L));
+  const pts = [];
+  for (const [mxx, myy] of legs) {
+    const [ux, uy] = rotOff(mxx - jx, myy - jy, -rot);
+    const gx = Math.max(-2.3, Math.min(2.3, ux));
+    const gy = Math.max(-1.1, Math.min(1.1, uy));
+    if (Math.hypot(ux - gx, uy - gy) < 1.6) {
+      const [dx, dy] = rotOff(gx, gy, rot);
+      pts.push([jx + dx, jy + dy]);
+    }
+  }
+  return pts;
+}"""
+
+
+@pytest.mark.browser
+def test_clicking_a_jumper_pad_grabs_the_jumper_and_never_drops_a_bend(ui):
+    """A click on any of the jumper's three pads selects the jumper -- it
+    never lands on a bend "+" -- while the "+" is still offered along the
+    same traces away from the body.
+
+    Several traces end on the jumper by construction (its pin-9 and 3V3
+    links, a back blinker's supply run into the rail via), so their first-leg
+    midpoints crowd the body.  Shipped broken once: hovering the pads showed
+    the "+", and the click meant to drag the jumper instead recorded a
+    permanent hand-bend in the trace -- the user's intent silently rewritten
+    into copper they never asked for, with the jumper stranded where it was.
+    """
+    cases = [
+        # the reported repro: default jumper, front face, rot 0; the trace
+        # crowding the body is the back unit's supply run into the rail via
+        ([_js_led(x=14.0, y=12.0, side="back", clk=True)], {}),
+        # everything off default: jumper dragged, quarter-turned and mounted
+        # on the BACK with the traced 3V3 hookup, an oblique front unit; the
+        # crowding traces are the jumper's own links, in a rotated frame
+        ([_js_led(x=6.0, y=6.0, rot=37, clk=True)],
+         {"x": 12.0, "y": 10.0, "rot": 90, "side": "back", "via": False}),
+    ]
+    for leds, clk_state in cases:
+        _set_design(ui, _clamped(leds), None, clk=clk_state)
+        label = _describe(leds[0]) + f" jumper={clk_state or 'default'}"
+        side = clk_state.get("side", "front")
+        pads = ui.js("() => clkInfo().pads.map(p => [p[0], p[1], p[2]])")
+        assert len(pads) == 3, f"{label}: the jumper lost a pad: {pads}"
+        bends_before = ui.js(_BEND_COUNT)
+        fringe = ui.js(_FRINGE_CLICKS)
+        assert fringe, (
+            f"{label}: no CLK leg midpoint competes with the grab box, so "
+            "the fringe half of this test is vacuous; move the parts until "
+            "a trace crowds the jumper again")
+        spots = list(pads) + [("fringe", x, y) for x, y in fringe]
+        assert len(spots) >= 4, f"{label}: 3 pads + >=1 fringe spot, got {spots}"
+        for name, px, py in spots:
+            ui.click_mm(px, py, side=side)
+            sel = ui.selected()
+            assert sel and sel["kind"] == "jumper", (
+                f"{label}: clicking the {name} spot at ({px:.2f},{py:.2f}) "
+                f"selected {sel and sel['kind']} instead of the jumper; the "
+                "click meant to move the part went somewhere else")
+        assert ui.js(_BEND_COUNT) == bends_before, (
+            f"{label}: clicking the pads silently added "
+            f"{ui.js(_BEND_COUNT) - bends_before} hand-bend(s) to a trace; "
+            "that copper ships on the board and the user never asked for it")
+        offered = ui.js(_HINT_STILL_OFFERED)
+        assert offered["offered"] > 0, (
+            f"{label}: no '+' anywhere along {offered['legs']} routed legs; "
+            "the dead zone overcorrected and bends are unreachable")
+    ui.assert_clean("jumper pads vs bend hint")
 
 
 @pytest.mark.browser
@@ -1581,7 +2080,7 @@ def test_the_preview_never_offers_a_spot_the_board_would_move_the_unit_off(ui, r
 
     `unitInsideBoard` is the client's copy of the generator's containment test
     (`outline.buffer(-0.55).contains(unit_poly)`, webapp.py).  It is
-    deliberately one-directional — 0.555 mm against the server's 0.55 mm — so
+    deliberately one-directional (0.555 mm against the server's 0.55 mm), so
     the canvas may refuse a spot the generator would have taken, but must never
     accept one the generator refuses: that direction is a unit the user placed
     over a cut-out, silently relocated somewhere else in the download.
@@ -1593,7 +2092,7 @@ def test_the_preview_never_offers_a_spot_the_board_would_move_the_unit_off(ui, r
     each unit outward until `unitInsideBoard` flips and bisecting.  A lattice
     of round numbers cannot test this rule: the whole margin in dispute is
     5 µm wide, so a grid of 3 mm probes stays green even with the client's
-    clearance cut to 0.5 mm — measured, before this test was rewritten.
+    clearance cut to 0.5 mm (measured, before this test was rewritten).
     """
     from shapely.geometry import Polygon
 
@@ -1628,7 +2127,7 @@ def test_the_preview_never_offers_a_spot_the_board_would_move_the_unit_off(ui, r
 
     assert probed >= len(leds), (
         f"only {probed} boundary spots came back for {len(leds)} units, so the "
-        "5 µm margin this rule is about was barely tested — either the seed "
+        "5 µm margin this rule is about was barely tested; either the seed "
         "lattice no longer lands on this outline, or the safe rect is now "
         "clamping units before the outline gets a say")
     assert not lies, (
@@ -1674,8 +2173,8 @@ def test_art_is_kept_off_the_pin_captions_the_same_way_in_both(ui):
                 off_by.append(
                     f"pins {label}: caption keepout is "
                     f"{tuple(round(v, 3) for v in b)} on the board but "
-                    f"{tuple(round(v, 3) for v in js)} on the canvas "
-                    f"— {gap:.4f} mm out")
+                    f"{tuple(round(v, 3) for v in js)} on the canvas, "
+                    f"{gap:.4f} mm out")
 
     ui.assert_clean("caption keepout parity")
     assert not off_by, (
@@ -1711,7 +2210,7 @@ def test_fab_download_waits_for_the_authors_warning_to_be_acknowledged(ui):
     # Every download this page ever starts lands here; the declined path
     # below asserts against the whole list, not a race-prone instant.
     # The download event only fires once the server has finished plotting
-    # (~2 s), so "no download yet" right after a decline proves nothing — a
+    # (~2 s), so "no download yet" right after a decline proves nothing: a
     # wrongly-started export would still be in flight.  The request log is
     # the honest oracle: the POST is issued in the same task chain as the
     # acknowledgement, so on a decline it must never appear at all.
@@ -1743,7 +2242,7 @@ def test_fab_download_waits_for_the_authors_warning_to_be_acknowledged(ui):
     # in the same microtask chain as the dialog resolving.
     page.wait_for_timeout(500)
     assert gerber_posts == [] and downloads == [], (
-        "declining the author's warning still started the fab export — the "
+        "declining the author's warning still started the fab export; the "
         "gate is decoration")
 
     # --- acknowledging it releases the fab package ------------------------
@@ -1770,7 +2269,7 @@ def test_fab_download_waits_for_the_authors_warning_to_be_acknowledged(ui):
 @pytest.mark.browser
 def test_the_trace_endpoint_drags_only_onto_valid_targets(ui):
     """Dragging a via-less trace's endpoint can only land it somewhere legal
-    — a same-net connector pad or another unit's same-net pad — and
+    (a same-net connector pad or another unit's same-net pad), and
     double-clicking it returns the run to the automatic nearest pad.
 
     The endpoint is real copper: a drop in open space, on a wrong-net pad,
@@ -1802,7 +2301,7 @@ def test_the_trace_endpoint_drags_only_onto_valid_targets(ui):
     # sees highlighted).
     n_cands = drag_endpoint(endpoint(0), (19.05, 19.05))
     assert n_cands >= 4, (
-        f"only {n_cands} destinations were on offer mid-drag — the same-net "
+        f"only {n_cands} destinations were on offer mid-drag; the same-net "
         "pads or the sibling unit are missing from the highlight set")
     assert ui.js("() => state.leds[0].term") == {"pad": "16"}
     assert endpoint(0) == [19.05, 19.05]
@@ -1815,12 +2314,12 @@ def test_the_trace_endpoint_drags_only_onto_valid_targets(ui):
     drag_endpoint(endpoint(0), target)
     assert ui.js("() => state.leds[0].term") == {"unit": 1}
     assert not ui.js("() => noviaRoute(state.leds[0]).tight"), (
-        "the chained run should route clear — the target pad must not count "
+        "the chained run should route clear: the target pad must not count "
         "as a hazard")
 
     # While LED 1 ends on LED 2, LED 2 must not be offered LED 1 back: a
     # loop feeds nothing, so it never appears among the candidates. Its three
-    # same-net connector pads must still be there — an empty list here would
+    # same-net connector pads must still be there; an empty list here would
     # mean the validator broke, not that the loop was excluded.
     cands = ui.js("() => noviaTermTargets(state.leds[1]).map(c => c.term)")
     assert len(cands) >= 3, f"LED 2 lost its connector-pad destinations: {cands}"
@@ -1838,22 +2337,22 @@ def test_the_trace_endpoint_drags_only_onto_valid_targets(ui):
 # First-session defaults (dogfood findings F1/F2/F5/F6)
 # ===========================================================================
 def test_the_first_session_defaults_never_greet_the_user_with_a_warning(ui):
-    """A fresh design's defaults compose cleanly: the starter LED is on the
-    face the viewer is looking at, a newly added text lands clear of parts
-    instead of on top of them, an emptied LED panel says what to do next,
-    and text answers the same double-click-to-rotate gesture as everything
-    else on the canvas.
+    """A fresh design's defaults compose cleanly: the starter LED sits on
+    the back (the standard minibadge build: glowing through a window at the
+    host badge), a newly added text lands clear of parts instead of on top
+    of them, an emptied LED panel says what to do next, and text answers the
+    same double-click-to-rotate gesture as everything else on the canvas.
 
-    These were the top dogfood findings: the old defaults meant the first
-    thing a newcomer ever saw was an invisible back-side part, and the first
-    thing adding text produced was an overlap warning the app caused itself.
+    The text/panel/gesture checks were top dogfood findings; the back-side
+    LED default is a deliberate owner decision that reversed the dogfood-era
+    front default.
     """
     page = ui.page
-    # The starter LED faces the viewer.
-    assert ui.js("() => state.leds[0].side") == "front", (
-        "the very first part on screen is on the invisible side")
+    # The starter LED defaults to the back face.
+    assert ui.js("() => state.leds[0].side") == "back", (
+        "LED units should default to the back side")
 
-    # A new text lands on solid board AND clear of the starter LED — no
+    # A new text lands on solid board AND clear of the starter LED: no
     # self-inflicted warning. The app's own predicates are the oracle.
     ui.show_panel("text")
     page.click("#addtext", timeout=ELEMENT_TIMEOUT)
@@ -1861,7 +2360,7 @@ def test_the_first_session_defaults_never_greet_the_user_with_a_warning(ui):
     page.locator("#textlist .item input.tx").first.fill("hello badge")
     page.wait_for_timeout(300)
     assert ui.js("() => textOverParts(state.texts[0])") is False, (
-        "new text spawned on top of an existing part — the first thing the "
+        "new text spawned on top of an existing part; the first thing the "
         "user sees after typing is a warning the app caused itself")
     assert ui.js("() => textOnSolidBoard(state.texts[0])") is True
 
@@ -1880,3 +2379,248 @@ def test_the_first_session_defaults_never_greet_the_user_with_a_warning(ui):
     hint = ui.js("() => document.getElementById('ledlist').innerText.trim()")
     assert hint, "the emptied LED panel is a blank void with no next step"
     ui.assert_clean("first-session defaults")
+
+
+# ===========================================================================
+# Stacking order: the parts are on top of the board, on the canvas as in life
+# ===========================================================================
+@pytest.mark.browser
+@pytest.mark.parametrize(
+    "cover",
+    [
+        # The board-shape part: on a custom outline it covers the whole board,
+        # which is what made this reachable everywhere at once.
+        "shapeel",
+        # An artwork layer spread over the same ground.
+        "art",
+    ],
+)
+def test_a_far_side_units_ghost_is_grabbed_before_the_board_under_it(ui, cover):
+    """Dragging a component never drags the board out from under it.
+
+    A unit mounted on the far face is drawn as a dashed ghost and is meant to
+    be draggable from either view.  Both the custom-outline part and a
+    full-board art layer sit under every ghost, so if either wins the hit
+    test the user reaches for an LED on a custom-shaped board and moves the
+    entire outline (or a logo) instead -- a destructive answer to an ordinary
+    drag, and one that is only obvious after the board redraws.
+    """
+    ui.custom_square_board(30)
+
+    # One unit on the BACK face: from the FRONT view it is only a ghost, so
+    # this is the weakest case for the component and the strongest for
+    # whatever is underneath it.
+    ui.js(
+        """(cover) => {
+            state.leds.length = 0;
+            state.leds.push({x: 10.16, y: 6.0, color: 'red', side: 'back',
+                             rot: 0, layout: 'inline', size: '0805',
+                             reverse: false, novia: false, farled: false,
+                             adv: null});
+            state.art.length = 0;
+            if (cover === 'art') {
+                state.art.push({kind: 'rect', material: 'silk', side: 'front',
+                                cx: 10.16, cy: 10.16, wmm: 26, h: 26, rot: 0,
+                                overrides: []});
+            }
+            renderLedList(); renderArtList(); draw();
+        }""",
+        cover,
+    )
+    ui.wait_state("state.leds.length === 1")
+
+    before = ui.js("() => [state.leds[0].x, state.leds[0].y]")
+    el_before = ui.js("() => state.shape.elements.map(e => [e.cx, e.cy])")
+    art_before = ui.js("() => state.art.map(a => [a.cx, a.cy])")
+
+    # The ghost really is over the thing that must not win, or the drag would
+    # prove nothing at all.
+    assert ui.js("([x, y]) => unitHit(state.leds[0], x, y)", before), (
+        "the probe point is not on the unit; this drag would test nothing")
+
+    ui.drag_mm(before, (before[0] + 4.0, before[1]), side="front")
+
+    assert ui.js("() => selected && selected.kind") == "led", (
+        f"the drag grabbed {ui.js('() => selected && selected.kind')!r} "
+        f"instead of the unit standing on top of the {cover}")
+    after = ui.js("() => [state.leds[0].x, state.leds[0].y]")
+    assert after[0] - before[0] > 2.0, (
+        f"the ghost did not follow the pointer: {before} -> {after}")
+    assert ui.js("() => state.shape.elements.map(e => [e.cx, e.cy])") == el_before, (
+        "dragging a component moved the board outline")
+    assert ui.js("() => state.art.map(a => [a.cx, a.cy])") == art_before, (
+        "dragging a component moved an artwork layer")
+    ui.assert_clean("ghost over board grab")
+
+
+#: How much of a part's own ink must still be visible once decoration is
+#: added beneath it.  Not 100 %: a 40 %-alpha dashed outline has a few pixels
+#: that composite over pale silk to the silk colour by coincidence.
+_PART_STAYS_VISIBLE = 0.95
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("under", ["art", "text"])
+def test_decoration_added_under_a_part_never_rubs_the_part_out(ui, under):
+    """Artwork and text are printed ON the board; the parts sit on top of it.
+
+    The interesting case is a unit mounted on the FAR face.  Its copper is
+    carved out of this face's decoration already, but the dashed ghost that
+    says "a part stands here" is not -- and the ghost is what the user
+    reaches for to drag it.  Decoration painted over it leaves the user
+    dragging something they cannot see, which is a lying preview: the class
+    of failure DRC can never catch.
+
+    Measured as a relationship, so no colour or coordinate is asserted: count
+    the pixels the part inks on a bare board, then require nearly all of them
+    to still differ from the decoration-only render once the decoration is
+    added underneath.  "Nearly" because the ghost outline is a 40 %-alpha
+    dash, and a handful of its pixels composite over pale silk to exactly the
+    silk colour by coincidence.  Calibrated on this board: 646-648 of 648
+    ghost pixels survive with the parts painted last, and 417 of 648 with the
+    text pass moved back after them, so the bar sits far from both.
+    """
+    ui.js(
+        """(under) => {
+            state.leds.length = 0; state.art.length = 0; state.texts.length = 0;
+            // Back face: from the front view this unit is only its ghost.
+            const led = {x: 10.16, y: 10.16, color: 'red', side: 'back',
+                         rot: 0, layout: 'inline', size: '0805',
+                         reverse: false, novia: false, farled: false,
+                         adv: null};
+            state.leds.push(led);
+            window.__led = {...led};
+            window.__patch = unitBBox(led);   // the whole unit footprint
+            window.__deco = under === 'art'
+                ? {kind: 'rect', material: 'silk', side: 'front', cx: 10.16,
+                   cy: 10.16, wmm: 14, h: 14, rot: 0, overrides: []}
+                : {x: 10.16, y: 10.16, text: 'MMMMMMMMM', size: 7,
+                   side: 'front', font: 'archivo', material: 'silk', rot: 0};
+            state.leds.length = 0;
+            renderLedList(); draw();
+        }""",
+        under,
+    )
+    # A web font inks nothing until it has loaded.
+    ui.page.wait_for_function("() => document.fonts.status === 'loaded'",
+                              timeout=ELEMENT_TIMEOUT)
+
+    shot = """(mode) => {
+        const [x0, y0, x1, y1] = window.__patch;
+        state.leds.length = 0; state.art.length = 0; state.texts.length = 0;
+        if (mode.includes('deco')) {
+            if (window.__deco.kind) state.art.push(window.__deco);
+            else state.texts.push(window.__deco);
+        }
+        if (mode.includes('part')) state.leds.push({...window.__led});
+        renderLedList(); renderArtList(); renderTextList(); draw();
+        const px = Math.round(VIEW.tx + x0 * SCALE);
+        const py = Math.round(VIEW.ty + y0 * SCALE);
+        const w = Math.max(1, Math.round((x1 - x0) * SCALE));
+        const h = Math.max(1, Math.round((y1 - y0) * SCALE));
+        return [...cvF.getContext('2d').getImageData(px, py, w, h).data];
+    }"""
+    bare = ui.js(shot, "bare")
+    part_only = ui.js(shot, "part")
+    deco_only = ui.js(shot, "deco")
+    both = ui.js(shot, "deco+part")
+
+    pixels = range(0, len(bare), 4)
+    ghost = [i for i in pixels if bare[i:i + 3] != part_only[i:i + 3]]
+    assert ghost, "the unit inks nothing over its own footprint; nothing to test"
+    assert [i for i in pixels if bare[i:i + 3] != deco_only[i:i + 3]], (
+        f"the {under} inks nothing over the unit's footprint, so it could "
+        "not hide the part even if it were drawn on top")
+
+    survived = [i for i in ghost if deco_only[i:i + 3] != both[i:i + 3]]
+    assert len(survived) >= _PART_STAYS_VISIBLE * len(ghost), (
+        f"adding {under} under the unit rubbed out "
+        f"{len(ghost) - len(survived)} of the {len(ghost)} pixels the unit "
+        f"draws ({100 * len(survived) / len(ghost):.1f}% left): the {under} "
+        "is painted over the part, and the user is left dragging something "
+        "the preview does not show")
+    ui.assert_clean(f"part over {under}")
+
+
+# ===========================================================================
+# Self-inflicted problems: the app must not create the error it then reports
+# ===========================================================================
+#: An outline with a wide slot cut out of the lower half, where the text
+#: placer's second-choice spot lives.  Holes are the case a part-avoiding
+#: placer misses, because a hole is not a part.
+_SLOTTED = [[(0.16, 0.16), (20.16, 0.16), (20.16, 20.16), (0.16, 20.16)],
+            [(4.0, 14.0), (16.0, 14.0), (16.0, 17.0), (4.0, 17.0)]]
+
+
+@pytest.mark.browser
+def test_a_newly_added_text_never_lands_on_a_hole_in_the_board(ui):
+    """"+ Add text" picks a spot; that spot has to be one the user can keep.
+
+    The placer already avoided parts.  It judged the spot with a four-letter
+    stand-in, though, so on a board with a hole it could pick a place where
+    the stand-in fits and a real word does not: the user typed one word and
+    was told their text hangs over the board, having never chosen the
+    position, with the download blocked until they moved it themselves.
+    """
+    # A front unit over the top of the board, so the placer's first choice is
+    # taken and it has to consider the spots further down -- one of which is
+    # the slot.
+    _set_design(ui, [_js_led(x=10.16, y=5.0, side="front")], rings=_SLOTTED)
+    ui.wait_state("state.leds.length === 1")
+
+    ui.show_panel("text")
+    ui.page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    ui.page.locator("#textlist .item input.tx").first.fill("DOGFOOD")
+    ui.page.wait_for_timeout(300)
+
+    where = ui.js("() => [state.texts[0].x, state.texts[0].y]")
+    assert ui.js("() => textOnSolidBoard(state.texts[0])"), (
+        f"the app parked its own new text at {where}, which is not on solid "
+        "board; the user is blamed for a position they never chose")
+    assert not ui.blocking(), (
+        f"adding text and typing one word left the design unbuildable: "
+        f"{ui.blocking()}")
+    ui.assert_clean("new text placement")
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("width", [1600, 1280, 960, 700])
+def test_every_fabrication_choice_shows_its_longest_option(ui, width):
+    """A dropdown the user cannot read is a control they cannot use.
+
+    Mask colour, finish and via tenting share one row in a rail that narrows
+    with the window.  Three columns cannot hold all three longest options at
+    the narrow end, so the row wraps; whichever way it lays out, the widest
+    option of every select must still fit inside its box.
+    """
+    ui.set_viewport(width, 900)
+    ui.show_panel("shape")
+    clipped = ui.js(
+        """() => {
+            const bad = [];
+            for (const id of ['mask', 'finish', 'tenting']) {
+                const el = document.getElementById(id);
+                if (!el || !el.offsetParent) continue;
+                const cs = getComputedStyle(el);
+                const c = document.createElement('canvas').getContext('2d');
+                c.font = cs.fontSize + ' ' + cs.fontFamily;
+                let widest = 0, worst = '';
+                for (const o of el.options) {
+                    const w = c.measureText(o.text).width;
+                    if (w > widest) { widest = w; worst = o.text; }
+                }
+                const room = el.clientWidth - parseFloat(cs.paddingLeft)
+                                            - parseFloat(cs.paddingRight);
+                // 12 px is a conservative allowance for the native arrow.
+                if (widest > room - 12) {
+                    bad.push({id, worst, needs: Math.round(widest + 12),
+                              has: Math.round(room)});
+                }
+            }
+            return bad;
+        }""")
+    assert not clipped, (
+        f"at {width}px these fabrication dropdowns clip their longest "
+        f"option: {clipped}")
+    ui.assert_clean(f"fab row at {width}px")

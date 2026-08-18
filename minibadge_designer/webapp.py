@@ -28,7 +28,7 @@ MAX_ART = 8
 
 #: Soldermask colors the fabs (and the UI's picker) actually offer. The value
 #: is interpolated straight into the KiCad stackup, so anything outside this
-#: list would ship a board file KiCad refuses to open — a `mask_color` of
+#: list would ship a board file KiCad refuses to open: a `mask_color` of
 #: `green")` used to close the stackup's s-expression early (defect #4).
 #: Whitelisting at the boundary is the same treatment `finish` already gets.
 MASK_COLORS = ("green", "purple", "black", "red", "blue", "white")
@@ -55,7 +55,7 @@ _GEOMETRY_ERRORS = (OSError, ValueError, TypeError, AttributeError, KeyError,
 #: worst curve-heavy one. Raise this one number to buy more detail and more
 #: seconds; nothing else needs editing.
 #:
-#: It is deliberately generous — 40 000 straight vertices, or ~2 500 Bezier
+#: It is deliberately generous: 40 000 straight vertices, or ~2 500 Bezier
 #: segments, is far more detail than a 20 mm badge can print (the average
 #: chord would be ~0.01 mm against a ~0.15 mm minimum feature). And it is not
 #: a refusal: an SVG over the cap falls back to the browser's raster render of
@@ -116,7 +116,7 @@ def _check_svg_complexity(data: bytes) -> None:
     if cost > MAX_SVG_COMPLEXITY:
         raise _TooComplex(
             "this SVG carries too much vector detail to trace exactly "
-            f"(about {cost:,} segments against a {MAX_SVG_COMPLEXITY:,} limit) — "
+            f"(about {cost:,} segments against a {MAX_SVG_COMPLEXITY:,} limit); "
             "simplify the path, raise the smoothing/tolerance in your tracing "
             "tool, or upload a PNG of the same artwork instead")
 
@@ -162,15 +162,18 @@ def _parse_pins(params: dict) -> tuple[str, ...]:
 
 
 def _led_keepout(led: pcb.Led, safe=None, pins=pcb.ALL_PINS, others=(),
-                 outline=None, face: str | None = None) -> "_GeomKeepout":
+                 outline=None, face: str | None = None,
+                 clk=None) -> "_GeomKeepout":
     # The unit's actual copper (pads/via/traces/hole) plus clearance margins
-    # — not the old bounding rectangle — so art wraps snugly around units.
+    # (not the old bounding rectangle), so art wraps snugly around units.
     # pins/others matter for a via-less unit: its power trace runs to a
     # connector pad, and where it goes depends on both. `face` matters for a
     # far-side LED, whose copper is split across the board: each face's art
-    # and windows dodge only the copper that is really there.
+    # and windows dodge only the copper that is really there. `clk` (from
+    # pcb.clk_info) matters for a CLK unit, whose supply trace runs to the
+    # jumper or pin 9 and claims its own band of the face.
     return _GeomKeepout(pcb.unit_copper_poly(led, safe, pins, others, outline,
-                                             face))
+                                             face, clk))
 
 
 def _reverse_hole_keepout(led: pcb.Led, safe=None) -> "CircleKeepout":
@@ -303,7 +306,7 @@ def _svg_classify(
 
     Colors map to materials the same way (nearest palette entry, or the
     luma threshold), and each magic-wand override retargets the connected
-    visible region under its seed point — here a polygon component instead
+    visible region under its seed point, here a polygon component instead
     of a flood-filled pixel patch. Raises for SVGs the exact parser can't
     represent; the caller then falls back to the raster pipeline.
     """
@@ -374,7 +377,7 @@ def _svg_shape_geometry(data: bytes, el: dict):
     """A board silhouette taken straight from SVG vector paths.
 
     Shapes whose fill passes the threshold test (dark = board, like the
-    raster path) are used exactly — no pixel grid, and no smoothing pass,
+    raster path) are used exactly: no pixel grid, and no smoothing pass,
     because there is no staircase to melt. Raises if the SVG can't be
     parsed exactly; the caller falls back to the raster silhouette.
     """
@@ -422,8 +425,8 @@ def _image_silhouette(el: dict, data: bytes | None, raster: bytes | None, smooth
             if raster is None:
                 raise
             data = raster
-        except Exception:  # noqa: BLE001 — any parse issue means "not exact"
-            # Not exactly parseable (gradients, malformed markup, ...) —
+        except Exception:  # noqa: BLE001 (any parse issue means "not exact")
+            # Not exactly parseable (gradients, malformed markup, ...):
             # use the browser's raster render of the same SVG instead.
             if raster is None:
                 raise ValueError("could not parse the SVG board shape")
@@ -512,7 +515,7 @@ def _element_geometry(el: dict, data: bytes | None, raster: bytes | None, smooth
 def _shape_geometry(shape_meta: dict, uploads: dict, rasters: dict):
     """The combined user outline (no pad plates), or None for the square.
 
-    "custom" mode composes a list of elements — images and generic shapes —
+    "custom" mode composes a list of elements (images and generic shapes)
     where each element either adds board material or cuts it away (cuts
     apply after all adds). Legacy single-shape metas still work.
     """
@@ -540,7 +543,7 @@ def _shape_geometry(shape_meta: dict, uploads: dict, rasters: dict):
     if not adds:
         if not cuts:
             return None
-        # Cut-only compositions carve the standard square — "take the normal
+        # Cut-only compositions carve the standard square: "take the normal
         # badge and punch shapes out of it" needs no explicit base part.
         adds = [sbox(0.16, 0.16, 20.16, 20.16)]
     shape = unary_union(adds)
@@ -550,20 +553,33 @@ def _shape_geometry(shape_meta: dict, uploads: dict, rasters: dict):
     return None if shape.is_empty else shape
 
 
-def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict):
+def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict,
+                     cuts=None):
     """Board outline rings from the shape params: (rings, bridged) or (None, False).
 
     The combined shape unions with a minimal board tab per kept connector
-    pad pair — never a full-width strip — so the shape's own cuts win
+    pad pair (never a full-width strip), so the shape's own cuts win
     everywhere except directly under the pads. A tab the shape doesn't
     reach solidly gets a 3 mm bridge to the shape's nearest point rather
     than silently falling apart; leftover floating pieces are dropped.
+
+    `cuts` is extra geometry to carve out of the board (art layers whose
+    material is "cut"). Like the shape's own cut parts it subtracts before
+    the pad tabs, so the connector pads always keep solid board under them.
     """
     from shapely.geometry import LineString, Polygon
     from shapely.geometry import box as sbox
     from shapely.ops import nearest_points, unary_union
 
     shape = _shape_geometry(shape_meta, uploads, rasters)
+    if cuts is not None and not cuts.is_empty:
+        if shape is None:
+            # Cut-only art carves the standard square, exactly like a
+            # cut-only shape composition does.
+            shape = sbox(0.16, 0.16, 20.16, 20.16)
+        shape = shape.difference(cuts).simplify(0.02)
+        if shape.is_empty:
+            return None, False
     if shape is None:
         return None, False
     # Only corners that still carry a pin need a tab holding them.
@@ -592,11 +608,230 @@ def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict):
     return _geom_rings(outline), bool(bridges)
 
 
+def _rings_signature(rings) -> tuple:
+    """Ring count + total enclosed area + bbox, for "did this change?" tests.
+
+    Comparing vertex lists is not safe: recomputing an identical union can
+    reorder them. Area moves whenever a cut lands on the board, whether it
+    opens a hole (a new ring) or bites a notch out of the edge.
+    """
+    if not rings:
+        return (0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    area = 0.0
+    xs: list[float] = []
+    ys: list[float] = []
+    for ring in rings:
+        a2 = 0.0
+        for i, (x1, y1) in enumerate(ring):
+            x2, y2 = ring[(i + 1) % len(ring)]
+            a2 += x1 * y2 - x2 * y1
+            xs.append(x1)
+            ys.append(y1)
+        area += abs(a2) / 2
+    return (len(rings), round(area, 2), round(min(xs), 1), round(min(ys), 1),
+            round(max(xs), 1), round(max(ys), 1))
+
+
+def _art_uploads() -> tuple[dict, dict]:
+    """Every art layer's upload, read once into memory.
+
+    Werkzeug's file streams can only be read once (`_read_upload` closes them
+    behind it), but classification has to be repeatable: a cut-material layer
+    is classified to find the hole, and if that hole moves the board's bounds
+    the whole set is classified again against the corrected art box. Reading
+    up front is what makes the second pass possible.
+    """
+    uploads: dict = {}
+    rasters: dict = {}
+    for i in range(MAX_ART):
+        data = _read_upload(f"art{i}")
+        if data is not None:
+            uploads[i] = data
+        raster = _read_upload(f"art{i}_raster")
+        if raster is not None:
+            rasters[i] = raster
+    return uploads, rasters
+
+
+def _classify_art_entry(i: int, meta: dict, art_board, uploads: dict,
+                        rasters: dict):
+    """Classify one art layer from the request into its material regions.
+
+    Returns (source, window, art_side) — `source` is a {material: geometry}
+    dict (basic shapes, exact SVG) or a ClassifiedImage grid — or None when
+    the layer contributes nothing (no upload, empty geometry). Shared by the
+    decor/window emit passes and the outline's cut-material extraction, so a
+    layer's cut regions land exactly where its silk/copper regions do.
+    """
+    # One "side" value drives everything: front/back place the ink
+    # (and open a one-sided bare window there); "through" opens the
+    # bare window on both faces with the ink on the front. A legacy
+    # explicit bare_side still wins if a client sends it.
+    raw_side = meta.get("side")
+    if raw_side not in ("front", "back", "through"):
+        raw_side = None  # absent/invalid: classic through window
+    window = str(meta.get("bare_side", ""))
+    if window not in ("through", "front", "back"):
+        window = raw_side if raw_side in ("front", "back") else "through"
+    art_side = "back" if raw_side == "back" else "front"
+    kind = str(meta.get("kind", "image"))
+    if kind in SHAPE_KINDS and kind != "image":
+        # A basic-shape art layer: exact vector geometry, no upload.
+        material = str(meta.get("material", "bare"))
+        if material not in pcb.ART_MATERIALS:
+            material = "bare"
+        geom = _element_geometry(
+            {"kind": kind, "cx": meta.get("cx", 10.16), "cy": meta.get("cy", 10.16),
+             "w": meta.get("w", 10), "h": meta.get("h", 10),
+             "rot": meta.get("rot", 0), "sides": meta.get("sides", 6)},
+            None, None, 0.0,
+        )
+        if geom is None or geom.is_empty:
+            return None
+        if art_side == "back":
+            # Mirror so it reads correctly from the back face.
+            from shapely.affinity import scale as _mirror
+
+            geom = _mirror(geom, xfact=-1, yfact=1,
+                           origin=(float(meta.get("cx", 10.16)), 0))
+        return {material: geom}, window, art_side
+    if uploads.get(i) is None:
+        return None
+    rot = float(meta.get("rot", 0)) % 360
+    overrides = []
+    for ov in list(meta.get("overrides", []))[:12]:
+        mat = str(ov.get("material", "ignore"))
+        if mat not in (*pcb.ART_MATERIALS, "ignore"):
+            mat = "ignore"
+        u = min(max(float(ov.get("u", 0.5)), 0.0), 1.0)
+        if art_side == "back":
+            u = 1.0 - u  # the placed image is mirrored on the back
+        overrides.append((
+            u,
+            min(max(float(ov.get("v", 0.5)), 0.0), 1.0),
+            mat,
+        ))
+    common = {
+        "cx": float(meta.get("cx", 10.16)),
+        "cy": float(meta.get("cy", 10.16)),
+        "width_mm": float(meta.get("w", 14)),
+        "rot": rot,
+        # Back-side art mirrors so it reads correctly from the back.
+        "flip": bool(meta.get("flip", False)) != (art_side == "back"),
+        "overrides": overrides,
+        "board": art_board,
+    }
+    if meta.get("mode") == "palette":
+        # Each palette color carries its own material assignment.
+        palette = []
+        for entry in list(meta.get("palette", []))[:MAX_PALETTE]:
+            rgb = [min(max(int(v), 0), 255) for v in list(entry.get("rgb", []))[:3]]
+            if len(rgb) != 3:
+                continue
+            mat = str(entry.get("material", "ignore"))
+            if mat not in (*pcb.ART_MATERIALS, "ignore"):
+                mat = "ignore"
+            palette.append((tuple(rgb), mat))
+        if not palette:
+            return None
+        mode_kw = {"mode": "palette", "palette": palette}
+    else:
+        material = str(meta.get("material", "silk"))
+        if material not in pcb.ART_MATERIALS:
+            material = "silk"
+        mode_kw = {
+            "mode": "threshold",
+            "threshold": int(meta.get("threshold", 128)),
+            "invert": bool(meta.get("invert", False)),
+            "material": material,
+        }
+    data = uploads.get(i)
+    if svgart.is_svg(data):
+        # Exact vector pipeline; the browser's raster render of the
+        # same SVG is the fallback for gradients etc.
+        try:
+            _check_svg_complexity(data)
+            return _svg_classify(data, **mode_kw, **common), window, art_side
+        except Exception as exc:  # any parse issue: fall back to the raster render
+            data = rasters.get(i)
+            if data is None:
+                if isinstance(exc, _TooComplex):
+                    raise
+                raise ValueError("could not parse an SVG artwork layer") from None
+    return classify_image(data, **mode_kw, **common), window, art_side
+
+
+def _uses_cut(meta) -> bool:
+    """Whether one art meta assigns the board-cutout material anywhere."""
+    if not isinstance(meta, dict):
+        return False
+    kind = str(meta.get("kind", "image"))
+    if kind in SHAPE_KINDS and kind != "image":
+        return str(meta.get("material", "")) == "cut"
+    if any(str(o.get("material", "")) == "cut"
+           for o in list(meta.get("overrides", []) or [])[:12]
+           if isinstance(o, dict)):
+        return True
+    if meta.get("mode") == "palette":
+        return any(str(e.get("material", "")) == "cut"
+                   for e in list(meta.get("palette", []) or [])[:MAX_PALETTE]
+                   if isinstance(e, dict))
+    return str(meta.get("material", "")) == "cut"
+
+
+def _art_board_of(outline_rings):
+    """The art placement box for an outline: its bbox ∪ the standard square."""
+    if not outline_rings:
+        return (0.16, 0.16, 20.16, 20.16)
+    xs = [x for x, _y in outline_rings[0]]
+    ys = [y for _x, y in outline_rings[0]]
+    return (min(0.16, *xs), min(0.16, *ys), max(20.16, *xs), max(20.16, *ys))
+
+
+def _art_cut_geometry(sources: list, art_board):
+    """Union of the cut-material regions in classified art sources, or None.
+
+    `sources` are _classify_art_entry results ({material: geometry} dicts or
+    ClassifiedImage grids), the same objects the decor/window passes consume,
+    so a cut region lands exactly where the layer's other materials say it
+    is — and each upload stream is still read exactly once. Raster cut edges
+    get the same gentle smoothing an image silhouette part gets, so the
+    Edge.Cuts contour is a fab-able curve rather than a pixel staircase.
+    """
+    from shapely.geometry import box as sbox
+    from shapely.ops import unary_union
+
+    geoms = []
+    for source in sources:
+        if isinstance(source, dict):
+            g = source.get("cut")
+            if g is not None and not g.is_empty:
+                geoms.append(g)
+            continue
+        rects = grid_to_rects(source, "cut", [], board=art_board)
+        if rects:
+            # Pad each pixel rect slightly so rounded coordinates can't
+            # slice the union into ribbons (same trick as _svg_classify's
+            # raster silhouette).
+            geoms.append(unary_union(
+                [sbox(x - 0.02, y - 0.02, x + w + 0.02, y + h + 0.02)
+                 for x, y, w, h in rects]))
+            smooth = 0.12
+            geoms[-1] = (geoms[-1]
+                         .buffer(smooth, quad_segs=3)
+                         .buffer(-2 * smooth, quad_segs=3)
+                         .buffer(smooth, quad_segs=3))
+    if not geoms:
+        return None
+    g = unary_union(geoms).simplify(0.02)
+    return None if g.is_empty else g
+
+
 def _read_upload(field: str) -> bytes | None:
     """Whole body of one uploaded file, releasing the stream behind it.
 
     Werkzeug spills anything over ~500 KB into a temporary file, and the app
-    reads every upload exactly once — so holding the handle open past the read
+    reads every upload exactly once, so holding the handle open past the read
     just leaves a descriptor for the garbage collector to find later. The
     upload cap is 24 MiB, so that is worth not doing.
     """
@@ -651,7 +886,7 @@ def outline_preview():
     polygon is exactly what lands on Edge.Cuts.
     """
     # Every failure here answers "no custom outline", which the UI draws as the
-    # ordinary square — the preview is allowed to be more conservative than
+    # ordinary square; the preview is allowed to be more conservative than
     # /generate, never more optimistic. json.JSONDecodeError is a ValueError,
     # and so is the "not an object" / bad-pins case, so one guard covers the
     # envelope; the geometry keeps its own.
@@ -668,7 +903,38 @@ def outline_preview():
         rings, bridged = _compute_outline(shape_meta, uploads, pins, rasters)
     except _GEOMETRY_ERRORS:
         return {"rings": None, "bridged": False}
-    return {"rings": rings, "bridged": bridged}
+    # Art layers with cut-material regions carve the outline too; the client
+    # sends those layers (meta + files) along so the preview hole is the
+    # exact contour /generate will put on Edge.Cuts.
+    cut_ignored = False
+    try:
+        art_meta = list(params.get("art", []))[:MAX_ART]
+        if any(_uses_cut(m) for m in art_meta):
+            board = _art_board_of(rings)
+            art_uploads, art_rasters = _art_uploads()
+            sources = []
+            for i, meta in enumerate(art_meta):
+                if not _uses_cut(meta):
+                    continue
+                entry = _classify_art_entry(i, meta, board, art_uploads,
+                                            art_rasters)
+                if entry is not None:
+                    sources.append(entry[0])
+            cut_geom = _art_cut_geometry(sources, board)
+            if cut_geom is not None:
+                before = _rings_signature(rings)
+                rings, bridged = _compute_outline(
+                    shape_meta, uploads, pins, rasters, cuts=cut_geom)
+                # A cut that lands off the board, or only where a connector
+                # pad's tab reclaims it, leaves the outline untouched. The
+                # preview would just close the hole again with no reason
+                # given, so hand the UI something to say.
+                cut_ignored = _rings_signature(rings) == before
+            else:
+                cut_ignored = True  # every cut region classified to nothing
+    except (_TooComplex, *_GEOMETRY_ERRORS):
+        pass  # a bad art layer never hides the board; /generate reports it
+    return {"rings": rings, "bridged": bridged, "cutIgnored": cut_ignored}
 
 
 @app.post("/generate")
@@ -779,7 +1045,7 @@ def _refill_zones(board_path: str) -> bool:
 
     The shipped fills are precomputed so the project is electrically complete
     straight out of the zip, but KiCad's file format stores a fill as one
-    hole-free outline — so every void (a via's clearance, a light window) has
+    hole-free outline, so every void (a via's clearance, a light window) has
     to be slit open to the board edge. Those slits are real, and they show in
     the 3D view as hairlines across the pour.
 
@@ -787,7 +1053,7 @@ def _refill_zones(board_path: str) -> bool:
     does the same thing for the preview so it shows the board the way it will
     actually be plotted. Needs KiCad's `pcbnew` module: the server's own
     interpreter has it in the Docker image, and a macOS KiCad install carries
-    a bundled Python that has it even when the venv does not — both are
+    a bundled Python that has it even when the venv does not; both are
     tried. Without either the preview just keeps the slits, so this stays
     best-effort; the Gerber export, which cannot ship the slits, checks the
     returned bool and refuses instead.
@@ -832,7 +1098,7 @@ def _glb_meshes(data: bytes) -> int:
     """Number of meshes in a GLB, or 0 if these bytes are not a usable one.
 
     `kicad-cli pcb export glb` can exit non-zero and still have written a
-    complete, openable model — typically it failed to substitute one component
+    complete, openable model; typically it failed to substitute one component
     footprint and says so on stderr. Reading the file rather than trusting the
     exit code is what lets that case reach the viewer instead of a 500.
     """
@@ -857,7 +1123,7 @@ def _model_glb(spec: "pcb.BadgeSpec", slug: str):
     cli = _kicad_cli()
     if cli is None:
         return {"error": "3D view needs KiCad (kicad-cli) installed on the "
-                         "server — the downloaded project shows the same "
+                         "server; the downloaded project shows the same "
                          "thing in KiCad's 3D viewer (View > 3D)."}, 501
     with tempfile.TemporaryDirectory() as td:
         board = f"{td}/{slug}.kicad_pcb"
@@ -884,12 +1150,12 @@ def _model_glb(spec: "pcb.BadgeSpec", slug: str):
             raw = b""
         # A non-zero exit is not the same as no model. kicad-cli complains and
         # exits 1 when it cannot substitute a component's 3D model, yet still
-        # writes the whole board — the honest answer there is the board the
+        # writes the whole board; the honest answer there is the board the
         # user can actually look at, with a warning, not a 500 that hides it.
         if _glb_meshes(raw) == 0:
             note = run.stderr.decode("utf-8", "replace").strip().splitlines()
             return {"error": "KiCad could not export this board"
-                             + (f" — {note[-1][:200]}" if note else "")}, 500
+                             + (f": {note[-1][:200]}" if note else "")}, 500
         data = _tag_glb_layers(raw)
     resp = send_file(io.BytesIO(data), mimetype="model/gltf-binary",
                      download_name=f"{slug}.glb")
@@ -907,8 +1173,8 @@ def _model_glb(spec: "pcb.BadgeSpec", slug: str):
 # POST /gerbers returns a zip that uploads straight to a board house. One
 # universal package covers the popular fabs: Protel filename extensions
 # (kicad-cli's default, and what JLCPCB/PCBWay's CAM auto-detects), plain
-# RS-274X — PCBWay documents that its CAM mishandles X2 attributes, and
-# everyone else merely tolerates them — and a single merged Excellon drill
+# RS-274X (PCBWay documents that its CAM mishandles X2 attributes, and
+# everyone else merely tolerates them), and a single merged Excellon drill
 # file in exactly the dialect the JLCPCB/PCBWay/OSH Park KiCad guides ask
 # for (mm, decimal zeros, absolute origin, alternate oval mode). OSH Park
 # users are better served by the .kicad_pcb in the project zip, which OSH
@@ -938,7 +1204,7 @@ def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
     cli = _kicad_cli()
     if cli is None:
         return {"error": "Gerber export needs KiCad (kicad-cli) installed on "
-                         "the server — download the KiCad project instead and "
+                         "the server; download the KiCad project instead and "
                          "plot there (the README in the zip walks through "
                          "it)."}, 501
     with tempfile.TemporaryDirectory() as td:
@@ -975,7 +1241,7 @@ def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
             return {"error": "the Gerber export timed out"}, 500
         # Judge the artifacts, not the exit codes (same reasoning as the GLB
         # export): the package is complete when every layer and the drill
-        # file exist, and anything short of that is a refusal — a zip with a
+        # file exist, and anything short of that is a refusal: a zip with a
         # missing mask or outline plots as a real, wrong board at the fab.
         files = sorted(p for p in pathlib.Path(out).glob("*") if p.is_file())
         missing = _FAB_EXTENSIONS - {p.suffix.lstrip(".").lower() for p in files}
@@ -983,7 +1249,7 @@ def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
             note = (plot.stderr + drill.stderr).decode("utf-8", "replace")
             note = note.strip().splitlines()
             return {"error": "KiCad could not plot this board"
-                             + (f" — {note[-1][:200]}" if note else "")}, 500
+                             + (f": {note[-1][:200]}" if note else "")}, 500
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for p in files:
@@ -1007,7 +1273,7 @@ def _generate_impl(render: bool):
     # Valid JSON that is not an object (null, [], 42, "s") used to sail past
     # the guard above and blow up on the first params.get().
     if not isinstance(params, dict):
-        return {"error": "invalid params — expected a JSON object"}, 400
+        return {"error": "invalid params: expected a JSON object"}, 400
 
     name = str(params.get("name", "minibadge"))[:60]
     # Whitelisted, not escaped: this value is interpolated into the board's
@@ -1043,6 +1309,55 @@ def _generate_impl(render: bool):
         from shapely.geometry import Polygon as _Poly
 
         outline_poly = _Poly(outline_rings[0], outline_rings[1:])
+
+    # Classify every art layer ONCE, up front — each upload stream can be
+    # read exactly once, and the decor/window passes reuse these sources.
+    # Regions assigned the "cut" material carve the board itself: they
+    # subtract from the outline before the pad tabs and bridges run, so the
+    # connector pads always keep solid board and everything downstream
+    # (fills, keepouts, routing, unit checks) sees the true board shape.
+    try:
+        art_meta = list(params.get("art", []))[:MAX_ART]
+    except TypeError:
+        return {"error": "invalid art parameters"}, 400
+    art_uploads, art_rasters = _art_uploads()
+    classified = []  # (index, source, bare-window side, board face)
+
+    def _classify_all(board):
+        out = []
+        for i, meta in enumerate(art_meta):
+            entry = _classify_art_entry(i, meta, board, art_uploads, art_rasters)
+            if entry is not None:
+                out.append((i, *entry))
+        return out
+
+    art_box = _art_board_of(outline_rings)
+    try:
+        classified = _classify_all(art_box)
+        cut_geom = _art_cut_geometry([src for _i, src, _w, _s in classified], art_box)
+    except _TooComplex as exc:
+        return {"error": f"artwork: {exc}"}, 400
+    except _GEOMETRY_ERRORS:
+        return {"error": "could not process an artwork image"}, 400
+    if cut_geom is not None:
+        try:
+            outline_rings, _bridged = _compute_outline(
+                shape_meta, uploads, pins, rasters, cuts=cut_geom)
+            # A cut that bites the board's edge shrinks its bounding box, and
+            # the art box (which sizes and places every layer) is derived from
+            # it. Classify again against the corrected box, or the exported
+            # art would sit at a different scale than the preview drew.
+            if _art_board_of(outline_rings) != art_box:
+                classified = _classify_all(_art_board_of(outline_rings))
+        except _TooComplex as exc:
+            return {"error": f"artwork: {exc}"}, 400
+        except _GEOMETRY_ERRORS:
+            return {"error": "could not process the board shape"}, 400
+        outline_poly = None
+        if outline_rings:
+            from shapely.geometry import Polygon as _Poly
+
+            outline_poly = _Poly(outline_rings[0], outline_rings[1:])
 
     # LED units may go anywhere the board goes: the safe rect follows the
     # custom outline's bounds instead of the standard square.
@@ -1081,12 +1396,15 @@ def _generate_impl(render: bool):
                     if isinstance(n, (list, tuple)) and len(n) >= 2)
 
             # nodes bend the via-less run; anodes/vnodes bend the unit's two
-            # internal traces (resistor-to-anode link, pad-to-via stub).
+            # internal traces (resistor-to-anode link, pad-to-via stub);
+            # cnodes bend the CLK supply run.
             nodes = _bends("nodes")
             anodes = _bends("anodes")
             vnodes = _bends("vnodes")
+            cnodes = _bends("cnodes")
+            clk = bool(raw.get("clk"))
             # Where the via-less run ends: a chosen connector pad or another
-            # unit's pad. Shape-checked only — net, kept-pin, face and chain
+            # unit's pad. Shape-checked only: net, kept-pin, face and chain
             # validity are pcb.novia_term's call, which treats a bad choice
             # as "no choice" like every other sanitized parameter here.
             term = None
@@ -1110,13 +1428,15 @@ def _generate_impl(render: bool):
                           color=color, side=side, rot=rot, layout=layout,
                           size=size, reverse=reverse, novia=novia,
                           nodes=nodes, anodes=anodes, vnodes=vnodes,
-                          term=term, farled=farled, adv=adv)
+                          term=term, farled=farled, adv=adv,
+                          clk=clk, cnodes=cnodes)
             x, y = pcb.clamp_led_obj(led, safe)
             leds.append(pcb.Led(x=x, y=y, color=color, side=side, rot=rot,
                                 layout=layout, size=size, reverse=reverse,
                                 novia=novia, nodes=nodes, anodes=anodes,
                                 vnodes=vnodes, term=term,
-                                farled=farled, adv=adv))
+                                farled=farled, adv=adv,
+                                clk=clk, cnodes=cnodes))
     except (TypeError, ValueError, AttributeError):
         return {"error": "invalid led parameters"}, 400
     # Placing the units is pure geometry over user-supplied numbers, so a
@@ -1138,7 +1458,7 @@ def _generate_impl(render: bool):
         # This used to claim it scanned "the same grid" as the web UI, and that
         # is no longer true: the client's freeSpot() went adaptive (span/90,
         # floored at 0.25 mm) so the two searches are different algorithms by
-        # construction. That is fine — what has to agree is whether a given spot
+        # construction. That is fine; what has to agree is whether a given spot
         # is *acceptable*, not which spot each one picks first. The predicates
         # that decide acceptability are held in parity by
         # tests/test_browser.py (unitInsideBoard, padConflict, clampLedFor);
@@ -1164,7 +1484,7 @@ def _generate_impl(render: bool):
             for i, led in enumerate(leds):
                 if on_board(led):
                     continue
-                # Scan the whole board's bounds — the standard square first, so
+                # Scan the whole board's bounds, the standard square first, so
                 # relocated units land near the middle before drifting outward.
                 found = None
                 spans = [(3.5, 17.0, 3.5, 17.5),
@@ -1190,13 +1510,118 @@ def _generate_impl(render: bool):
             stranded = [i for i, led in enumerate(leds) if not on_board(led)]
             if stranded:
                 return {
-                    "error": f"LED {stranded[0] + 1} does not fit on this board shape — "
+                    "error": f"LED {stranded[0] + 1} does not fit on this board shape; "
                              "move it, remove it, or enlarge the shape"
                 }, 400
     except _GEOMETRY_ERRORS:
-        return {"error": "could not place the LEDs on this board — check for "
+        return {"error": "could not place the LEDs on this board; check for "
                           "missing or out-of-range x/y, rotation or advanced "
                           "offset values"}, 400
+
+    # Board-level CLK hookup: the 3-pad solder jumper (with a position the
+    # user may have dragged) or a direct trace to pin 9. Shape-checked here;
+    # whether the flag means anything is pcb.clk_info's call (no CLK unit or
+    # no pin 9 -> None, and every unit feeds from 3V3 as always).
+    clk_jumper, jpos, jrot = True, None, 0.0
+    jside, jvia = "front", True
+    jnodes, jv3nodes, jv3pin = (), (), None
+    raw_clk = params.get("clk")
+    try:
+        if isinstance(raw_clk, dict):
+            clk_jumper = bool(raw_clk.get("jumper", True))
+            jside = "back" if raw_clk.get("side") == "back" else "front"
+            jvia = bool(raw_clk.get("via", True))
+            jrot = float(raw_clk.get("rot", 0)) % 360
+            if raw_clk.get("x") is not None and raw_clk.get("y") is not None:
+                ex = pcb.OUTLINE_EXTENT
+                jpos = (max(ex[0], min(ex[2], float(raw_clk["x"]))),
+                        max(ex[1], min(ex[3], float(raw_clk["y"]))))
+
+            def _jbends(key: str) -> tuple:
+                return tuple(
+                    (max(0.0, min(20.32, float(n[0]))),
+                     max(0.0, min(20.32, float(n[1]))))
+                    for n in list(raw_clk.get(key) or [])[:8]
+                    if isinstance(n, (list, tuple)) and len(n) >= 2)
+
+            jnodes = _jbends("nodes")
+            jv3nodes = _jbends("v3nodes")
+            if str(raw_clk.get("v3pin", "")) in pcb.PIN_LABELS:
+                jv3pin = str(raw_clk["v3pin"])
+    except (TypeError, ValueError):
+        return {"error": "invalid clk parameters"}, 400
+    if any(led.clk for led in leds) and "9" not in pins:
+        return {
+            "error": "an LED is set to blink with the badge CLK, but "
+                     "connector pin 9 (CLK) is dropped; keep pin 9 or turn "
+                     "the blink option off"
+        }, 400
+    clk_i = None
+    try:
+        spec_clk = pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds,
+                                 clk_jumper=clk_jumper, jumper=jpos,
+                                 jumper_rot=jrot, jumper_side=jside,
+                                 jumper_via=jvia, jumper_nodes=jnodes,
+                                 jumper_v3nodes=jv3nodes,
+                                 jumper_v3pin=jv3pin)
+        clk_i = pcb.clk_info(spec_clk)
+        if clk_i is not None and clk_i["jumper"]:
+            # Backstop nudge, jumper edition: the canvas never drops it on a
+            # unit, a pad pair or off the board, but hand-crafted requests
+            # may. The jumper yields (units were placed first).
+            import math as _math
+
+            from shapely.geometry import Polygon as _JPoly
+            from shapely.geometry import box as _jbox
+            from shapely.ops import unary_union as _juu
+
+            def _jgeom(info):
+                quads = [_JPoly(q) for _lbl, q in pcb.jumper_copper_pieces(info)]
+                quads += [_jbox(*b) for b in pcb.jumper_caption_boxes(info)]
+                return _juu(quads)
+
+            unit_polys = [pcb.unit_poly(led, safe) for led in leds]
+            avoid = [_jbox(*pcb.PAD_PAIRS[k]["keepout"])
+                     for k in pcb.active_pairs(pins)]
+            avoid += [_jbox(*b) for b in pcb.caption_boxes(pins)]
+            solid = (outline_poly.buffer(-0.35) if outline_poly is not None
+                     else _jbox(*pcb.OUTLINE).buffer(-0.35))
+
+            def _jok(info):
+                geom = _jgeom(info)
+                return (solid.contains(geom)
+                        and all(geom.distance(p) >= 0.2 for p in unit_polys)
+                        and not any(geom.intersects(b) for b in avoid))
+
+            if not _jok(clk_i):
+                jx0, jy0, _ = clk_i["jumper"]
+                found = None
+                r = 0.5
+                while r <= 30.0 and found is None:
+                    for k in range(16):
+                        t = _math.radians(k * 22.5)
+                        probe = pcb.BadgeSpec(
+                            pins=pins, outline=outline_rings, leds=leds,
+                            clk_jumper=True, jumper_rot=jrot,
+                            jumper_side=jside, jumper_via=jvia,
+                            jumper_nodes=jnodes, jumper_v3nodes=jv3nodes,
+                            jumper_v3pin=jv3pin,
+                            jumper=(jx0 + r * _math.cos(t),
+                                    jy0 + r * _math.sin(t)))
+                        info = pcb.clk_info(probe)
+                        if info is not None and _jok(info):
+                            found = info
+                            break
+                    r += 0.5
+                if found is None:
+                    return {
+                        "error": "no room for the CLK jumper on this board; "
+                                 "move some LEDs or enlarge the shape"
+                    }, 400
+                clk_i = found
+                jpos = (found["jumper"][0], found["jumper"][1])
+    except _GEOMETRY_ERRORS:
+        return {"error": "could not place the CLK jumper; check its x/y"}, 400
 
     texts = []
     try:
@@ -1210,7 +1635,9 @@ def _generate_impl(render: bool):
             if font != "kicad" and font not in textpoly.FONTS:
                 font = "kicad"
             material = str(raw.get("material", "silk"))
-            if material not in pcb.ART_MATERIALS or font == "kicad":
+            # "cut" is art-only: letters cut through the board would drop
+            # their counters on the floor, so texts never get it.
+            if material not in ("silk", "copper", "glow", "bare") or font == "kicad":
                 material = "silk"  # the stroke font only exists as silkscreen
             tx0, ty0, tx1, ty1 = (0.8, 0.8, 19.5, 19.5)
             if outline_poly is not None:
@@ -1225,7 +1652,7 @@ def _generate_impl(render: bool):
     except (TypeError, ValueError, AttributeError):
         return {"error": "invalid text parameters"}, 400
 
-    # TTF texts become exact polygons up front — their real ink bounds drive
+    # TTF texts become exact polygons up front; their real ink bounds drive
     # the art-carving keepouts (the stroke-font width estimate would be wrong
     # for wide display faces). Index -> placed geometry.
     text_geoms: dict[int, object] = {}
@@ -1264,20 +1691,45 @@ def _generate_impl(render: bool):
                      if num in pins]
         # Per-face decor keepouts (pads + that face's LED units); vector text can
         # sit on either face, while image art stays front-only.
-        # The printed pin captions live on both silks — art keeps clear of them
+        # The printed pin captions live on both silks; art keeps clear of them
         # exactly like it keeps clear of the pads.
         captions = [RectKeepout(*b) for b in pcb.caption_boxes(pins)]
+        # The CLK jumper (pads, rail via + stub, the routed link to pin 9,
+        # and its CLK/3V3 labels) claims front-face room like a unit does;
+        # only its via barrel penetrates to the back.
+        jumper_decor: list = []
+        jumper_via_keep: list = []
+        jface = clk_i["side"] if clk_i is not None else "front"
+        if clk_i is not None and clk_i["jumper"]:
+            from shapely.geometry import Polygon as _KPoly
+            from shapely.ops import unary_union as _kuu
+
+            _jquads = [_KPoly(q) for _, q in pcb.jumper_copper_pieces(clk_i)]
+            for _jlink in (pcb.clk_link(leds, pins, safe, outline_rings,
+                                        clk_i),
+                           pcb.clk_v3_link(leds, pins, safe, outline_rings,
+                                           clk_i)):
+                if _jlink is not None and len(_jlink["pts"]) > 1:
+                    _jquads += [_KPoly(pcb._quad_seg(a, b, 1.1))
+                                for a, b in zip(_jlink["pts"],
+                                                _jlink["pts"][1:])]
+            jumper_decor = ([_GeomKeepout(_kuu(_jquads))]
+                            + [RectKeepout(*b)
+                               for b in pcb.jumper_caption_boxes(clk_i)])
+            jumper_via_keep = [CircleKeepout(v[0], v[1], 0.85)
+                               for v in (clk_i["via"], clk_i["v3via"]) if v]
         decor_base = {
             side: [CircleKeepout(x, y, 1.65) for x, y in kept_pads]
             + captions
-            + [_led_keepout(led, safe, pins, leds, outline_rings, side) for led in leds
-               if led.side == side]
+            + (jumper_decor if side == jface else jumper_via_keep)
+            + [_led_keepout(led, safe, pins, leds, outline_rings, side, clk_i)
+               for led in leds if led.side == side]
             + [_reverse_hole_keepout(led, safe) for led in leds
                if led.side != side and led.reverse]
             # "LED on the other side" puts that half of the unit on the far face,
             # with a via in each of its pads: art on this face has to clear it too.
-            + [_led_keepout(led, safe, pins, leds, outline_rings, side) for led in leds
-               if led.side != side and led.farled]
+            + [_led_keepout(led, safe, pins, leds, outline_rings, side, clk_i)
+               for led in leds if led.side != side and led.farled]
             # Through-hole LED pads penetrate both faces: far-side decor keeps
             # clear of the pad annuli (server parity with eraseArtKeepouts).
             + [CircleKeepout(x, y, r + 0.5)
@@ -1286,15 +1738,21 @@ def _generate_impl(render: bool):
             for side in ("front", "back")
         }
         bridges = pcb.unit_bridges(
-            pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds), safe
+            pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds,
+                          clk_jumper=clk_jumper, jumper=jpos,
+                          jumper_rot=jrot, jumper_side=jside,
+                          jumper_via=jvia, jumper_nodes=jnodes,
+                          jumper_v3nodes=jv3nodes,
+                          jumper_v3pin=jv3pin), safe
         )
         # A window has to keep clear of anything whose copper it would cut. A glow
         # window cuts both faces, so it avoids every unit. A bare window that opens
-        # one face only cuts that face, so it need only avoid units mounted there —
+        # one face only cuts that face, so it need only avoid units mounted there,
         # plus whatever crosses the board regardless (plated pads, routed holes, a
         # LED sitting on the far side). That is what lets a back-only window run
         # right under a part mounted on the front.
-        _window_base = ([CircleKeepout(x, y, 2.0) for x, y in kept_pads] + captions)
+        _window_base = ([CircleKeepout(x, y, 2.0) for x, y in kept_pads]
+                        + captions + jumper_via_keep)
 
         def _crossers(face: str) -> list:
             out: list = []
@@ -1304,7 +1762,7 @@ def _generate_impl(render: bool):
                 g = pcb.led_geometry(led)
                 if led.farled and not g["hole"] and "drill" not in pcb.PKG[g["pkg"]]:
                     out.append(_led_keepout(led, safe, pins, leds, outline_rings,
-                                            face))
+                                            face, clk_i))
                     continue
                 if led.reverse:
                     out.append(_reverse_hole_keepout(led, safe))
@@ -1315,10 +1773,12 @@ def _generate_impl(render: bool):
         def _face_keepouts(face: str) -> list:
             # The corridor fallback protects a unit's pour feed on BOTH
             # layers (its band survives in both fills), so a window on either
-            # face keeps off it no matter which side the unit is mounted on —
+            # face keeps off it no matter which side the unit is mounted on;
             # the canvas erases the same band from every window it draws.
             return (_window_base
-                    + [_led_keepout(led, safe, pins, leds, outline_rings, face)
+                    + (jumper_decor if face == jface else jumper_via_keep)
+                    + [_led_keepout(led, safe, pins, leds, outline_rings, face,
+                                    clk_i)
                        for led in leds if led.side == face]
                     + _crossers(face)
                     + [_window_corridor(led, safe) for i, led in enumerate(leds)
@@ -1351,7 +1811,7 @@ def _generate_impl(render: bool):
             bare_keepouts["back"].append(ring)
 
         # Front texts that put ink on the mask carve the art beneath them (their
-        # real ink bounds for TTF texts). Window-material texts ARE windows —
+        # real ink bounds for TTF texts). Window-material texts ARE windows;
         # they carve nothing.
         def _text_rect(ti: int, t: pcb.Text) -> RectKeepout:
             g = text_geoms.get(ti)
@@ -1369,118 +1829,13 @@ def _generate_impl(render: bool):
         }
         decor_of = {s: decor_base[s] + carve_rects[s] for s in ("front", "back")}
     except _GEOMETRY_ERRORS:
-        return {"error": "could not work out where the artwork may go — check "
+        return {"error": "could not work out where the artwork may go; check "
                           "the LED and text positions, rotations and sizes"}, 400
 
-    try:
-        art_meta = list(params.get("art", []))[:MAX_ART]
-    except TypeError:
-        return {"error": "invalid art parameters"}, 400
     text_keepouts = carve_rects["front"]
-    # (index, source, bare-window side, board face for silk/copper)
-    classified = []
+    # `classified` was built up front (art uploads read exactly once).
     try:
-        for i, meta in enumerate(art_meta):
-            # One "side" value drives everything: front/back place the ink
-            # (and open a one-sided bare window there); "through" opens the
-            # bare window on both faces with the ink on the front. A legacy
-            # explicit bare_side still wins if a client sends it.
-            raw_side = meta.get("side")
-            if raw_side not in ("front", "back", "through"):
-                raw_side = None  # absent/invalid: classic through window
-            window = str(meta.get("bare_side", ""))
-            if window not in ("through", "front", "back"):
-                window = raw_side if raw_side in ("front", "back") else "through"
-            art_side = "back" if raw_side == "back" else "front"
-            kind = str(meta.get("kind", "image"))
-            if kind in SHAPE_KINDS and kind != "image":
-                # A basic-shape art layer: exact vector geometry, no upload.
-                material = str(meta.get("material", "bare"))
-                if material not in pcb.ART_MATERIALS:
-                    material = "bare"
-                geom = _element_geometry(
-                    {"kind": kind, "cx": meta.get("cx", 10.16), "cy": meta.get("cy", 10.16),
-                     "w": meta.get("w", 10), "h": meta.get("h", 10),
-                     "rot": meta.get("rot", 0), "sides": meta.get("sides", 6)},
-                    None, None, 0.0,
-                )
-                if geom is not None and not geom.is_empty:
-                    if art_side == "back":
-                        # Mirror so it reads correctly from the back face.
-                        from shapely.affinity import scale as _mirror
-
-                        geom = _mirror(geom, xfact=-1, yfact=1,
-                                       origin=(float(meta.get("cx", 10.16)), 0))
-                    classified.append((i, {material: geom}, window, art_side))
-                continue
-            upload = request.files.get(f"art{i}")
-            if not upload or not upload.filename:
-                continue
-            rot = float(meta.get("rot", 0)) % 360
-            overrides = []
-            for ov in list(meta.get("overrides", []))[:12]:
-                mat = str(ov.get("material", "ignore"))
-                if mat not in (*pcb.ART_MATERIALS, "ignore"):
-                    mat = "ignore"
-                u = min(max(float(ov.get("u", 0.5)), 0.0), 1.0)
-                if art_side == "back":
-                    u = 1.0 - u  # the placed image is mirrored on the back
-                overrides.append((
-                    u,
-                    min(max(float(ov.get("v", 0.5)), 0.0), 1.0),
-                    mat,
-                ))
-            common = {
-                "cx": float(meta.get("cx", 10.16)),
-                "cy": float(meta.get("cy", 10.16)),
-                "width_mm": float(meta.get("w", 14)),
-                "rot": rot,
-                # Back-side art mirrors so it reads correctly from the back.
-                "flip": bool(meta.get("flip", False)) != (art_side == "back"),
-                "overrides": overrides,
-                "board": art_board,
-            }
-            if meta.get("mode") == "palette":
-                # Each palette color carries its own material assignment.
-                palette = []
-                for entry in list(meta.get("palette", []))[:MAX_PALETTE]:
-                    rgb = [min(max(int(v), 0), 255) for v in list(entry.get("rgb", []))[:3]]
-                    if len(rgb) != 3:
-                        continue
-                    mat = str(entry.get("material", "ignore"))
-                    if mat not in (*pcb.ART_MATERIALS, "ignore"):
-                        mat = "ignore"
-                    palette.append((tuple(rgb), mat))
-                if not palette:
-                    continue
-                mode_kw = {"mode": "palette", "palette": palette}
-            else:
-                material = str(meta.get("material", "silk"))
-                if material not in pcb.ART_MATERIALS:
-                    material = "silk"
-                mode_kw = {
-                    "mode": "threshold",
-                    "threshold": int(meta.get("threshold", 128)),
-                    "invert": bool(meta.get("invert", False)),
-                    "material": material,
-                }
-            data = _read_upload(f"art{i}")
-            if svgart.is_svg(data):
-                # Exact vector pipeline; the browser's raster render of the
-                # same SVG is the fallback for gradients etc.
-                try:
-                    _check_svg_complexity(data)
-                    classified.append((i, _svg_classify(data, **mode_kw, **common), window, art_side))
-                    continue
-                except Exception as exc:  # any parse issue: fall back to the raster render
-                    data = _read_upload(f"art{i}_raster")
-                    if data is None:
-                        if isinstance(exc, _TooComplex):
-                            raise
-                        raise ValueError("could not parse an SVG artwork layer") from None
-            classified.append((i, classify_image(data, **mode_kw, **common), window, art_side))
-
-        # Pass 1 — non-silk materials; their mask openings then carve silk.
+        # Pass 1: non-silk materials; their mask openings then carve silk.
         from shapely.geometry import box as sbox
         from shapely.ops import unary_union
 
@@ -1537,8 +1892,8 @@ def _generate_impl(render: bool):
 
             Each face's layer is carved by that face's own keepouts, so a
             through window hugs a unit's real copper on its mounting face
-            while keeping, on the far face, only what crosses the board —
-            the via, a routed hole, TH pad annuli — instead of a slab of
+            while keeping, on the far face, only what crosses the board
+            (the via, a routed hole, TH pad annuli) instead of a slab of
             pour (and, for bare, an unbroken mask island) shadowing the
             whole part from the other side.
             """
@@ -1596,14 +1951,17 @@ def _generate_impl(render: bool):
     spec = pcb.BadgeSpec(
         name=name, leds=leds, texts=texts, art=art_layers, mask_color=mask_color,
         finish=finish, pins=pins, outline=outline_rings, tenting=tenting,
+        clk_jumper=clk_jumper, jumper=jpos, jumper_rot=jrot,
+        jumper_side=jside, jumper_via=jvia, jumper_nodes=jnodes,
+        jumper_v3nodes=jv3nodes, jumper_v3pin=jv3pin,
     )
     # Via-less units pick their connector pad against the real copper fill so
     # the run cannot fence the pour's own pad onto an island. Refuse rather
     # than ship a board whose LED never lights.
     from dataclasses import replace as _dc_replace
 
-    # Dropping a connector pin is allowed — plenty of badges only populate the
-    # pair they use — but the LED circuits draw 3V3 and GND from those pads.
+    # Dropping a connector pin is allowed (plenty of badges only populate the
+    # pair they use), but the LED circuits draw 3V3 and GND from those pads.
     # With a rail gone there is nothing to light the LEDs, so say so instead
     # of shipping a board that can never work.
     missing = pcb.power_missing(pins)
@@ -1611,37 +1969,97 @@ def _generate_impl(render: bool):
         rail = " and ".join(missing)
         return {
             "error": f"No {rail} pin left on the connector, so the LEDs have "
-                     "nothing to run on — keep at least one "
+                     "nothing to run on; keep at least one "
                      + " and one ".join(missing) + " pin, or remove the LEDs"
         }, 400
 
     resolved, unroutable = pcb.resolve_novia(spec, safe)
     if unroutable:
         i = unroutable[0]
+        if leds[i].clk:
+            # The supply run: a front unit's clk_route, a back unit's
+            # novia_route (which carries the CLK run there). When it is the
+            # problem, blame it; a clean supply run with novia also set means
+            # the classic GND run below is the one that failed.
+            srun = pcb.clk_route(leds[i], pins, safe, leds,
+                                 outline=outline_rings, clk=clk_i)
+            if srun is None:
+                srun = pcb.novia_route(
+                    leds[i], pins, safe, leds, outline=outline_rings,
+                    term=pcb.novia_term(leds[i], leds, pins, safe, clk_i),
+                    clk=clk_i)
+            blame_clk = (srun is None or srun.get("tight")
+                         or not (leds[i].side != "back" and leds[i].novia))
+            if blame_clk:
+                if srun and srun.get("manual") and srun.get("tight"):
+                    return {
+                        "error": f"LED {i + 1}: a CLK trace bend runs too "
+                                 "close to other copper; drag it clear, or "
+                                 "select it and press Delete"
+                    }, 400
+                where = ("the CLK jumper"
+                         if clk_i is not None and clk_i["jumper"] else "pin 9")
+                return {
+                    "error": f"LED {i + 1}: its CLK supply trace has no "
+                             f"clear path to {where} (or it fences the power "
+                             "pour apart); move the LED"
+                             + (" or the jumper" if clk_i is not None
+                                and clk_i["jumper"] else "")
+                             + ", or turn its blink option off"
+                }, 400
         route = pcb.novia_route(
             leds[i], pins, safe, leds, outline=outline_rings,
-            term=pcb.novia_term(leds[i], leds, pins, safe))
+            term=pcb.novia_term(leds[i], leds, pins, safe, clk_i), clk=clk_i)
         if route and route.get("manual") and route.get("tight"):
             # Their own bends are the problem, so say that rather than blaming
             # the via setting they deliberately turned off.
             return {
                 "error": f"LED {i + 1}: a trace bend runs too close to other "
-                         "copper — drag it clear, or double-click it to remove"
+                         "copper; drag it clear, or select it and press "
+                         "Delete"
             }, 400
         if route and route.get("term"):
             # Same idea for a hand-picked destination: whether the run cannot
             # reach it or reaches it only by fencing the pour apart, the
-            # choice is the problem — name it instead of the via setting.
+            # choice is the problem; name it instead of the via setting.
             return {
-                "error": f"LED {i + 1}: no clear path to the chosen trace end — "
+                "error": f"LED {i + 1}: no clear path to the chosen trace end; "
                          "drag the endpoint somewhere else, or double-click "
                          "it to go back to the nearest pad"
             }, 400
         return {
             "error": f"LED {i + 1} cannot reach its power without a via on this "
-                     "board — switch its power via back on, move it, or enable "
+                     "board; switch its power via back on, move it, or enable "
                      "the other connector row"
         }, 400
+    if clk_i is not None and clk_i["jumper"]:
+        link = pcb.clk_link(leds, pins, safe, outline_rings, clk_i)
+        if link is not None and link.get("tight"):
+            return {
+                "error": "the CLK jumper cannot reach pin 9 cleanly; "
+                         + ("a bend on that trace runs too close to other "
+                            "copper; drag it clear or select it and press "
+                            "Delete"
+                            if link.get("manual") else
+                            "move the jumper (or the LEDs in the way) so "
+                            "its CLK pad has a clear path")
+            }, 400
+        v3l = pcb.clk_v3_link(leds, pins, safe, outline_rings, clk_i)
+        if v3l is not None and v3l.get("tight"):
+            return {
+                "error": "the jumper's 3V3 trace cannot reach a 3V3 pin "
+                         "cleanly; "
+                         + ("a bend on that trace runs too close to other "
+                            "copper; drag it clear or select it and press "
+                            "Delete"
+                            if v3l.get("manual") else
+                            "no clear path to the chosen 3V3 pin; drag the "
+                            "endpoint to the other one, or double-click it "
+                            "for the nearest"
+                            if v3l.get("term") else
+                            "move the jumper (or the LEDs in the way), or "
+                            "switch it back to feeding 3V3 through a via")
+            }, 400
     spec = _dc_replace(spec, leds=resolved)
     slug = _slug(name)
 

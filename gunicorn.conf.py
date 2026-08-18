@@ -3,13 +3,17 @@
 Worker processes, not threads, on purpose: every request already works in
 its own TemporaryDirectory and shells out to its own kicad-cli, so isolated
 processes make the remaining shared-state questions (font caches, the
-refill-interpreter memo) disappear by construction — and CPU-bound shapely/
+refill-interpreter memo) disappear by construction, and CPU-bound shapely/
 PIL work scales across cores instead of serializing on the GIL.
 """
 
 import os
 
-bind = f"0.0.0.0:{os.environ.get('PORT', '8000')}"
+# 0.0.0.0 here is the *container's* network namespace, not the host: what is
+# actually reachable is decided by the `ports` mapping in docker-compose.yml,
+# which publishes on 127.0.0.1. Running this config directly on a host (no
+# container) is the case that wants HOST=127.0.0.1.
+bind = f"{os.environ.get('HOST', '0.0.0.0')}:{os.environ.get('PORT', '8000')}"
 
 # 4 sync workers ≈ 4 users generating at the same instant; later arrivals
 # queue in the socket backlog rather than failing. Override per host with
@@ -27,7 +31,7 @@ graceful_timeout = 30
 
 # The worker heartbeat file lives in memory; on containers with slow or
 # throttled disk a /tmp heartbeat can miss and kill healthy workers.
-# Linux-only path — running this config on macOS (dev) falls back to the
+# Linux-only path: running this config on macOS (dev) falls back to the
 # default temp dir.
 if os.path.isdir("/dev/shm"):
     worker_tmp_dir = "/dev/shm"

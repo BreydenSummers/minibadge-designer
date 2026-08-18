@@ -42,7 +42,7 @@ SPECS = {
     ),
     # Units clamped hard into the corners of the safe region land on the
     # connector pad pairs; the pad backstop (the same one the webapp runs)
-    # must slide them clear — into the strip between the pairs.
+    # must slide them clear, into the strip between the pairs.
     "extremes": pcb.BadgeSpec(
         name="drc-extreme",
         leds=[
@@ -55,7 +55,7 @@ SPECS = {
         ],
     ),
     # Inline rows: a front one along the bottom, a rotated back one up the
-    # side (clear of the top-left pad pair — direct specs place responsibly).
+    # side (clear of the top-left pad pair; direct specs place responsibly).
     "inline": pcb.BadgeSpec(
         name="drc-inline",
         leds=[
@@ -71,7 +71,7 @@ SPECS = {
         art=[pcb.ArtLayer("glow", [(0.5, 8.0, 19.3, 4.0)])],
     ),
     # Custom outline: top-row-only badge with a tab sticking 4 mm out the
-    # top, art in the tab, and an LED — pours must follow the shape.
+    # top, art in the tab, and an LED; pours must follow the shape.
     "tab": pcb.BadgeSpec(
         name="drc-tab",
         pins=("1", "2", "7", "8"),
@@ -84,7 +84,7 @@ SPECS = {
     ),
     # An oversized board well past the old 40 x 44 mm cap (85 x 95 mm),
     # standard connector strips in the middle, art, windows, and LED units
-    # far outside the original square — plus a unit tucked into the top
+    # far outside the original square, plus a unit tucked into the top
     # connector strip between the two pad pairs.
     "big": pcb.BadgeSpec(
         name="drc-big",
@@ -222,8 +222,8 @@ def test_wand_fringe_design_passes_drc(tmp_path):
 
 
 def test_exact_svg_badge_passes_drc(tmp_path):
-    """A badge built entirely from SVG vectors — traced board outline plus
-    multi-material exact art with a glow window — must be DRC-clean."""
+    """A badge built entirely from SVG vectors (traced board outline plus
+    multi-material exact art with a glow window) must be DRC-clean."""
     from minibadge_designer.webapp import app
 
     shape_svg = (
@@ -319,3 +319,50 @@ def test_artwork_around_through_hole_led_passes_drc(tmp_path):
              "-o", str(report), str(board)],
             capture_output=True, text=True, timeout=120, check=False)
         assert r.returncode == 0, f"{size} DRC:\n{report.read_text()}"
+
+
+@pytest.mark.parametrize("hookup",
+                         ["jumper", "jumper-back", "jumper-back-traced",
+                          "trace"])
+def test_a_blinking_badge_passes_drc_in_both_hookup_styles(tmp_path, hookup):
+    """A design running LEDs off the badge clock ships DRC-clean, whichever
+    hookup the user picked.
+
+    CLK introduces a whole class of copper no other case contains: a second
+    supply net routed as traces across the 3V3 pour, the 3-pad solder jumper,
+    a rail via, and a routed link to pin 9. Any clearance, short, or
+    unconnected-item defect in that class is exactly what the external oracle
+    exists to catch. Built through the webapp path (never hand-fed to
+    generate_pcb): de-confliction lives there. Off-default on purpose: a
+    rotated 0603 front blinker, a back-side blinker (no 3V3 via), and a
+    via-less bystander sharing the board.
+    """
+    from minibadge_designer.webapp import app
+
+    params = {
+        "name": f"clk-{hookup}",
+        "leds": [
+            {"x": 5.5, "y": 8, "color": "red", "clk": True, "rot": 90,
+             "size": "0603"},
+            {"x": 14.5, "y": 12, "color": "blue", "side": "back", "clk": True},
+            {"x": 15, "y": 5.5, "color": "green", "novia": True},
+        ],
+        "texts": [],
+        "clk": {"jumper": hookup != "trace",
+                "side": "back" if hookup.startswith("jumper-back") else "front",
+                "via": hookup != "jumper-back-traced"},
+    }
+    client = app.test_client()
+    resp = client.post("/generate", data={"params": json.dumps(params)})
+    assert resp.status_code == 200, resp.data
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    slug = f"clk-{hookup}"
+    board = tmp_path / f"{slug}.kicad_pcb"
+    board.write_bytes(zf.read(f"{slug}/{slug}.kicad_pcb"))
+    (tmp_path / f"{slug}.kicad_pro").write_bytes(zf.read(f"{slug}/{slug}.kicad_pro"))
+    result = subprocess.run(
+        [KICAD_CLI, "pcb", "drc", "--severity-all", "--exit-code-violations",
+         "-o", str(tmp_path / "drc.txt"), str(board)],
+        capture_output=True, text=True, timeout=120, check=False,
+    )
+    assert result.returncode == 0, f"DRC violations:\n{(tmp_path / 'drc.txt').read_text()}"

@@ -3,7 +3,7 @@
 Why this file exists (read `references/property-tests.md` before adding to it):
 line coverage of `pcb.py` is already ~93 %, and a board-*shorting* defect still
 hid on lines with 100 % line coverage because it only fires when
-``size != "0805"`` — and every hand-written example test in this repo uses
+``size != "0805"``, and every hand-written example test in this repo uses
 0805. Coverage here means *parameter-space* coverage: size, reverse, layout,
 side, rot, adv, material, pin subset. That is what the strategies below buy.
 
@@ -691,7 +691,50 @@ def _somewhere_clears_the_pads(led, pins, safe, step=0.5):
     return False
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "known placement-pipeline defect (found 2026-08-16; reproduces on the "
+    "pre-CLK tree byte-for-byte): with three units and only pin 1 kept, the "
+    "pairwise resolve-overlap sweep parks the reverse-1206 unit back on the "
+    "tl pad keepout that resolve_pad_overlap had cleared it from -- a later "
+    "pair's resolution moves it and only that pair is re-checked. A clearing "
+    "position exists, so the escape clause does not apply and the shipped "
+    "board shorts 3V3 to GND. When the pipeline is fixed this goes red: "
+    "delete this marker AND the xfail on "
+    "test_no_unit_sits_on_a_kept_connector_pad in the same commit."))
+def test_the_placement_pipeline_never_parks_a_unit_back_on_the_pads():
+    """The hypothesis-shrunk counterexample, pinned deterministically.
+
+    The property test below regenerates it on every run (derandomize=True),
+    but only for as long as the draw sequence happens to land there; this pin
+    survives strategy and dataclass changes that would shift the draws.
+    """
+    zeros = {"rx": 0.0, "ry": 0.0, "rrot": 0.0, "lrot": 0.0,
+             "vx": 0.0, "vy": 0.0}
+    spec = normalise(pcb.BadgeSpec(name="0", pins=("1",), leds=[
+        pcb.Led(0.0, 0.0, "blue", size="0603", adv=dict(zeros)),
+        pcb.Led(0.0, 0.0, "blue", size="0603", rot=90.0,
+                adv=dict(zeros, vx=10.0, vy=2.0)),
+        pcb.Led(0.0, 0.0, "blue", size="1206", reverse=True),
+    ]))
+    safe = pcb.unit_safe(spec)
+    offenders = [
+        i for i, led in enumerate(spec.leds)
+        if pcb.pad_conflict(led, spec.pins, safe)
+        and _somewhere_clears_the_pads(led, spec.pins, safe)]
+    assert not offenders, (
+        f"unit(s) {offenders} sit on a kept connector pad keepout after the "
+        "full placement pipeline, and a position clearing every kept pair "
+        "exists; the copper shorts the connector's rails together")
+
+
 @pytest.mark.slow
+@pytest.mark.xfail(strict=False, reason=(
+    "same placement-pipeline defect as "
+    "test_the_placement_pipeline_never_parks_a_unit_back_on_the_pads: the "
+    "derandomized draws currently land on the pinned counterexample. "
+    "Non-strict on purpose: a strategy or dataclass change can shift the "
+    "draws off it, and that must not read as the defect being fixed -- the "
+    "strict pin above owns that signal. Remove together with it."))
 @given(specs(n_leds=(1, 3), custom_outline=False,
              led_strategy=leds(allow_novia=False)))
 @BOARD

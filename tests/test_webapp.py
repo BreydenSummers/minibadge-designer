@@ -335,7 +335,7 @@ _UNROUTABLE_DESIGNS = {
         for i in range(3)
     ],
     # (c) The same boxed row, but the first unit's trace end was hand-picked.
-    #     Branch: "no clear path to the chosen trace end" — the refusal has
+    #     Branch: "no clear path to the chosen trace end"; the refusal has
     #     to blame the choice, not the via setting the user turned off on
     #     purpose.
     "chosen-end-blocked": [
@@ -415,8 +415,8 @@ def test_switching_the_via_back_on_makes_the_same_design_downloadable(
 @pytest.mark.webapp
 def test_a_chosen_trace_end_rides_the_request_and_garbage_ones_are_sanitized(
         client):
-    """The term field crosses HTTP intact — the board's run really ends on
-    the chosen pad — while malformed or forbidden choices degrade to the
+    """The term field crosses HTTP intact (the board's run really ends on
+    the chosen pad), while malformed or forbidden choices degrade to the
     automatic route: a hostile payload gets a sane board, never a 500 and
     never a trace landed on copper that cannot power it."""
     from minibadge_designer import pcb as _pcb
@@ -492,7 +492,7 @@ def test_internal_trace_bends_ride_the_request_into_the_shipped_copper(client):
 
 
 def test_smoothing_strength_and_off(client):
-    # Full-bleed disc (Ø = width = 20 mm) so it reaches all four pad plates —
+    # Full-bleed disc (Ø = width = 20 mm) so it reaches all four pad plates:
     # no bridges, whose round caps would add diagonal edges of their own.
     img = Image.new("RGB", (120, 120), "white")
     ImageDraw.Draw(img).ellipse((0, 0, 119, 119), fill="black")
@@ -609,7 +609,7 @@ def test_image_shape_outline(client):
 
 def test_custom_outline_composes_elements(client):
     # Compose a board from parts: a big circle, a star poking out the right,
-    # a hole cut through the middle, and an image silhouette part — the
+    # a hole cut through the middle, and an image silhouette part: the
     # outline must be one polygon containing all adds minus the cut.
     img = Image.new("RGB", (100, 100), "white")
     ImageDraw.Draw(img).rectangle((0, 0, 99, 99), fill="black")
@@ -686,6 +686,272 @@ def test_cut_only_carves_standard_square(client):
     assert 7.0 < min(hx) and max(hx) < 13.3  # the Ø6 hole
 
 
+# ---------------------------------------------------------------------------
+# Cut-material artwork.
+#
+# "cut" is the one art material that is not ink on a layer: it is the absence
+# of board.  Those regions are subtracted from the outline *before* the
+# connector-pad tabs are unioned in, so a fab routs a real hole through
+# copper, mask and laminate while the pads keep the material that holds them.
+# ---------------------------------------------------------------------------
+def _routed_board(board_text):
+    """The shape a fab would rout: outer Edge.Cuts contour minus its holes.
+
+    Contours are read through the public ``Board.graphics``; walking the
+    s-expression children by name here (rather than borrowing invariants'
+    private ``_kid``/``_edge_polygon``) keeps this working when those get
+    renamed.
+    """
+    from shapely.geometry import Polygon
+
+    from minibadge_designer import pcb
+
+    board = invariants.assert_parses(board_text)
+    rings = []
+    for g in board.graphics("Edge.Cuts"):
+        if g[0] != "gr_poly":
+            continue
+        pts = next(c for c in g if isinstance(c, list) and c and c[0] == "pts")
+        rings.append(Polygon([(float(p[1]) - pcb.ORIGIN, float(p[2]) - pcb.ORIGIN)
+                              for p in pts[1:]]))
+    assert rings, "no gr_poly contour on Edge.Cuts"
+    outer = max(rings, key=lambda p: p.area)
+    for ring in rings:
+        if ring is not outer:
+            outer = outer.difference(ring)
+    return outer
+
+
+def _generated_board(client, params, slug, files=None):
+    data = {"params": json.dumps(params), **(files or {})}
+    resp = client.post("/generate", data=data, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    return zf.read(f"{slug}/{slug}.kicad_pcb").decode()
+
+
+_HEX30 = {"mode": "custom", "elements": [
+    {"kind": "hex", "op": "add", "cx": 10.16, "cy": 10.16, "w": 30,
+     "rot": 0, "sides": 6}]}
+
+
+@pytest.mark.parametrize(
+    "shape, layer, upload, hole_probe, solid_probe",
+    [
+        # The default square, a front circle in the middle.
+        (None,
+         {"kind": "circle", "material": "cut", "side": "front",
+          "cx": 10.16, "cy": 10.16, "w": 7, "h": 7, "rot": 0},
+         False, (10.16, 10.16), (10.16, 5.66)),
+        # Nothing about the rule is special to a circle, to the front face, to
+        # an unrotated layer, or to the standard square: a rotated polygon on
+        # the BACK of a custom hex outline cuts exactly the same way.
+        (_HEX30,
+         {"kind": "hex", "sides": 6, "material": "cut", "side": "back",
+          "cx": 6.5, "cy": 13.0, "w": 6, "h": 6, "rot": 25},
+         False, (6.5, 13.0), (6.5, 17.4)),
+        # An UPLOADED bitmap reaches the cut through a different pipeline
+        # (threshold -> pixel grid -> merged rects) than the vector shapes
+        # above.  Both cases passed while that pipeline read the wrong
+        # material key, which is what put this case here.
+        (None,
+         {"kind": "image", "material": "cut", "side": "front", "mode": "threshold",
+          "threshold": 128, "invert": False, "cx": 10.16, "cy": 10.16, "w": 8},
+         True, (10.16, 10.16), (10.16, 6.0)),
+    ],
+    ids=["square-circle-front", "hex-outline-polygon-back-rotated",
+         "uploaded-bitmap-threshold"],
+)
+def test_art_assigned_the_cut_material_is_routed_out_of_the_board(
+        client, shape, layer, upload, hole_probe, solid_probe):
+    # If this breaks the fab ships a solid badge where the user drew a
+    # cut-out (or, worse, routs one somewhere else).
+    from shapely.geometry import Point
+
+    params = _params(name="cut", leds=[], art=[layer])
+    if shape is not None:
+        params["shape"] = shape
+    files = {"art0": (io.BytesIO(_logo_bytes()), "cut.png")} if upload else None
+    board = _routed_board(_generated_board(client, params, "cut", files))
+    assert not board.contains(Point(*hole_probe)), (
+        f"{hole_probe} is under the cut layer but is still solid board; "
+        "the cut-out was not routed")
+    assert board.contains(Point(*solid_probe)), (
+        f"{solid_probe} is clear of the cut layer but is not board; the cut "
+        "removed more than the user drew")
+
+
+def test_the_previewed_outline_carries_the_cut_the_board_is_routed_with(client):
+    # The preview is the only thing the user sees before ordering.  A hole in
+    # the canvas that the fab does not rout (or the reverse) is a lie that
+    # costs a board run, and /outline and /generate reach it by different
+    # call paths.
+    from shapely.geometry import Polygon
+
+    layer = {"kind": "star", "material": "cut", "side": "front",
+             "cx": 10.16, "cy": 10.16, "w": 9, "h": 9, "rot": 15}
+    params = _params(name="cut", leds=[], art=[layer], shape=_HEX30)
+
+    resp = client.post(
+        "/outline",
+        data={"params": json.dumps({"shape": _HEX30, "art": [layer]})},
+        content_type="multipart/form-data",
+    )
+    data = resp.get_json()
+    assert data["rings"], "preview returned no outline at all"
+    assert data["cutIgnored"] is False, (
+        "the preview reported this cut as having no effect, but it lands "
+        "in the middle of the board")
+    previewed = Polygon(data["rings"][0], data["rings"][1:])
+    routed = _routed_board(_generated_board(client, params, "cut"))
+
+    # Agreement, not coordinates: whatever the shapes are, they must be the
+    # same shape.
+    disagreement = previewed.symmetric_difference(routed).area
+    assert disagreement < 1e-3 * routed.area, (
+        f"preview and routed board disagree over {disagreement:.4f} mm^2; "
+        "the canvas is not showing the board that would be made")
+
+
+def test_a_cut_never_removes_the_board_under_a_kept_connector_pad(client):
+    # The pads are how the badge mounts to its host.  A cut is allowed to eat
+    # the middle of the board, but the tab a kept pad pair stands on is
+    # unioned back in afterwards and must survive a cut aimed straight at it.
+    from shapely.geometry import Point
+
+    from minibadge_designer import pcb
+
+    kept = ["1", "2", "9", "10"]  # a subset: dropped pairs claim no tab
+    aimed = [pcb.PAD_PAIRS[pair]["plate"] for pair in pcb.active_pairs(kept)]
+    art = [
+        # one cut that must work, so a board where cuts do nothing at all
+        # cannot pass this test...
+        {"kind": "circle", "material": "cut", "side": "front",
+         "cx": 10.16, "cy": 10.16, "w": 8, "h": 8, "rot": 0},
+        # ...and one deliberately centred on every kept pad tab, which must
+        # not.
+        *[{"kind": "circle", "material": "cut", "side": "front",
+           "cx": (x0 + x1) / 2, "cy": (y0 + y1) / 2, "w": 4, "h": 4, "rot": 0}
+          for x0, y0, x1, y1 in aimed],
+    ]
+    params = _params(name="cut", leds=[], pins=kept, art=art)
+    board = _routed_board(_generated_board(client, params, "cut"))
+
+    assert not board.contains(Point(10.16, 10.16)), (
+        "the middle cut was not routed, so this test would pass even if cuts "
+        "were ignored entirely")
+    pairs = pcb.active_pairs(kept)
+    assert len(pairs) >= 2, (
+        f"pins {kept} were expected to keep several pad pairs, got {pairs}; "
+        "with none kept the loop below would assert nothing at all")
+    for pair in pairs:
+        x0, y0, x1, y1 = pcb.PAD_PAIRS[pair]["plate"]
+        centre = Point((x0 + x1) / 2, (y0 + y1) / 2)
+        assert board.contains(centre), (
+            f"a cut removed the board under kept pad pair {pair}; the badge "
+            "cannot be soldered to its host")
+
+
+@pytest.mark.parametrize(
+    "shape, cut_w",
+    [
+        # Room left over: the unit is expected to be relocated onto board.
+        (_HEX30, 8.0),
+        # A Ø8 hole in the 20 mm square leaves only ~6 mm bands, too narrow
+        # for a unit anywhere: the only honest answer left is a refusal.
+        (None, 8.0),
+    ],
+    ids=["board-has-room-elsewhere", "board-has-no-room-left"],
+)
+def test_a_unit_is_never_shipped_standing_on_a_cut(client, shape, cut_w):
+    # Two outcomes are acceptable — move the unit onto solid board, or refuse
+    # the download naming it.  The third, shipping a board whose pads hang
+    # over a routed hole, passes checkout and fails at the fab.
+    from shapely.geometry import Point
+
+    cut = {"kind": "circle", "material": "cut", "side": "front",
+           "cx": 10.16, "cy": 10.16, "w": cut_w, "h": cut_w, "rot": 0}
+    params = _params(name="cut", art=[cut],
+                     leds=[{"x": 10.16, "y": 10.16, "side": "back", "color": "red"}])
+    if shape is not None:
+        params["shape"] = shape
+
+    resp = client.post("/generate", data={"params": json.dumps(params)},
+                       content_type="multipart/form-data")
+    if resp.status_code != 200:
+        assert "LED 1" in resp.get_json()["error"], (
+            "the refusal must name the unit so the UI can point at it")
+        return
+
+    text = zipfile.ZipFile(io.BytesIO(resp.data)).read("cut/cut.kicad_pcb").decode()
+    board = _routed_board(text)
+    parsed = invariants.assert_parses(text)
+    unit_pads = [p for p in parsed.pads if p.ref and p.ref[0] in ("D", "R")]
+    assert unit_pads, "no unit pads on a board that was accepted with an LED"
+    for pad in unit_pads:
+        assert board.contains(Point(pad.x, pad.y)), (
+            f"pad {pad.ref}.{pad.num} sits over the routed cut-out; the unit "
+            "was shipped standing on a hole")
+
+
+@pytest.mark.parametrize(
+    "cx, cy, w",
+    [
+        (17.7, 18.6, 2.0),   # wholly inside a kept pad pair's tab
+        (60.0, 60.0, 4.0),   # nowhere near the board
+    ],
+    ids=["under-a-pad-tab", "off-the-board"],
+)
+def test_the_preview_says_so_when_a_cut_removes_nothing(client, cx, cy, w):
+    # Otherwise the hole the canvas drew while dragging simply closes itself
+    # again on the server's answer, with no reason given, and the user is left
+    # dragging a layer that cannot work where they are putting it.
+    layer = {"kind": "circle", "material": "cut", "side": "front",
+             "cx": cx, "cy": cy, "w": w, "h": w, "rot": 0}
+    resp = client.post(
+        "/outline",
+        data={"params": json.dumps({"shape": _HEX30, "art": [layer]})},
+        content_type="multipart/form-data",
+    )
+    assert resp.get_json()["cutIgnored"] is True, (
+        "a cut that changes nothing about the outline was reported as if it "
+        "had worked")
+
+
+def test_the_readme_tells_the_fab_about_routed_cutouts(client):
+    # The README is what a fab customer reads. A cut-through art layer is a
+    # routing operation, not artwork -- a board that quietly arrives with a
+    # hole in it, undocumented, is a surprise at quoting time.
+    layer = {"kind": "circle", "material": "cut", "side": "front",
+             "cx": 10.16, "cy": 10.16, "w": 6, "h": 6, "rot": 0}
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps(_params(name="cut", leds=[], art=[layer]))},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200, resp.get_json()
+    readme = zipfile.ZipFile(io.BytesIO(resp.data)).read("cut/README.txt").decode()
+
+    summary = next(line for line in readme.splitlines() if line.startswith("Generated by"))
+    assert "cutout" in summary, (
+        f"the board summary never mentions the hole that was routed: {summary!r}")
+    assert "Cut through board" in readme, (
+        "the artwork-materials section documents every material except the one "
+        "that removes the board")
+
+    # A board with no cut must not claim one.
+    plain = client.post(
+        "/generate",
+        data={"params": json.dumps(_params(name="cut", leds=[], art=[]))},
+        content_type="multipart/form-data",
+    )
+    plain_readme = zipfile.ZipFile(io.BytesIO(plain.data)).read("cut/README.txt").decode()
+    plain_summary = next(line for line in plain_readme.splitlines()
+                         if line.startswith("Generated by"))
+    assert "cutout" not in plain_summary, (
+        f"a board with no cut advertises one: {plain_summary!r}")
+
+
 def test_font_file_served_and_unknown_404(client):
     resp = client.get("/fonts/archivo.ttf")
     assert resp.status_code == 200
@@ -705,7 +971,7 @@ def test_index_lists_fonts(client):
 
 
 def test_ttf_texts_all_materials(client):
-    # One text per material, front and back — TTF texts become gr_poly art:
+    # One text per material, front and back. TTF texts become gr_poly art:
     # silk on F/B.SilkS, copper opens that face's mask, bare opens both,
     # glow only cuts the pours. The KiCad-font text stays a gr_text.
     params = _params(
@@ -771,7 +1037,7 @@ def test_unknown_font_key_falls_back_to_stroke(client):
 
 def test_copper_islands_inside_windows_survive(client):
     # Copper art enclosed by a bare window (a skull's gold eyes) becomes an
-    # isolated pour island — it must stay in the fill, and the zone must tell
+    # isolated pour island; it must stay in the fill, and the zone must tell
     # KiCad's refill to keep it (island_removal_mode 1).
     img = Image.new("RGB", (120, 120), (255, 220, 0))       # copper background
     d = ImageDraw.Draw(img)
@@ -828,7 +1094,7 @@ def test_surface_finish_in_readme(client):
 
 def test_shape_art_layer_and_one_sided_bare(client):
     # A basic-shape art layer needs no upload; a bare layer with
-    # bare_side=back opens ONLY the back mask and only cuts the back pour —
+    # bare_side=back opens ONLY the back mask and only cuts the back pour;
     # the front keeps its copper, so the window may sit over a front-side part.
     params = _params(
         name="winback",
@@ -986,7 +1252,7 @@ def test_silk_carved_by_copper_openings(client):
 def test_a_window_leaves_only_board_crossing_copper_on_a_units_far_face(client, material):
     # A back-mounted inline unit under a full-coverage through window. The
     # window used to be carved around the WHOLE unit on both faces, so the
-    # front pour survived as a dead slab shadowing the part — plainly visible
+    # front pour survived as a dead slab shadowing the part, plainly visible
     # through a bare window or a translucent mask, and connected to nothing
     # the front layer needs. Only copper that actually crosses the board (the
     # via, fed by its thin perimeter bridge) has any business on that face,
@@ -1012,23 +1278,23 @@ def test_a_window_leaves_only_board_crossing_copper_on_a_units_far_face(client, 
         .read("farface/farface.kicad_pcb").decode())
     from shapely.geometry import Point
 
-    # Probe the res_in PAD center — the one spot where far-face shadow pour
+    # Probe the res_in PAD center: the one spot where far-face shadow pour
     # could actually ship. Calibrated on a broken build (both faces carved by
     # the back keepouts): at 1206 the pad keepouts leave gaps, so the shadow
     # fractures and the floating-copper filter already drops every fragment
-    # except the one touching the via anchor — the res_in/via piece. Probes
+    # except the one touching the via anchor, the res_in/via piece. Probes
     # at the part bodies or the other pads read False on broken code too
     # (measured; the first two drafts of this test survived their mutant).
     # Unit anchor (12, 10), inline 1206: res_in pad center (4.7875, 10).
     front = list(board.emitted_fills("F.Cu"))
-    assert front, ("the front pour vanished entirely — that is a missing "
+    assert front, ("the front pour vanished entirely: that is a missing "
                    "3V3 plane, not a well-carved window")
     spot = Point(4.7875, 10.0)
     assert not any(p.contains(spot) for p in front), (
         f"the {material} window left front pour at ({spot.x}, {spot.y}), "
-        "shadowing a unit that is mounted on the back — dead copper the "
+        "shadowing a unit that is mounted on the back: dead copper the "
         "user sees straight through their window")
-    # Contrast: the unit's own face keeps the pour hugging its cathode pad —
+    # Contrast: the unit's own face keeps the pour hugging its cathode pad;
     # that copper is the LED's ground connection, not a shadow.
     pad = Point(13.5375, 10.0)
     assert any(p.contains(pad) for p in board.emitted_fills("B.Cu")), (
@@ -1038,7 +1304,7 @@ def test_a_window_leaves_only_board_crossing_copper_on_a_units_far_face(client, 
 
 def test_a_far_side_led_leaves_no_ghost_pads_on_either_face(client):
     # "LED on the other side" splits the unit's copper across the board, but
-    # the window keepout still claimed the WHOLE footprint on BOTH faces —
+    # the window keepout still claimed the WHOLE footprint on BOTH faces,
     # so a window left a pad-shaped slab of pour where the LED's pads used
     # to be on the resistor face (only two via barrels live there), and a
     # resistor-shaped one on the LED face where no resistor is. The keepout
@@ -1066,26 +1332,26 @@ def test_a_far_side_led_leaves_no_ghost_pads_on_either_face(client):
         .read("ghost/ghost.kicad_pcb").decode())
     # Back inline farled unit at (10, 10): LED pads cross to the front,
     # resistor stays on the back. Probe inside each half's OLD footprint on
-    # the face it left — off the via octagons, so only ghost copper answers.
+    # the face it left, off the via octagons, so only ghost copper answers.
     back = list(board.emitted_fills("B.Cu"))
     front = list(board.emitted_fills("F.Cu"))
-    assert back and front, "a pour vanished entirely — that is a missing plane"
+    assert back and front, "a pour vanished entirely: that is a missing plane"
     ghost_pad = Point(11.025, 10.95)   # led_k pad room, resistor face (B)
     assert not any(p.contains(ghost_pad) for p in back), (
         "the window left a pad-shaped slab on the resistor face where the "
-        "LED's pads used to be — only their via barrels live there")
+        "LED's pads used to be; only their via barrels live there")
     ghost_res = Point(4.725, 10.0)     # res_in pad room, LED face (F)
     assert not any(p.contains(ghost_res) for p in front), (
-        "the window left resistor-shaped pour on the LED face — the "
+        "the window left resistor-shaped pour on the LED face: the "
         "resistor never crossed the board")
     # Contrast: the GND collar around the cathode's via-in-pad on the
     # resistor face is that LED's ground connection and must survive. The
-    # probe sits 0.38 mm out — just past the 0.35 mm barrel, inside the
+    # probe sits 0.38 mm out, just past the 0.35 mm barrel, inside the
     # collar the keepout leaves (via radius + the 0.2 mm netclass minimum,
     # less the window's 0.1 mm registration expansion).
     collar = Point(11.405, 10.0)
     assert any(p.contains(collar) for p in back), (
-        "the window ate the pour collar around the cathode's via-in-pad — "
+        "the window ate the pour collar around the cathode's via-in-pad: "
         "the LED ships wired to nothing")
 
 
@@ -1094,8 +1360,8 @@ def test_a_far_side_led_without_its_power_via_still_downloads(client):
     # "No power via" plus "LED on the other side", under a window: the GND
     # contact on the resistor face is just the via-in-pad collar, tied to the
     # plane by its perimeter bridge. resolve_novia's first pass judged the
-    # fill WITHOUT bridges, saw an isolated collar, and refused the download
-    # — 78 of 100 reasonable placements 400'd while the 2D preview showed a
+    # fill WITHOUT bridges, saw an isolated collar, and refused the download:
+    # 78 of 100 reasonable placements 400'd while the 2D preview showed a
     # working route. The pass now unions the unit's bridge, like pass two
     # always did.
     params = _params(
@@ -1121,7 +1387,7 @@ def test_a_far_side_led_without_its_power_via_still_downloads(client):
         art=[pcb.ArtLayer("bare", rects=[(2.0, 2.0, 16.0, 16.0)])])
     _leds, bad = pcb.resolve_novia(broken)
     assert bad == [0], (
-        "a genuinely stranded no-power-via unit slipped past resolve_novia — "
+        "a genuinely stranded no-power-via unit slipped past resolve_novia: "
         "the user downloads a board whose LED is wired to nothing")
 
 
@@ -1168,7 +1434,7 @@ def _mask_openings(board, layer):
 
 def test_a_bridge_crossing_a_window_stays_under_soldermask(client):
     # The perimeter bridge is a hairline of copper across the window, and the
-    # mask used to open right over it — the trace shipped plated bare, a
+    # mask used to open right over it: the trace shipped plated bare, a
     # corrosion and short hazard no fab leaves on purpose, and the exposed
     # gold streak the user reported in the 3D view. The window's mask opening
     # now keeps a dam of mask over every bridge; the copper cut underneath is
@@ -1183,18 +1449,18 @@ def test_a_bridge_crossing_a_window_stays_under_soldermask(client):
     dam = Point(2.37, 10.0)
     win = Point(2.37, 8.5)
     assert any(p.contains(win) for p in openings), (
-        "the window fails to open the mask even beside the bridge — that is "
+        "the window fails to open the mask even beside the bridge: that is "
         "a missing window, not a mask dam")
     assert not any(p.contains(dam) for p in openings), (
-        "the mask opens right over the perimeter bridge — its copper ships "
+        "the mask opens right over the perimeter bridge: its copper ships "
         "plated bare across the window")
 
 
 @pytest.mark.parametrize("tenting", [True, False])
 def test_the_via_keeps_its_mask_cap_only_while_the_board_is_tented(client, tenting):
     # Tenting is a board-wide fab option (it lives with mask color and finish
-    # in the Shape panel): tented vias keep soldermask over their annulus —
-    # including a cap where a window crosses them — while exposed vias plate
+    # in the Shape panel): tented vias keep soldermask over their annulus
+    # (including a cap where a window crosses them), while exposed vias plate
     # bare and say so in the file with KiCad 9's per-via `(tenting none)`.
     from shapely.geometry import Point
 
@@ -1211,7 +1477,7 @@ def test_the_via_keeps_its_mask_cap_only_while_the_board_is_tented(client, tenti
         "an exposed-vias board must open the window over the via annulus")
     assert ("(tenting none)" in text) == (not tenting), (
         "(tenting none) must be written exactly when the board opts out of "
-        "tenting — KiCad's default is tented, so silence means covered")
+        "tenting: KiCad's default is tented, so silence means covered")
 
 
 def test_texts_pass_through_and_sanitize(client):
@@ -1235,7 +1501,7 @@ def test_texts_pass_through_and_sanitize(client):
 
 def test_image_cuts_override_connector_strips(client):
     # A narrow vertical bar silhouette: the outline must follow the bar plus
-    # small pad plates — NOT full-width connector strips. The area between a
+    # small pad plates, NOT full-width connector strips. The area between a
     # pad plate and the bar (old strip territory) must be empty board-less
     # space, and the bar reaches the pad rows via bridges.
     img = Image.new("RGB", (100, 260), "white")
@@ -1264,7 +1530,7 @@ def test_image_cuts_override_connector_strips(client):
     # ...the bar present in the middle...
     assert poly.contains(Point(10.16, 10.0))
     # ...but the gaps between the plates and the bar (old full-width strip
-    # territory) are NOT solid board any more — at most a thin bridge
+    # territory) are NOT solid board any more: at most a thin bridge
     # crosses them, never the whole band.
     from shapely.geometry import box as sbox
 
@@ -1276,7 +1542,7 @@ def test_image_cuts_override_connector_strips(client):
 
 def test_polygon_sides_in_outline_and_art(client):
     # A "hex" element with sides=3 must produce a 3-cornered outline ring,
-    # not a hexagon — and an art shape layer passes sides through too.
+    # not a hexagon, and an art shape layer passes sides through too.
     params = _params(
         name="pgon",
         leds=[],
@@ -1300,7 +1566,7 @@ def test_polygon_sides_in_outline_and_art(client):
     edge = re.search(r'\(gr_poly \(pts ((?:\(xy [-\d. ]+\) ?)+)\)[^\n]*Edge\.Cuts', board)
     assert edge is not None
     xs = [float(m) for m in re.findall(r"\(xy ([-\d.]+) ", edge.group(1))]
-    # A triangle outline (plus the connector pad plates) — nothing near the
+    # A triangle outline (plus the connector pad plates): nothing near the
     # hexagon's mid-height leftmost/rightmost vertices at x = 10.16 +/- 15.
     assert min(xs) > 100 - 5.2  # ORIGIN + 10.16 - 15 would be ~95; triangle stays right of that
     silk = re.search(r'\(gr_poly \(pts ((?:\(xy [-\d. ]+\) ?)+)\)[^\n]*F\.SilkS', board)
@@ -1315,7 +1581,7 @@ def test_led_size_and_reverse_parse(client):
         art=[],
         leds=[
             {"x": 5, "y": 6, "color": "red", "size": "0603"},
-            # legacy spelling AND the new flag — reverse forces 1206 either way
+            # legacy spelling AND the new flag: reverse forces 1206 either way
             {"x": 14, "y": 14, "color": "blue", "layout": "reverse", "size": "0805"},
             {"x": 5, "y": 13, "color": "white", "layout": "inline",
              "reverse": True, "size": "0603"},
@@ -1460,7 +1726,7 @@ def test_footprints_reference_3d_models(client):
 
 def test_glb_layers_tagged_and_opaque():
     """The 3D viewer's opacity sliders group materials by name, so the export
-    must label each one with the board layer it paints — and start opaque."""
+    must label each one with the board layer it paints, and start opaque."""
     import json
     import struct
 
@@ -1507,23 +1773,23 @@ def test_glb_layers_tagged_and_opaque():
 # What it cannot see is whether the user is left with anything to act on: the
 # client does `throw new Error((await resp.json()).error || resp.statusText)`,
 # so a rejection without a JSON `error` string reaches the badge owner as a
-# bare failure. These tests assert the status *class* and the error *shape* —
+# bare failure. These tests assert the status *class* and the error *shape*,
 # never a status number and never the prose, both of which are incidental.
 # ===========================================================================
 
 _MALFORMED_DESIGNS = {
-    # defect #12 — valid JSON that is not an object. json.loads succeeds, so
+    # defect #12: valid JSON that is not an object. json.loads succeeds, so
     # the JSONDecodeError guard never fires and the first params.get() used to
     # raise from outside every try.
     "params-json-null": "null",
     "params-json-list": "[]",
     "params-json-number": "42",
     "params-json-string": '"hello"',
-    # defect #13 — a scalar where the connector pin list belongs. _parse_pins
+    # defect #13: a scalar where the connector pin list belongs. _parse_pins
     # runs before any of the handler's own guards.
     "pins-scalar": '{"pins": 5}',
     "rows-scalar": '{"rows": 5}',
-    # defect #6 — NaN geometry. Three separate raise sites, one per parameter
+    # defect #6: NaN geometry. Three separate raise sites, one per parameter
     # group, all deliberately off the 0805/front/stacked defaults: a
     # through-hole back-side unit, an inline unit's advanced resistor angle,
     # and a rotated TTF-less text.
@@ -1547,7 +1813,7 @@ def test_a_malformed_design_is_refused_with_a_message_the_ui_can_show(
     shows nothing at all and there is no hint that the coordinate they typed,
     or the pin list a stale saved design carries, is the thing to change.
 
-    `/model3d` is here without a kicad-cli guard on purpose — every one of
+    `/model3d` is here without a kicad-cli guard on purpose: every one of
     these is rejected in the shared parse phase, long before `_model_glb` is
     reached, so the route answers 4xx whether or not the tool is installed.
     """
@@ -1573,7 +1839,7 @@ def test_a_malformed_design_is_refused_with_a_message_the_ui_can_show(
     ('green")', "green"),
     ('g" (x', "green"),
     ("g\\", "green"),
-    # Not an attack — just a colour no fab stocks.
+    # Not an attack, just a colour no fab stocks.
     ("plutonium", "green"),
     # Legitimate choices, off the "green" default in both value and case. The
     # whitelist must not flatten a real pick to the fallback.
@@ -1592,7 +1858,7 @@ def test_the_soldermask_colour_on_the_board_is_always_one_a_fab_can_build(
     carry a colour that does not exist.
 
     `mask_color` is the one user string that reaches the board file neither
-    whitelisted nor escaped — `name` is whitelisted by `_slug`, text content
+    whitelisted nor escaped: `name` is whitelisted by `_slug`, text content
     is escaped by `pcb._esc`. So this is the only test that can see it.
     """
     import types
@@ -1621,7 +1887,7 @@ def test_the_soldermask_colour_on_the_board_is_always_one_a_fab_can_build(
 # and lands in the range an auto-traced logo reaches routinely.
 #
 # A hang is invisible to a status check, so the wall clock IS the assertion
-# here. The budget is `hostile.SVG_BUDGET_S` — the same number the corpus uses,
+# here. The budget is `hostile.SVG_BUDGET_S`, the same number the corpus uses,
 # and a product statement rather than a benchmark: a logo has to come back
 # while the user is still looking at the preview. /outline runs on every edit.
 # ===========================================================================
@@ -1634,7 +1900,7 @@ def _line_svg(points: int) -> bytes:
 
 
 def _curve_svg(segments: int) -> bytes:
-    """`segments` separate cubic-Bezier paths — the shape that costs most per
+    """`segments` separate cubic-Bezier paths: the shape that costs most per
     byte, because each long curve flattens to up to 256 chords."""
     ps = b"".join(b'<path fill="#000" d="M%d %d C%d %d %d %d %d %d Z"/>'
                   % (i % 97, (i * 3) % 97, i % 97, (i * 13) % 97,
@@ -1645,7 +1911,7 @@ def _curve_svg(segments: int) -> bytes:
 
 
 #: Payloads whose exact geometry is past `MAX_SVG_COMPLEXITY`. Both are held
-#: under 500 KB on purpose — over that, werkzeug's *test client* spools the
+#: under 500 KB on purpose: over that, werkzeug's *test client* spools the
 #: request body to a temp file it never closes, and the resulting
 #: ResourceWarning lands on whichever unlucky test triggers the next GC.
 #: 60 000 line vertices measured 12 s uncapped (200 000 measured 493 s, on the
@@ -1657,7 +1923,7 @@ _OVERSIZED_SVGS = {
 
 #: (label, params, SVG form field, raster form field). The board outline and an
 #: artwork layer are separate entry points into the same exact pipeline, and
-#: /outline reaches only the first — so both have to be covered.
+#: /outline reaches only the first, so both have to be covered.
 _SVG_UPLOAD_SITES = {
     "board-shape": ({"shape": {"mode": "image", "cx": 10.16, "cy": 10.16, "w": 18}},
                     "shape", "shape_raster"),
@@ -1678,7 +1944,7 @@ def test_an_svg_too_detailed_to_trace_exactly_falls_back_to_the_raster_render(
     precisely so a file the exact pipeline cannot handle (a gradient fill, and
     now an unprintable amount of detail) degrades instead of failing. If this
     breaks, someone who dropped in an auto-traced logo watches the download
-    spin for eight minutes and then gets a board anyway — or is refused work
+    spin for eight minutes and then gets a board anyway, or is refused work
     the app can perfectly well do at raster fidelity.
     """
     import time
@@ -1697,7 +1963,7 @@ def test_an_svg_too_detailed_to_trace_exactly_falls_back_to_the_raster_render(
     invariants.assert_project_zip(resp, "big")
     assert elapsed <= hostile.SVG_BUDGET_S, (
         f"{site}/{svg} took {elapsed:.1f}s against a {hostile.SVG_BUDGET_S}s "
-        "budget — the fallback is supposed to skip the expensive pipeline, not "
+        "budget: the fallback is supposed to skip the expensive pipeline, not "
         "run it first")
 
 
@@ -1710,7 +1976,7 @@ def test_an_svg_too_detailed_to_trace_with_no_raster_is_refused_promptly(
     than processed for minutes.
 
     A client that sends no `*_raster` (a script, an old build of the UI) has
-    nothing to degrade to, so the honest answer is a refusal — and the refusal
+    nothing to degrade to, so the honest answer is a refusal, and the refusal
     has to arrive in a moment, because the whole point of the cap is that the
     expensive pipeline never starts. If this breaks the request occupies a
     worker for the better part of ten minutes and the user has no way to tell
@@ -1731,7 +1997,7 @@ def test_an_svg_too_detailed_to_trace_with_no_raster_is_refused_promptly(
     invariants.assert_rejected(resp)
     assert elapsed <= hostile.SVG_BUDGET_S, (
         f"{site}/{svg} took {elapsed:.1f}s against a {hostile.SVG_BUDGET_S}s "
-        "budget — a hang is invisible to a status check, so the clock is the "
+        "budget: a hang is invisible to a status check, so the clock is the "
         "assertion")
 
 
@@ -1739,7 +2005,7 @@ def test_an_svg_too_detailed_to_trace_with_no_raster_is_refused_promptly(
 @pytest.mark.slow  # ~1.3 s: half the cap is genuinely expensive to trace
 def test_a_logo_with_far_more_detail_than_a_badge_can_print_is_still_traced_exactly(
         client):
-    """A 20 000-vertex path — half the cap, 136 KB — still goes through the
+    """A 20 000-vertex path (half the cap, 136 KB) still goes through the
     exact vector pipeline and lands on the board.
 
     This is the false-positive side of the cap, and the reason it is set where
@@ -1758,12 +2024,12 @@ def test_a_logo_with_far_more_detail_than_a_badge_can_print_is_still_traced_exac
     )
     board = invariants.assert_project_zip(resp, "fine")
     assert "gr_poly" in board, (
-        "a 20k-vertex logo produced no polygons — the detail cap is rejecting "
+        "a 20k-vertex logo produced no polygons: the detail cap is rejecting "
         "artwork the app is supposed to trace exactly")
 
 
 def _cli_stub(tmp_path, real: str, body: str) -> str:
-    """A stand-in kicad-cli. Only the *external tool* is substituted here —
+    """A stand-in kicad-cli. Only the *external tool* is substituted here;
     the app, its locator and the whole HTTP path stay real."""
     import os
 
@@ -1781,7 +2047,7 @@ def _cli_stub(tmp_path, real: str, body: str) -> str:
 def test_a_3d_export_that_reports_problems_still_shows_the_board(
         client, kicad_cli, tmp_path, monkeypatch, size, side):
     """When kicad-cli exits non-zero but has written a complete model, the
-    viewer gets that model, flagged — not a 500.
+    viewer gets that model, flagged, not a 500.
 
     `kicad-cli pcb export glb` exits 1 for things that are not fatal to the
     output: most commonly it cannot substitute one component's 3D shape, says
@@ -1809,7 +2075,7 @@ def test_a_3d_export_that_reports_problems_still_shows_the_board(
         f"{resp.status_code}: {resp.get_data()[:200]!r}")
     assert resp.data[:4] == b"glTF", "response is not a binary glTF"
     assert resp.headers.get("X-Minibadge-Export-Warning"), (
-        "the export reported problems and the response said nothing — a model "
+        "the export reported problems and the response said nothing: a model "
         "with a part silently missing is presented as complete")
 
 
@@ -1887,14 +2153,14 @@ def test_fab_gerber_zip_uploads_to_a_board_house_as_is(client, kicad_cli):
     )
     elapsed = time.monotonic() - started
     assert resp.status_code == 200, resp.get_data()[:300]
-    assert elapsed <= 30, f"fab export took {elapsed:.1f}s — hang territory"
+    assert elapsed <= 30, f"fab export took {elapsed:.1f}s: hang territory"
     assert resp.headers.get("Content-Disposition", "").endswith("-gerbers.zip")
 
     zf = zipfile.ZipFile(io.BytesIO(resp.data))
     names = zf.namelist()
     assert names, "the fab zip arrived empty"
     assert all("/" not in n for n in names), (
-        f"fab zip must be flat — board-house upload forms read the archive "
+        f"fab zip must be flat; board-house upload forms read the archive "
         f"root: {names}")
     # The board-house contract, stated independently of webapp._FAB_LAYERS /
     # _FAB_EXTENSIONS: if someone trims that constant, this goes red.
@@ -1914,7 +2180,7 @@ def test_fab_gerber_zip_uploads_to_a_board_house_as_is(client, kicad_cli):
     assert len(drills) == 1, (
         f"PTH and NPTH must ship merged in one Excellon file, got {drills}")
     drl = zf.read(drills[0]).decode()
-    assert "METRIC" in drl, "drill file is not metric — every fab guide asks for mm"
+    assert "METRIC" in drl, "drill file is not metric; every fab guide asks for mm"
     # Fab-critical hole sizes, stated literally (not read back from pcb.py):
     # the 0.30 mm via drill is the cheap-tier minimum this project targets,
     # and 0.95 mm is the minibadge connector's plated hole.
@@ -1928,7 +2194,7 @@ def test_fab_gerber_zip_uploads_to_a_board_house_as_is(client, kicad_cli):
         text = zf.read(n).decode()
         assert "%FSLAX" in text, f"{n} lacks an RS-274X format header"
         assert "%TF" not in text, (
-            f"{n} carries X2 attributes — PCBWay's CAM is documented to "
+            f"{n} carries X2 attributes: PCBWay's CAM is documented to "
             "mishandle them; the package must stay plain RS-274X")
     edge = zf.read(next(n for n in names if n.endswith(".gm1"))).decode()
     assert "D01*" in edge, "the board outline plotted empty"
@@ -1948,7 +2214,7 @@ def test_gerbers_are_refused_when_zones_cannot_be_refilled(
     for every interpreter the refill could reach (the subprocess inherits it,
     and PYTHONPATH outranks site-packages), so no pcbnew exists anywhere as
     far as this request is concerned.  The locator, route, plotting tool and
-    refusal logic all run for real — which is the point: if the refusal is
+    refusal logic all run for real, which is the point: if the refusal is
     ever dropped, the real kicad-cli plots the slit board successfully and
     this test sees the 200 it must never see.
     """
@@ -1966,7 +2232,7 @@ def test_gerbers_are_refused_when_zones_cannot_be_refilled(
     )
     assert resp.status_code >= 500, (
         f"a fab package the server could not refill answered "
-        f"{resp.status_code} — slit copper may have shipped")
+        f"{resp.status_code}; slit copper may have shipped")
     body = resp.get_json()
     assert isinstance(body, dict) and body.get("error"), (
         f"the refusal carried no error message: {body!r}")
@@ -1982,7 +2248,7 @@ def test_fab_copper_is_the_refilled_fill_not_the_slit_open_form(
     the slit-open form stored in the .kicad_pcb.
 
     Differential oracle: plot the very board /generate ships, without a
-    refill, with the same plot flags — if /gerbers ever skips the refill its
+    refill, with the same plot flags. If /gerbers ever skips the refill its
     copper comes out byte-identical to that baseline (gerber plots are
     deterministic modulo G04 comment lines; measured: two plots of one board
     agree exactly, while slit vs refilled differ by hundreds of outline
@@ -1992,7 +2258,7 @@ def test_fab_copper_is_the_refilled_fill_not_the_slit_open_form(
     copper-relevant flags copied from the endpoint (no-x2, no-netlist).  If
     the endpoint's plot dialect ever drifts from these, the two plots become
     trivially different and this test silently loses power rather than going
-    red — keep them in step when changing the export.
+    red; keep them in step when changing the export.
     """
     import subprocess
 
@@ -2040,4 +2306,87 @@ def test_fab_copper_is_the_refilled_fill_not_the_slit_open_form(
         assert "%FSLAX" in shipped and "%FSLAX" in baseline
         assert shipped != baseline, (
             f"{layer}: the fab package's copper is identical to a no-refill "
-            "plot — the zone refill was skipped and slit copper shipped")
+            "plot; the zone refill was skipped and slit copper shipped")
+
+
+def test_a_blinking_led_with_pin_9_dropped_is_refused_and_names_the_pin(client):
+    """The preview shows a blinking LED; with pin 9 gone there is no clock to
+    blink from. Shipping a silently-steady board would make the download lie
+    about the design the user approved, so the app refuses and names the pin
+    to put back. Off-default on purpose: the LED is back-side and the
+    direct-trace hookup is selected, so the refusal cannot hinge on the
+    jumper's existence.
+    """
+    resp = client.post("/generate", data={"params": json.dumps(_params(
+        art=[],
+        leds=[{"x": 14, "y": 12, "color": "blue", "side": "back", "clk": True}],
+        clk={"jumper": False},
+        pins=["1", "2", "7", "8", "10", "15", "16"],
+    ))})
+    invariants.assert_rejected(resp)
+    assert "pin 9" in resp.get_json()["error"], (
+        f"the refusal does not name pin 9: {resp.get_json()['error']!r}; the "
+        "user cannot tell which checkbox to put back")
+
+
+@pytest.mark.slow
+def test_the_clk_jumper_yields_to_a_unit_parked_on_its_spot(client):
+    """A unit was placed first; enabling blink drops the jumper onto it. The
+    server must move the JUMPER (moving the unit would silently rearrange the
+    board behind the user's back) and the shipped copper must still clear
+    every unit pad by the fab's netclass minimum.
+
+    0.2 mm is stated literally, not read from pcb.py (D2): it is the
+    min_clearance the shipped .kicad_pro orders the fab's DRC to enforce.
+    """
+    jumper_home = (9.2, 18.45)  # pcb.JUMPER_AT, restated independently
+    resp = client.post("/generate", data={"params": json.dumps(_params(
+        art=[],
+        leds=[{"x": jumper_home[0], "y": jumper_home[1] - 0.95, "color": "red"},
+              {"x": 6, "y": 6, "color": "blue", "clk": True}],
+        clk={"jumper": True, "x": jumper_home[0], "y": jumper_home[1]},
+    ))})
+    assert resp.status_code == 200, resp.data
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    text = zf.read(next(n for n in zf.namelist()
+                        if n.endswith(".kicad_pcb"))).decode()
+    b = invariants.assert_parses(text)
+    jpads = [p for p in b.pads if "SolderJumper" in p.fp]
+    assert jpads, "the jumper vanished from the board instead of moving over"
+    unit_pads = [p for p in b.pads
+                 if "SolderJumper" not in p.fp and "MiniBadge" not in p.fp]
+    assert unit_pads, ("no unit pads on the board at all; the parked unit "
+                       "vanished and the clearance sweep below proves nothing")
+    for jp in jpads:
+        for up in unit_pads:
+            gap = jp.copper().distance(up.copper())
+            assert gap >= 0.2 - 1e-9, (
+                f"jumper pad {jp.num} sits {gap:.3f} mm from pad {up.num} of "
+                f"{up.ref}, under the 0.2 mm netclass minimum; the download "
+                "ships a short the preview never showed")
+
+
+def test_the_jumper_via_choice_never_strands_a_far_face_blinker(client):
+    """The "feed 3V3 through a via" switch only picks how the back jumper's
+    STEADY pad is wired (via into the front pour, or a trace to a 3V3 pin);
+    it must never take the rail via away from a blinking LED on the other
+    face. Off-default on purpose: back jumper, via off, front blinker.
+    """
+    resp = client.post("/generate", data={"params": json.dumps(_params(
+        art=[],
+        leds=[{"x": 6, "y": 6, "color": "red", "clk": True}],
+        clk={"jumper": True, "side": "back", "via": False},
+    ))})
+    assert resp.status_code == 200, resp.data
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    text = zf.read(next(n for n in zf.namelist()
+                        if n.endswith(".kicad_pcb"))).decode()
+    b = invariants.assert_parses(text)
+    rail = b.net_of.get("CLK_LED")
+    assert any(v.net == rail for v in b.vias), (
+        "no rail via on the board: the front blinker has no plated hole to "
+        "reach the back-side jumper through, and its LED ships dark")
+    v3 = b.net_of.get("3V3")
+    assert not any(v.net == v3 for v in b.vias), (
+        "a 3V3 via shipped although the user chose the traced hookup; the "
+        "board carries a drill the design turned off")
