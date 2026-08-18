@@ -127,6 +127,32 @@ its own temp directory with its own kicad-cli. Tune per host via `.env`:
   the container's own namespace — what the outside world can reach is set
   by the `ports` mapping above, not by this)
 
+## Branches, CI, and deploying
+
+`dev` is the working branch; `main` is the deploy branch. Merging (or pushing)
+to `main` is what ships.
+
+| Workflow | Trigger | What it does |
+| --- | --- | --- |
+| `.github/workflows/ci.yml` | push to `dev`, PRs into `dev`/`main` | Builds the image (whose last stage smoke-tests the 3D pipeline) and runs the test suite *inside* it, so tests see the same kicad-cli and build-time assets the container serves with. |
+| `.github/workflows/deploy.yml` | push to `main`, manual dispatch | On the deploy host: fast-forwards `/opt/minibadge-designer` to the pushed commit, `docker compose up -d --build --wait`, and fails the job if the healthcheck never passes. |
+
+Both run on the self-hosted runner `badge` (`self-hosted, Linux, X64`), which
+is also the server, so CI's build warms the layer cache the deploy reuses.
+
+Two things CI deliberately does not cover: the **browser tier** (no Chromium in
+the image; run `pytest -m browser` locally) and the **visual tier**, which
+never gates anywhere because renders are not deterministic at the artifact
+level. Run the full local suite before merging to `main`.
+
+To roll back, point the deploy clone at the previous commit and bring it up:
+
+```bash
+cd /opt/minibadge-designer
+git reset --hard <previous-sha>
+docker compose up -d --build --wait
+```
+
 ## Running it with local Python (development)
 
 ```bash
