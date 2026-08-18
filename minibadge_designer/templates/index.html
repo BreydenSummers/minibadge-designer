@@ -5204,6 +5204,21 @@ function selectFromCard(div, kind, i) {
     draw();
   });
 }
+// Palette/wand swatch colours are interpolated into a `style` attribute
+// inside an innerHTML template, which is the one place in this file where a
+// value reaches markup unescaped (filenames use textContent, text layers use
+// .value). The numbers come from our own classifier today, so nothing hostile
+// can be in them -- but "today" is doing real work in that sentence: the
+// design also round-trips through localStorage, and the first "load a design
+// file" or share-link feature would make a crafted rgb entry able to close the
+// attribute and add an event handler. Clamping to three integers here means
+// that feature cannot arrive carrying an XSS with it.
+function cssRGB(rgb) {
+  const [r, g, b] = [0, 1, 2].map(i =>
+    Math.max(0, Math.min(255, Math.round(Number((rgb || [])[i])) || 0)));
+  return `rgb(${r},${g},${b})`;
+}
+
 function renderArtList() {
   picking = null;
   artHL = null;
@@ -5275,14 +5290,14 @@ function renderArtList() {
     }
     const paletteRows = a.palette.map((p, j) => `
       <div class="swrow">
-        <span class="chip" style="background:rgb(${p.rgb.join(",")})"></span>
+        <span class="chip" style="background:${cssRGB(p.rgb)}"></span>
         <select class="pm" data-j="${j}">
           ${opt("ignore", "Ignore", p.material)}
           ${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, p.material)).join("")}
         </select>
       </div>`).join("");
     const chips = a.overrides.map((o, j) => {
-      const sw = o.rgb ? `<span class="lgchip" style="background:rgb(${o.rgb.join(",")});width:10px;height:10px"></span> ` : "";
+      const sw = o.rgb ? `<span class="lgchip" style="background:${cssRGB(o.rgb)};width:10px;height:10px"></span> ` : "";
       return `<span class="chip2">${sw}wand &rarr; <select class="ovm" data-j="${j}" title="Change this region's material">${
         Object.entries(WAND_MATS).map(([v, l]) => opt(v, l, o.material)).join("")
       }</select> <button class="ovx" data-j="${j}" title="Remove">&times;</button></span>`;

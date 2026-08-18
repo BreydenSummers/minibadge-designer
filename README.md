@@ -126,6 +126,37 @@ its own temp directory with its own kicad-cli. Tune per host via `.env`:
 - `HOST`: bind address inside the container (default `0.0.0.0`, which is
   the container's own namespace — what the outside world can reach is set
   by the `ports` mapping above, not by this)
+- `MAX_REQUESTS`: requests a worker serves before it is recycled (default
+  `200`) — memory hygiene under the container's hard limit, not a leak fix
+- `EXPORT_BUDGET_S`: wall clock one `/gerbers` or `/model3d` request may spend
+  in subprocesses (default `240`). Keep it comfortably under `WORKER_TIMEOUT`,
+  or a slow export is killed before it can report that it was slow.
+- `FORWARDED_ALLOW_IPS`: which peer may set `X-Forwarded-For` (default
+  `127.0.0.1`, the reverse proxy on this host). Without it the access log
+  records the proxy's address for every request instead of the client's.
+
+### Limits on what one request can spend
+
+Every route is unauthenticated and decodes a file the caller chose, so each of
+these has a ceiling. All are documented in place with the measurement that set
+them; the numbers to know are:
+
+| Ceiling | Where | Refuses |
+| --- | --- | --- |
+| 24 megapixels per upload | `logo.MAX_INPUT_PIXELS` | Read off the header, before a row is decoded — the only place a memory guard can stand, since PNG decoding is all-or-nothing |
+| 4 megapixels working size | `logo.WORK_MAX_PIXELS` | The reduction happens before the RGBA conversion and the rotate, so peak memory tracks the badge and not the file |
+| 40 000 weighted SVG segments | `webapp.MAX_SVG_COMPLEXITY` | Scored on the *render tree* including `<use>` expansion, so a 1 KB file that expands to 130 000 shapes is priced as 130 000 |
+| 6 000 outline rectangles | `webapp.MAX_OUTLINE_RECTS` | One allowance shared by all twelve outline elements. Set at the measured knee: `/outline` runs on every edit |
+| 24 MiB per request | `webapp.MAX_UPLOAD` | Flask `MAX_CONTENT_LENGTH` |
+| 3 GB / 2 CPU / 512 pids | `docker-compose.yml` | The container, so the host is never the thing that runs out |
+
+The container also runs read-only (`/tmp`, `/dev/shm` and `/home/badge` are
+tmpfs — kicad-cli needs a writable `HOME`), as a non-root user, with
+`no-new-privileges`.
+
+Two things the app cannot do for itself, both at the edge: the
+`http://` → `https://` redirect and rate limiting. The security headers,
+including HSTS, are sent from the origin so they survive a change of provider.
 
 ## Branches, CI, and deploying
 
@@ -139,6 +170,20 @@ to `main` is what ships.
 
 Both run on the self-hosted runner `badge` (`self-hosted, Linux, X64`), which
 is also the server, so CI's build warms the layer cache the deploy reuses.
+
+That sharing is convenient and it is also the sharpest edge in this setup, so it
+is worth stating plainly. A self-hosted runner executes whatever the commit it
+checked out says to execute, on the machine that serves the site, and the runner
+user is in the `docker` group — which is root-equivalent on the host. CI is
+therefore gated to **same-repository commits only**: a pull request from a fork
+is skipped, not built (see the `if:` on the job in `ci.yml`). The repository is
+private today, which makes that redundant; it is there for the day it is not,
+because on a public repo `pull_request` plus a self-hosted runner is remote code
+execution for any GitHub account, switched on by a repository setting rather
+than by a change to any file here.
+
+**If you make this repository public, split CI off this host first.** Nothing in
+the app needs the two to be the same machine; only the layer cache does.
 
 Two things CI deliberately does not cover: the **browser tier** (no Chromium in
 the image; run `pytest -m browser` locally) and the **visual tier**, which
