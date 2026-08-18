@@ -1,4 +1,4 @@
-"""KiCad PCB generation for SAINTCON minibadges.
+"""KiCad PCB generation for minibadges.
 
 Emits a complete .kicad_pcb (s-expression, KiCad 7+ format) containing:
 
@@ -34,17 +34,18 @@ CONNECTOR_PADS = [
     ("2", 3.81, 1.27, "GND", "top"),
     ("7", 16.51, 1.27, "3V3", "top"),
     ("8", 19.05, 1.27, "GND", "top"),
-    ("9", 1.27, 19.05, None, "bottom"),  # CLK (unused)
+    ("9", 1.27, 19.05, None, "bottom"),  # CLK (see connector_pads: it joins
+                                         # the netlist once a unit runs on it)
     ("10", 3.81, 19.05, None, "bottom"), # NC (reserved, never connect)
     ("15", 16.51, 19.05, "3V3", "bottom"),
     ("16", 19.05, 19.05, "GND", "bottom"),
 ]
 
 # Pin captions printed on BOTH silkscreens, one per pad pair, tucked inside
-# the pad keepout strip (y <= 2.5 / >= 17.82) where LED units can never sit —
+# the pad keepout strip (y <= 2.5 / >= 17.82) where LED units can never sit,
 # so they can't collide with unit silk and never clip the board edge.
 # The pads come in four corner pairs. A design may keep or drop any single
-# pin — plenty of badges only populate the pair they actually use — so the
+# pin (plenty of badges only populate the pair they actually use), so the
 # plate, keepout, caption and 3D header all follow the pair, and the caption
 # names only the pins that survived.
 PAD_PAIRS = {
@@ -74,7 +75,7 @@ def pair_of(pin: str) -> str:
 def active_pairs(pins) -> list[str]:
     """Corner pairs with at least one pin kept, in board order.
 
-    Raises on a non-empty list holding no valid pin — that means a caller
+    Raises on a non-empty list holding no valid pin: that means a caller
     handed over the old row names, which would otherwise silently read as
     "no pads kept" and quietly drop every keepout.
     """
@@ -90,7 +91,7 @@ def pair_caption(key: str, pins) -> str:
 
 
 def pair_caption_at(key: str, pins) -> tuple[float, float]:
-    """Where that caption sits — centred on the pins that survived.
+    """Where that caption sits, centred on the pins that survived.
 
     With a pin dropped the pair's midpoint is no longer over any copper, so
     the label would float a millimetre off the pad it names.
@@ -107,16 +108,201 @@ def power_missing(pins) -> list[str]:
             if num in pins and net}
     return [net for net in ("3V3", "GND") if net not in have]
 
+
+# CLK drive. Pin 9 carries the main badge's blink clock; chosen LED units may
+# run off it so they pulse with the badge instead of burning steady. Two
+# hookup styles, both classic minibadge patterns:
+#
+#   jumper: a 3-pad solder jumper. The centre pad feeds the CLK units' own
+#           rail; the outer pads carry 3V3 and CLK, and the builder bridges
+#           exactly ONE side: steady or blinking. The two sources can never
+#           be tied together (bridging CLK straight to 3V3 would back-drive
+#           the badge's shared clock line for the whole chain), and an
+#           unbridged jumper simply leaves those LEDs dark.
+#   trace:  no jumper; the units' supply is wired straight to pin 9, so
+#           they always blink.
+#
+# A front CLK unit keeps its GND via and fetches supply through a routed
+# trace instead of the pour. A back CLK unit keeps its cathode in the GND
+# pour, and its supply trace runs on B.Cu to a plated hole (pin 9, or the
+# rail via beside the jumper), replacing its 3V3 via entirely.
+JUMPER_AT = (9.2, 18.45)  # default jumper centre, board mm: past pin 10's
+                          # pad and caption so the CLK silk label clears
+                          # them, and high enough that the inflated art
+                          # margins clear the board edge
+JUMPER_PITCH = 1.3        # centre-to-centre jumper pad spacing
+JUMPER_PAD = (1.0, 1.5)   # each jumper pad, mm, at rotation 0
+JUMPER_VIA = (0.0, -1.5)  # rail via offset from the centre pad (unit frame)
+# A back-side jumper's 3V3 pad has no 3V3 copper on its own face (the back
+# pour is GND), so it reaches the front pour through its own via, offset
+# past the centre pad on the 3V3 side, in line with the rail via.
+JUMPER_V3VIA = (JUMPER_PITCH, -1.5)
+CLK_RAIL = "CLK_LED"      # the jumper's centre pad and the runs it feeds
+
+
+def connector_pads(clk: bool = False) -> list:
+    """CONNECTOR_PADS, with pin 9 carrying CLK once the design uses it."""
+    if not clk:
+        return CONNECTOR_PADS
+    return [(num, x, y, "CLK" if num == "9" else net, row)
+            for num, x, y, net, row in CONNECTOR_PADS]
+
+
+def clk_info(spec: "BadgeSpec") -> dict | None:
+    """Everything the routers need to know about this board's CLK hookup.
+
+    None when no unit runs on CLK, and also when pin 9 was dropped: with no
+    plated hole carrying the clock the flag cannot be honoured, so the units
+    fall back to plain pour feeds exactly like every other invalid parameter
+    (the webapp refuses such a design with a real message first).
+
+    Keys: net (the supply net CLK units carry), jumper ((x, y, rot) or None
+    for the trace style), side ("front"/"back": the face carrying the
+    jumper's pads), pads ([(net, cx, cy)] the jumper pads in board mm),
+    via ((x, y) rail via or None; it exists exactly while a unit on the
+    OTHER face needs a plated hole to reach the centre pad -- nothing gates
+    it), v3via ((x, y) or None: a back-side jumper's 3V3 pad dropping
+    straight into the front pour, when jumper_via asks for that), v3link
+    (True when the 3V3 pad is instead fed by a routed trace to a 3V3 pin on
+    its own face; see clk_v3_link), nodes/v3nodes (hand-placed bends for
+    the two routed links), front/back (where each face's supply runs
+    terminate), pin9 ((x, y)).
+    """
+    if not any(led.clk for led in spec.leds) or "9" not in spec.pins:
+        return None
+    p9 = next((x, y) for num, x, y, _net, _row in CONNECTOR_PADS
+              if num == "9")
+    if not spec.clk_jumper:
+        return {"net": "CLK", "jumper": None, "side": "front", "pads": [],
+                "via": None, "v3via": None, "v3link": False,
+                "nodes": (), "v3nodes": (), "v3pin": None,
+                "front": p9, "back": p9, "pin9": p9}
+    jx, jy = spec.jumper if spec.jumper else JUMPER_AT
+    rot = float(spec.jumper_rot) % 360
+    side = "back" if spec.jumper_side == "back" else "front"
+
+    def at(dx: float, dy: float) -> tuple[float, float]:
+        rx, ry = _r(dx, dy, rot)
+        return (jx + rx, jy + ry)
+
+    pads = [("CLK", *at(-JUMPER_PITCH, 0.0)), (CLK_RAIL, jx, jy),
+            ("3V3", *at(JUMPER_PITCH, 0.0))]
+    far_face = "back" if side == "front" else "front"
+    far = at(*JUMPER_VIA)
+    via = (far if any(led.clk and led.side == far_face for led in spec.leds)
+           else None)
+    near = (jx, jy)
+    return {"net": CLK_RAIL, "jumper": (jx, jy, rot), "side": side,
+            "pads": pads, "via": via,
+            "v3via": (at(*JUMPER_V3VIA)
+                      if side == "back" and spec.jumper_via else None),
+            "v3link": side == "back" and not spec.jumper_via,
+            "nodes": tuple(spec.jumper_nodes or ()),
+            "v3nodes": tuple(spec.jumper_v3nodes or ()),
+            "v3pin": str(spec.jumper_v3pin) if spec.jumper_v3pin else None,
+            "front": near if side == "front" else far,
+            "back": near if side == "back" else far,
+            "pin9": p9}
+
+
+def _jumper_pad_quad(clk, cx: float, cy: float, extra: float = 0.0) -> list:
+    """One jumper pad as a rotated quad, grown `extra` mm per side."""
+    rot = clk["jumper"][2]
+    w2, h2 = JUMPER_PAD[0] / 2 + extra, JUMPER_PAD[1] / 2 + extra
+    out = []
+    for qx, qy in ((-w2, -h2), (w2, -h2), (w2, h2), (-w2, h2)):
+        rx, ry = _r(qx, qy, rot)
+        out.append((cx + rx, cy + ry))
+    return out
+
+
+def jumper_caption_boxes(clk) -> list[tuple[float, float, float, float]]:
+    """Bounding boxes of the jumper's CLK/3V3 silk labels (art keeps clear).
+
+    Empty at any rotation but the two horizontal ones: a rotated label would
+    need a rotated box, and the canvas only offers 90-degree steps, where
+    the vertical labels print rotated with the jumper (so the boxes swap
+    axes around the label centres).
+    """
+    if not clk or not clk["jumper"]:
+        return []
+    jx, jy, rot = clk["jumper"]
+    out = []
+    for lbl, (_net, _cx, _cy), sgn in (("CLK", clk["pads"][0], -1),
+                                       ("3V3", clk["pads"][2], 1)):
+        lx, ly = _r(sgn * (JUMPER_PITCH + JUMPER_PAD[0] / 2 + 1.0), 0.0, rot)
+        cx, cy = jx + lx, jy + ly
+        hw = len(lbl) * 0.6 / 2 + 0.3
+        if rot % 180 == 90:
+            out.append((cx - 0.55, cy - hw, cx + 0.55, cy + hw))
+        else:
+            out.append((cx - hw, cy - 0.55, cx + hw, cy + 0.55))
+    return out
+
+
+def jumper_copper_pieces(clk) -> list[tuple[str, list]]:
+    """The jumper's copper plus the margin art must clear, as labeled quads.
+
+    The same contract as unit_copper_pieces: pads grown 0.5 mm per side,
+    each via as its 16-gon collar, each stub as a 1.1 mm band. The link
+    trace to pin 9 is NOT here: it is routed against the finished board, so
+    its keepout comes from clk_link's own points.
+    """
+    if not clk or not clk["jumper"]:
+        return []
+    pieces = [(lbl, _jumper_pad_quad(clk, cx, cy, 0.5))
+              for lbl, (_net, cx, cy) in
+              zip(("pad_clk", "pad_rail", "pad_3v3"), clk["pads"])]
+    jx, jy, _rot = clk["jumper"]
+    if clk["via"]:
+        pieces.append(("via", _via_collar(*clk["via"])))
+        pieces.append(("trace_stub", _quad_seg((jx, jy), clk["via"], 1.1)))
+    if clk["v3via"]:
+        v3 = clk["pads"][2]
+        pieces.append(("via_3v3", _via_collar(*clk["v3via"])))
+        pieces.append(("trace_3v3",
+                       _quad_seg((v3[1], v3[2]), clk["v3via"], 1.1)))
+    return pieces
+
+
+def _jumper_copper_quads(clk, net: str | None = None,
+                         face: str | None = None) -> list:
+    """The jumper's REAL copper on other nets than `net`, for route hazards.
+
+    Real pad sizes like _unit_copper_quads, not the inflated art keepouts.
+    Via barrels penetrate both layers, so they count for every layer's runs;
+    the SMD pads and stubs live on the jumper's face only, so with `face`
+    given they count only when the run shares it.
+    """
+    if not clk or not clk["jumper"]:
+        return []
+    out = []
+    on_face = face is None or face == clk["side"]
+    if on_face:
+        out += [_jumper_pad_quad(clk, cx, cy)
+                for pnet, cx, cy in clk["pads"] if pnet != net]
+    jx, jy, _rot = clk["jumper"]
+    if clk["via"] and clk["net"] != net:
+        out.append(_round_hazard(*clk["via"], VIA_SIZE / 2 + NOVIA_CLEAR))
+        if on_face:
+            out.append(_quad_seg((jx, jy), clk["via"], TRACK_W))
+    if clk["v3via"] and net != "3V3":
+        out.append(_round_hazard(*clk["v3via"], VIA_SIZE / 2 + NOVIA_CLEAR))
+        if on_face:
+            v3 = clk["pads"][2]
+            out.append(_quad_seg((v3[1], v3[2]), clk["v3via"], TRACK_W))
+    return out
+
 # Minimal board tabs that carry each connector pad *pair*. Custom outlines
 # union only these (never a full-width strip), so the image's own cuts win
-# everywhere except directly under the pads — the silhouette shapes the
+# everywhere except directly under the pads: the silhouette shapes the
 # whole edge, and pads always sit on solid material.
 PAD_PLATES = {
     row: tuple(v["plate"] for v in PAD_PAIRS.values() if v["row"] == row)
     for row in ("top", "bottom")
 }
 
-# Custom outlines may extend this far beyond the standard square — three
+# Custom outlines may extend this far beyond the standard square: three
 # extra badge-widths in every direction (~120 x 124 mm), far past the
 # oversized boards on minibadge.wiki. (Big boards overhang neighbouring
 # slots and cost more to fab; that's the designer's call.) The connector
@@ -129,7 +315,7 @@ OUTLINE_EXTENT = (-49.84, -51.84, 70.16, 72.16)
 #   stacked: resistor above the LED, joined by a short vertical trace on
 #            the anode side. Compact block, ~5.6 x 5.4 mm.
 #   inline:  R and LED end-to-end in one row: [via_back] R -> LED [via_front].
-#            Long and thin, ~10 x 2.8 mm — lays along a board edge. The LED
+#            Long and thin, ~10 x 2.8 mm; lays along a board edge. The LED
 #            is flipped so its anode faces the resistor.
 #
 # The power hookup depends on the mounting side: front units feed the
@@ -142,23 +328,23 @@ TRACK_W = 0.3
 # 0.7 mm pad on a 0.3 mm drill. The drill is what fabs charge for, and 0.3 mm
 # is standard everywhere badge people order: JLCPCB's small-hole upcharge
 # starts at 0.2 mm, PCBWay's below 0.2 mm, OSH Park's two-layer floor is
-# 0.254 mm. Keeping the pad at 0.7 leaves a 0.2 mm annular ring — same ring as
+# 0.254 mm. Keeping the pad at 0.7 leaves a 0.2 mm annular ring (same ring as
 # KiCad's 0.8/0.4 default, and clear of PCBWay's 0.15 mm minimum rather than
-# sitting exactly on it — while the smaller hole eats less copper out of the
+# sitting exactly on it) while the smaller hole eats less copper out of the
 # pours and tents under soldermask more reliably.
 VIA_SIZE, VIA_DRILL = 0.7, 0.3
 
 # Region the (rotated) unit bbox must stay inside on the standard square:
 # 0.54 mm in from the board edge. Custom outlines widen this to their own
 # bounding box (see unit_safe); actual outline containment is checked
-# separately. Clearance to the connector pads is NOT part of this region —
+# separately. Clearance to the connector pads is NOT part of this region;
 # that is per pad pair (PAD_KEEPOUTS), so units may sit between the pads.
 UNIT_SAFE = (0.7, 0.7, 19.62, 19.62)
 
 # Keepout boxes around each connector pad *pair*: the pads' copper (1.75 mm
 # circles) expanded by 0.35 mm pour/DRC clearance. A unit bbox may not
-# overlap a kept row's boxes, but the strip between the two pairs — and the
-# strip of a dropped row — is fair game.
+# overlap a kept row's boxes, but the strip between the two pairs (and the
+# strip of a dropped row) is fair game.
 # The extra 0.5 mm beyond the pads covers the printed pin captions, so a
 # unit's silk can never collide with them.
 PAD_KEEPOUTS = {
@@ -167,10 +353,10 @@ PAD_KEEPOUTS = {
 }
 
 # Package parameters (the LED and its resistor share the size, except
-# through-hole LEDs whose resistor stays an SMD — "res_pkg"). "dx" is the
+# through-hole LEDs whose resistor stays an SMD: "res_pkg"). "dx" is the
 # pad-center offset, pw/ph the pad size, res_dy the stacked resistor lift,
 # gap the inline LED->resistor spacing, body the part outline for silk/fab.
-# Through-hole LEDs — the sizes badgelife folks actually put on minibadges:
+# Through-hole LEDs, the sizes badgelife folks actually put on minibadges:
 # tiny 1.8 mm and standard 3 mm domes plus the 5x2 mm rectangular "light
 # bar". All follow KiCad's LED_THT footprints: 2.54 mm lead pitch, 1.8 mm
 # circular pads, 0.9 mm drill ("drill" marks the package as through-hole).
@@ -179,7 +365,7 @@ PAD_KEEPOUTS = {
 # SMD pads follow KiCad's *_HandSolder proportions: these boards get built
 # with an iron at a conference, not a reflow oven, so each pad carries extra
 # copper past the end of the chip for the tip and a visible fillet. The growth
-# is entirely OUTWARD — spans are KiCad's 2.80 / 3.20 / 4.40 mm while the
+# is entirely OUTWARD: spans are KiCad's 2.80 / 3.20 / 4.40 mm while the
 # inner gap the body sits in is untouched, which keeps component fit and the
 # reverse-mount hole exactly as they were.
 PKG = {
@@ -244,7 +430,7 @@ def _layout(name: str, size: str = "0805", reverse: bool = False) -> dict:
 
     `reverse` is the badgelife through-board trick: a 1206 LED soldered
     upside-down over a routed hole so the light shines out the other face.
-    It composes with either layout — the hole sits under the LED — but
+    It composes with either layout (the hole sits under the LED) but
     forces the 1206 package: smaller pads sit too close to the hole for
     the 0.2 mm copper-to-edge DRC rule.
     """
@@ -332,7 +518,7 @@ class Led:
     reverse: bool = False    # through-board mount over a routed hole (forces 1206)
     # Reach the far pour through a connector pad instead of the unit's own
     # via. Those pads are plated through, so a trace on the unit's own layer
-    # that lands on one crosses to the other side just as well — the common
+    # that lands on one crosses to the other side just as well: the common
     # hand-routed minibadge style, and it keeps vias off the face entirely.
     novia: bool = False
     # Board-mm bends the via-less run must pass through, in order. Set by
@@ -350,10 +536,18 @@ class Led:
     # pad; ("unit", 3) = the same-net pad of another unit on this face, so
     # several runs can share one path to the rail. An invalid choice (wrong
     # net, dropped pin, other face, or a chain that loops back on itself)
-    # falls back to None rather than refusing — see novia_term().
+    # falls back to None rather than refusing; see novia_term().
     term: tuple | None = None
+    # Run this unit's supply off the badge's blink clock (pin 9) instead of
+    # the 3V3 pour, so it pulses with the badge. The board-level hookup
+    # (BadgeSpec.clk_jumper) decides whether the run lands on the solder
+    # jumper's rail or straight on pin 9. Ignored while pin 9 is dropped:
+    # clk_info() then returns None and the unit feeds from 3V3 as usual.
+    clk: bool = False
+    # Board-mm bends for the CLK supply run, same contract as nodes.
+    cnodes: tuple = ()
     # Put just the LED on the opposite face, with a via inside each of its
-    # pads carrying the connections through — the via-in-pad style other
+    # pads carrying the connections through, the via-in-pad style other
     # minibadge designers use. Not combinable with reverse mount.
     farled: bool = False
     # Advanced placement: free resistor/via offsets in the unit frame (mm),
@@ -439,7 +633,7 @@ def _bbox_offsets_g(g: dict, rot: float) -> tuple[float, float, float, float]:
 
 
 def clamp_led_obj(led: Led, safe=None) -> tuple[float, float]:
-    """clamp_led for a Led object — honors size/reverse AND advanced offsets."""
+    """clamp_led for a Led object; honors size/reverse AND advanced offsets."""
     if safe is None:
         safe = UNIT_SAFE
     ox0, oy0, ox1, oy1 = _bbox_offsets_g(led_geometry(led), led.rot)
@@ -530,11 +724,16 @@ def _quad_seg(a, b, w: float) -> list:
             (bx - nx, by - ny), (ax - nx, ay - ny)]
 
 
-def _unit_copper_quads(led: Led, safe, skip_start: bool):
+def _unit_copper_quads(led: Led, safe, skip_start: bool,
+                       start_pad: str | None = None):
     """A unit's real copper as quads: four pads plus the anode trace.
 
-    Real pad sizes, not the inflated art keepouts — this is what a via-less
-    power trace has to stay 0.2 mm clear of.
+    Real pad sizes, not the inflated art keepouts: this is what a via-less
+    power trace has to stay 0.2 mm clear of. With skip_start the pad the
+    trace leaves from is dropped (it shares the trace's net): the side's
+    power pad by default, or `start_pad` ("res_in"/"led_k") when the caller
+    is routing a different run than the classic one, like a front unit's
+    CLK supply, which leaves from res_in rather than the cathode.
     """
     g = led_geometry(led)
     p, rp = PKG[g["pkg"]], PKG[res_pkg(g["pkg"])]
@@ -548,13 +747,13 @@ def _unit_copper_quads(led: Led, safe, skip_start: bool):
 
     apts = unit_trace_pts(led, "a", safe)
     out = [_quad_seg(a, b, TRACK_W) for a, b in zip(apts, apts[1:])]
-    for off, w, h, extra, is_start in (
-        (g["led_k"], p["pw"], p["ph"], g.get("led_rot", 0.0), front),
-        (g["led_a"], p["pw"], p["ph"], g.get("led_rot", 0.0), False),
-        (g["res_in"], rp["pw"], rp["ph"], g.get("res_rot", 0.0), not front),
-        (g["res_out"], rp["pw"], rp["ph"], g.get("res_rot", 0.0), False),
+    for off, w, h, extra, key, is_start in (
+        (g["led_k"], p["pw"], p["ph"], g.get("led_rot", 0.0), "led_k", front),
+        (g["led_a"], p["pw"], p["ph"], g.get("led_rot", 0.0), "led_a", False),
+        (g["res_in"], rp["pw"], rp["ph"], g.get("res_rot", 0.0), "res_in", not front),
+        (g["res_out"], rp["pw"], rp["ph"], g.get("res_rot", 0.0), "res_out", False),
     ):
-        if skip_start and is_start:
+        if skip_start and (key == start_pad if start_pad else is_start):
             continue  # the pad the trace leaves from shares its net
         pts = []
         for qx, qy in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)):
@@ -567,8 +766,33 @@ def _unit_copper_quads(led: Led, safe, skip_start: bool):
     return out
 
 
+def _unit_via_quads(led: Led, safe, clk, stub: bool = True) -> list:
+    """A unit's power via collar (+ its stub legs) as route hazards.
+
+    Empty for units that have no via. The classic runs never need these:
+    every via on a layer carries the same net as that layer's via-less runs
+    (front vias drop GND, back vias fetch 3V3), so a crossing was legal by
+    construction. A CLK supply run is a different net on the same layer,
+    and the barrels (which penetrate BOTH layers) become real hazards.
+    `stub` includes the pad-to-via trace legs, which exist only on the
+    unit's own mounting face.
+    """
+    front = led.side != "back"
+    if led.novia or (clk is not None and led.clk and not front):
+        return []  # its power runs as a trace instead; no via, no stub
+    g = led_geometry(led)
+    cx, cy = clamp_led_obj(led, safe)
+    vo = g["via_front"] if front else g["via_back"]
+    rx, ry = _r(vo[0], vo[1], led.rot)
+    out = [_round_hazard(cx + rx, cy + ry, VIA_SIZE / 2 + NOVIA_CLEAR)]
+    if stub:
+        vpts = unit_trace_pts(led, "v", safe)
+        out += [_quad_seg(a, b, TRACK_W) for a, b in zip(vpts, vpts[1:])]
+    return out
+
+
 def _expanded_corners(led: Led, safe, margin: float) -> list:
-    """Corners of a unit's bbox grown by margin — the router's waypoints."""
+    """Corners of a unit's bbox grown by margin: the router's waypoints."""
     g = led_geometry(led)
     bb = g["bbox"]
     cx, cy = clamp_led_obj(led, safe)
@@ -584,7 +808,7 @@ NOVIA_EDGE = 0.2 + TRACK_W / 2   # trace centre to board edge
 
 
 # tan(pi/8), built from a square root so Python and the browser agree to the
-# last bit: IEEE-754 pins sqrt exactly, while cos/sin may differ by an ulp —
+# last bit: IEEE-754 pins sqrt exactly, while cos/sin may differ by an ulp,
 # and a one-ulp disagreement is enough to send the two routers down different
 # paths on a borderline clearance test.
 _OCT_T = 2.0 ** 0.5 - 1.0
@@ -603,14 +827,14 @@ def _round_hazard(cx: float, cy: float, r: float) -> list:
 
 
 # Window/art keepout margin round a via barrel: the netclass copper-to-copper
-# minimum. Deliberately tighter than POUR_CLEARANCE — the plane a same-net
+# minimum. Deliberately tighter than POUR_CLEARANCE: the plane a same-net
 # via keeps inside this collar only has to join its barrel to the bridge that
 # feeds it, and the FILL still clears other-net vias by the pour rule no
 # matter how close a window is allowed to erase.
 VIA_COLLAR_CLEAR = 0.2
 
 
-# A unit 16-gon from square roots alone — like OCT_T above, sqrt is pinned
+# A unit 16-gon from square roots alone; like OCT_T above, sqrt is pinned
 # exactly by IEEE-754 while cos/sin may differ by an ulp between here and the
 # JS mirror, and these pieces feed the bridge scan where an ulp can flip a
 # route. cos/sin of 22.5° and the 1/cos(11.25°) circumradius factor all have
@@ -630,7 +854,7 @@ def _via_collar(cx: float, cy: float) -> list:
 
     The art/window keepout round a via barrel. Sixteen sides instead of
     `_round_hazard`'s eight so the surviving patch of plane renders as the
-    round pad it effectively is — through a window the old octagon read as
+    round pad it effectively is. Through a window the old octagon read as
     a mysterious oversized pad (0.76 mm to its corners); this collar stops
     at 0.55 mm flat-to-flat. Mirrored by viaCollar in index.html.
     """
@@ -651,7 +875,7 @@ def _knees45(a, b):
     m = min(abs(dx), abs(dy))
     sx = 1.0 if dx > 0 else -1.0
     sy = 1.0 if dy > 0 else -1.0
-    # Leave along the long axis first, then break to 45 — squarer exit from a
+    # Leave along the long axis first, then break to 45: squarer exit from a
     # pad. Diagonal-first is the fallback when that corner is blocked.
     axis_first = ((a[0] + sx * (abs(dx) - m), a[1]) if abs(dx) > abs(dy)
                   else (a[0], a[1] + sy * (abs(dy) - m)))
@@ -763,19 +987,22 @@ def unit_trace_pts(led: Led, which: str, safe=None) -> list:
     return mitre45(pts, lambda _u, _v: True)
 
 
-def novia_term(led: Led, leds=(), pins=ALL_PINS, safe=None):
+def novia_term(led: Led, leds=(), pins=ALL_PINS, safe=None, clk=None):
     """Resolve led.term to ((x, y), target_led | None), or None for auto.
 
-    None means "route to the nearest pad" — both when no terminal was chosen
+    None means "route to the nearest pad", both when no terminal was chosen
     and when the chosen one is invalid: a pad on the wrong net or a dropped
     pin, a unit on the other face (its SMD pads have no copper on this
-    layer), or a unit chain that loops back on itself and so never reaches a
-    plated hole. Falling back matches how every other bad parameter is
-    handled here, and the canvas never offers those choices in the first
-    place.
+    layer), a back unit whose supply pad now carries CLK (chaining 3V3 onto
+    it would short the two rails), or a unit chain that loops back on itself
+    and so never reaches a plated hole. Falling back matches how every other
+    bad parameter is handled here, and the canvas never offers those choices
+    in the first place.
     """
     if not led.novia or not led.term:
         return None
+    if clk is not None and led.side == "back" and led.clk:
+        return None  # its run goes to the CLK hookup; terms don't apply
     net = "GND" if led.side != "back" else "3V3"
     kind, ref = led.term[0], led.term[1]
     if kind == "pad":
@@ -793,20 +1020,26 @@ def novia_term(led: Led, leds=(), pins=ALL_PINS, safe=None):
         return None
     if k < 0 or target is led or target.side != led.side:
         return None
+    if clk is not None and net == "3V3" and target.clk:
+        return None  # that unit's supply pad carries CLK now, not 3V3
     # A chain has to bottom out at a plated hole. Every link that is itself
     # invalid falls back to a connector pad (this same function), so the only
-    # way a chain never lands is a true cycle — follow the links and refuse
+    # way a chain never lands is a true cycle: follow the links and refuse
     # those. Everything else (a link that turns out unroutable, a stranded
     # pour) stays resolve_novia's judgement, exactly as without a terminal.
     seen = {id(led), id(target)}
     cur = target
     while cur.novia and cur.term and cur.term[0] == "unit":
+        if clk is not None and cur.side == "back" and cur.clk:
+            break  # its supply run lands on a plated hole; chain bottoms out
         try:
             nxt = leds[int(cur.term[1])]
         except (TypeError, ValueError, IndexError):
             break  # invalid link: that unit will route to a pad instead
         if int(cur.term[1]) < 0 or nxt is cur or nxt.side != cur.side:
             break
+        if clk is not None and cur.side == "back" and nxt.clk:
+            break  # invalid link (CLK supply pad): that unit routes to a pad
         if id(nxt) in seen:
             return None  # a loop feeds nothing
         seen.add(id(nxt))
@@ -818,91 +1051,20 @@ def novia_term(led: Led, leds=(), pins=ALL_PINS, safe=None):
     return (tx + ox, ty + oy), target
 
 
-def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
-                outline=None, term=None):
-    """Where a via-less unit runs its power trace, or None.
+def _route_run(start, targets, net, bends, hazards, waypoints, outline,
+               term_flag: bool):
+    """The shared power-trace router behind novia, CLK and link runs.
 
-    A unit sits in one pour and needs the other net. Normally it drops
-    through its own via; with novia set it runs a trace across its own layer
-    to the nearest connector pad carrying that net instead. Those pads are
-    plated through, so landing on one reaches the far pour exactly as a via
-    would.
+    Finds the shortest clear polyline from `start` to the first reachable
+    entry of `targets`, staying NOVIA_CLEAR off every hazard quad and
+    NOVIA_EDGE off the outline. Hand-placed `bends` win outright: the point
+    of dragging them is to choose the path yourself. Every leg is still
+    checked, and a bad one is flagged so the UI can say so rather than ship
+    a shorted trace.
 
-    Front units chase GND from the cathode, back units chase 3V3 from the
-    resistor's input — the same net the via used to fetch. Ties break on
-    CONNECTOR_PADS order so the web preview picks the same pad.
-
-    `term` (from novia_term) overrides the destination: the run goes to that
-    exact point — a chosen connector pad, or another unit's same-net pad so
-    several runs can share one path. A chosen destination is never traded
-    for a reachable one; an unreachable choice comes back flagged "tight"
-    so the UI can say so, because silently landing somewhere else would make
-    the preview lie about the board.
-
-    Returns {"pts": [board mm, ...], "net": str, "pad": (x, y)}. The run is a
-    straight shot where that clears the unit's own copper, and doglegs across
-    the unit's short axis where it does not: with the resistor on the far
-    side of the LED from the pad, a straight run skims its own anode pad by
-    0.19 mm against a 0.2 mm rule.
+    Returns {"pts": [board mm, ...], "net": str, "pad": (x, y)}, plus
+    "manual"/"tight"/"term" flags exactly as novia_route always did.
     """
-    if not led.novia:
-        return None
-    g = led_geometry(led)
-    front = led.side != "back"
-    net = "GND" if front else "3V3"
-    cx, cy = clamp_led_obj(led, safe)
-    ang = led.rot
-
-    def to_board(dx, dy):
-        rx, ry = _r(dx, dy, ang)
-        return cx + rx, cy + ry
-
-    s_off = g["led_k"] if front else g["res_in"]
-    start = to_board(*s_off)
-    # A front-side through-hole LED needs nothing at all: its cathode lead is
-    # plated through to the back face, where the GND pour already is. This is
-    # the cleanest via-less unit there is — no extra copper, no channel cut
-    # across the pour. (A back-side unit still has to fetch 3V3 for its SMD
-    # resistor, so it gets a trace.)
-    if front and "drill" in PKG[g["pkg"]]:
-        return {"pts": [start], "net": net, "pad": None, "direct": True}
-    if term is not None:
-        targets = [term[0]]
-    else:
-        targets = sorted(
-            ((px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
-             if pnet == net and num in pins),
-            key=lambda t: (t[0] - start[0]) ** 2 + (t[1] - start[1]) ** 2)
-        if not targets:
-            return None  # no kept pin carries this net; the caller warns
-
-    # Everything the run has to stay clear of: this unit's own copper bar the
-    # pad it leaves from, every other unit sharing this layer, and any
-    # connector pad on a different net (VBATT and CLK/NC included — landing
-    # on those would be worse than a short). A chained-to unit's same-net pad
-    # is the destination, so it is dropped the same way the start pad is.
-    term_led = term[1] if term else None
-    hazards = _unit_copper_quads(led, safe, skip_start=True)
-    siblings = [o for o in others if o is not led and o.side == led.side]
-    for o in siblings:
-        hazards += _unit_copper_quads(o, safe, skip_start=o is term_led)
-    # A unit on the far side still lands copper on this layer wherever its
-    # pads are plated through, and a routed hole is a hole on every layer.
-    for o in others:
-        if o is led or o.side == led.side:
-            continue
-        og = led_geometry(o)
-        if "drill" in PKG[og["pkg"]]:
-            for x, y, r in th_pad_circles(o, safe):
-                hazards.append(_round_hazard(x, y, r + NOVIA_CLEAR))
-        if og["hole"]:
-            ocx, ocy = clamp_led_obj(o, safe)
-            hazards.append(_round_hazard(ocx, ocy, og["hole"] / 2 + NOVIA_CLEAR))
-    for num, px, py, pnet, _row in CONNECTOR_PADS:
-        if num not in pins or pnet == net:
-            continue
-        hazards.append(_round_hazard(px, py, 0.875 + NOVIA_CLEAR))
-
     rings = outline if outline else [
         [(OUTLINE[0], OUTLINE[1]), (OUTLINE[2], OUTLINE[1]),
          (OUTLINE[2], OUTLINE[3]), (OUTLINE[0], OUTLINE[3])]
@@ -922,29 +1084,14 @@ def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
         # leg that leaves the board entirely is worse still.
         return all(_seg_dist(a, b, e0, e1) >= NOVIA_EDGE for e0, e1 in edges)
 
-    # Turning points worth considering: the corners of every obstacle's grown
-    # bounding box.
-    waypoints = list(_expanded_corners(led, safe, NOVIA_ESCAPE))
-    for o in siblings:
-        waypoints += _expanded_corners(o, safe, NOVIA_ESCAPE)
-    for num, px, py, pnet, _row in CONNECTOR_PADS:
-        if num not in pins or pnet == net:
-            continue
-        r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE
-        waypoints += [(px - r, py - r), (px + r, py - r),
-                      (px + r, py + r), (px - r, py + r)]
-
-    # Hand-placed bends win outright: the point of dragging them is to choose
-    # the path yourself. Every leg is still checked, and a bad one is flagged
-    # so the UI can say so rather than ship a shorted trace.
-    if led.nodes:
+    if bends:
         pad = targets[0]
-        pts = [start] + [(float(x), float(y)) for x, y in led.nodes] + [pad]
+        pts = [start] + [(float(x), float(y)) for x, y in bends] + [pad]
         bad = not all(clear(a, b) for a, b in zip(pts, pts[1:]))
         # The bends stay exactly where they were put; only the corners between
         # them are softened into 45s.
         out = {"pts": mitre45(pts, clear), "net": net, "pad": pad, "manual": True}
-        if term is not None:
+        if term_flag:
             out["term"] = True
         if bad:
             out["tight"] = True
@@ -1011,26 +1158,457 @@ def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
             continue
         out = {"pts": soften45(mitre45(pts, clear), clear),
                "net": net, "pad": pad}
-        if term is not None:
+        if term_flag:
             out["term"] = True
         return out
-    # Nothing legal reaches any pad — flag it so the UI can warn rather than
+    # Nothing legal reaches any pad: flag it so the UI can warn rather than
     # ship a board whose LED never lights.
     out = {"pts": [start, targets[0]], "net": net, "pad": targets[0], "tight": True}
-    if term is not None:
+    if term_flag:
         out["term"] = True
+    return out
+
+
+def _far_side_hazards(led: Led, others, safe) -> list:
+    """Copper the far side's units still land on this unit's layer.
+
+    TH pads and routed holes penetrate always. Power-via barrels penetrate
+    too, but the classic runs may ignore them (a barrel always carries the
+    running layer's own run net); a CLK run may not, and adds them itself
+    through _unit_via_quads.
+    """
+    out = []
+    for o in others:
+        if o is led or o.side == led.side:
+            continue
+        og = led_geometry(o)
+        if "drill" in PKG[og["pkg"]]:
+            for x, y, r in th_pad_circles(o, safe):
+                out.append(_round_hazard(x, y, r + NOVIA_CLEAR))
+        if og["hole"]:
+            ocx, ocy = clamp_led_obj(o, safe)
+            out.append(_round_hazard(ocx, ocy, og["hole"] / 2 + NOVIA_CLEAR))
+    return out
+
+
+def _jumper_waypoints(clk) -> list:
+    """Corners of the jumper's grown bounding box: router turning points."""
+    if not clk or not clk["jumper"]:
+        return []
+    xs, ys = [], []
+    for _net, cx, cy in clk["pads"]:
+        for px, py in _jumper_pad_quad(clk, cx, cy):
+            xs.append(px)
+            ys.append(py)
+    for v in (clk["via"], clk["v3via"]):
+        if v:
+            xs += [v[0] - VIA_SIZE / 2, v[0] + VIA_SIZE / 2]
+            ys += [v[1] - VIA_SIZE / 2, v[1] + VIA_SIZE / 2]
+    m = NOVIA_CLEAR + NOVIA_ESCAPE
+    x0, y0, x1, y1 = min(xs) - m, min(ys) - m, max(xs) + m, max(ys) + m
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+
+# Route results, memoised. The routers are pure functions of their arguments,
+# but they call EACH OTHER for hazard context (a CLK run dodges every classic
+# run; the link dodges everything), and the webapp asks for the same routes
+# once per keepout face, once per zone fill, once per bridge scan and once at
+# emission. Without this cache a two-unit CLK+novia board multiplied out to
+# ~12 s per download; with it the same board generates in well under a second.
+# Keys are reprs of every input (dataclass reprs carry every field), so any
+# change that could move a route misses the cache. Bounded: cleared rather
+# than evicted; route dicts are treated as immutable by every caller.
+_ROUTE_CACHE: dict = {}
+
+
+def _route_key(tag, led, pins, safe, others, outline, term, clk):
+    return (tag, repr(led), tuple(pins), repr(safe),
+            tuple(repr(o) for o in others), repr(outline), repr(term),
+            repr(clk))
+
+
+def novia_route(led: Led, pins=ALL_PINS, safe=None, others=(),
+                outline=None, term=None, clk=None):
+    """Where a via-less unit runs its power trace, or None.
+
+    A unit sits in one pour and needs the other net. Normally it drops
+    through its own via; with novia set it runs a trace across its own layer
+    to the nearest connector pad carrying that net instead. Those pads are
+    plated through, so landing on one reaches the far pour exactly as a via
+    would.
+
+    Front units chase GND from the cathode, back units chase 3V3 from the
+    resistor's input, the same net the via used to fetch. Ties break on
+    CONNECTOR_PADS order so the web preview picks the same pad.
+
+    `term` (from novia_term) overrides the destination: the run goes to that
+    exact point: a chosen connector pad, or another unit's same-net pad so
+    several runs can share one path. A chosen destination is never traded
+    for a reachable one; an unreachable choice comes back flagged "tight"
+    so the UI can say so, because silently landing somewhere else would make
+    the preview lie about the board.
+
+    With `clk` (from clk_info) a BACK unit whose Led.clk is set routes its
+    supply here too, whether or not novia is: the trace chases the CLK
+    hookup (pin 9 or the jumper's rail via, both plated holes) instead of a
+    3V3 pad, replacing the unit's 3V3 via exactly like a novia run would.
+    Its bends come from cnodes, and terms don't apply. A FRONT CLK unit's
+    supply is clk_route's job; this function still handles its GND side.
+
+    Returns {"pts": [board mm, ...], "net": str, "pad": (x, y)}. The run is a
+    straight shot where that clears the unit's own copper, and doglegs across
+    the unit's short axis where it does not: with the resistor on the far
+    side of the LED from the pad, a straight run skims its own anode pad by
+    0.19 mm against a 0.2 mm rule.
+    """
+    front = led.side != "back"
+    supply = clk if (clk is not None and led.clk and not front) else None
+    if supply is None and not led.novia:
+        return None
+    key = _route_key("novia", led, pins, safe, others, outline, term, clk)
+    if key in _ROUTE_CACHE:
+        return _ROUTE_CACHE[key]
+    g = led_geometry(led)
+    cx, cy = clamp_led_obj(led, safe)
+    ang = led.rot
+
+    def to_board(dx, dy):
+        rx, ry = _r(dx, dy, ang)
+        return cx + rx, cy + ry
+
+    if supply is not None:
+        net = supply["net"]
+        start = to_board(*g["res_in"])
+        bends = led.cnodes
+        term = None
+        targets = [supply["back"]]
+    else:
+        net = "GND" if front else "3V3"
+        bends = led.nodes
+        s_off = g["led_k"] if front else g["res_in"]
+        start = to_board(*s_off)
+        # A front-side through-hole LED needs nothing at all: its cathode
+        # lead is plated through to the back face, where the GND pour already
+        # is. This is the cleanest via-less unit there is: no extra copper,
+        # no channel cut across the pour. (A back-side unit still has to
+        # fetch its supply for the SMD resistor, so it gets a trace.)
+        if front and "drill" in PKG[g["pkg"]]:
+            return {"pts": [start], "net": net, "pad": None, "direct": True}
+        if term is not None:
+            targets = [term[0]]
+        else:
+            targets = sorted(
+                ((px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
+                 if pnet == net and num in pins),
+                key=lambda t: (t[0] - start[0]) ** 2 + (t[1] - start[1]) ** 2)
+            if not targets:
+                return None  # no kept pin carries this net; the caller warns
+
+    # Everything the run has to stay clear of: this unit's own copper bar the
+    # pad it leaves from, every other unit sharing this layer, and any
+    # connector pad on a different net (VBATT and NC included; landing
+    # on those would be worse than a short). A chained-to unit's same-net pad
+    # is the destination, so it is dropped the same way the start pad is.
+    term_led = term[1] if term else None
+    hazards = _unit_copper_quads(led, safe, skip_start=True,
+                                 start_pad="res_in" if supply else None)
+    siblings = [o for o in others if o is not led and o.side == led.side]
+    for o in siblings:
+        hazards += _unit_copper_quads(o, safe, skip_start=o is term_led)
+    # A unit on the far side still lands copper on this layer wherever its
+    # pads are plated through, and a routed hole is a hole on every layer.
+    hazards += _far_side_hazards(led, others, safe)
+    for num, px, py, pnet, _row in connector_pads(clk is not None):
+        if num not in pins or pnet == net:
+            continue
+        hazards.append(_round_hazard(px, py, 0.875 + NOVIA_CLEAR))
+    if clk is not None:
+        # The jumper's other-net pads (and, through them, its vias) are
+        # copper like any other; a run on any net but theirs keeps off.
+        hazards += _jumper_copper_quads(clk, net,
+                                        "front" if front else "back")
+    if supply is not None:
+        # A CLK supply run is a DIFFERENT net from everything else on its
+        # layer, so the same-net liberties the classic runs enjoy are gone:
+        # sibling via barrels and stubs (all 3V3 here), the far side's
+        # barrels (GND), and sibling 3V3 runs are all real hazards now.
+        for o in siblings:
+            hazards += _unit_via_quads(o, safe, clk)
+        for o in others:
+            if o is not led and o.side != led.side:
+                hazards += _unit_via_quads(o, safe, clk, stub=False)
+        for o in siblings:
+            if not (o.novia and not o.clk):
+                continue  # a sibling CLK run shares this net; crossing is legal
+            r2 = novia_route(o, pins, safe, others, outline=outline,
+                             term=novia_term(o, others, pins, safe, clk), clk=clk)
+            if r2 and len(r2["pts"]) > 1:
+                hazards += [_quad_seg(a, b, TRACK_W)
+                            for a, b in zip(r2["pts"], r2["pts"][1:])]
+
+    # Turning points worth considering: the corners of every obstacle's grown
+    # bounding box.
+    waypoints = list(_expanded_corners(led, safe, NOVIA_ESCAPE))
+    for o in siblings:
+        waypoints += _expanded_corners(o, safe, NOVIA_ESCAPE)
+    for num, px, py, pnet, _row in connector_pads(clk is not None):
+        if num not in pins or pnet == net:
+            continue
+        r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE
+        waypoints += [(px - r, py - r), (px + r, py - r),
+                      (px + r, py + r), (px - r, py + r)]
+    if clk is not None:
+        waypoints += _jumper_waypoints(clk)
+
+    if len(_ROUTE_CACHE) > 2048:
+        _ROUTE_CACHE.clear()
+    out = _route_run(start, targets, net, bends, hazards, waypoints,
+                     outline, term is not None)
+    _ROUTE_CACHE[key] = out
+    return out
+
+
+def clk_route(led: Led, pins=ALL_PINS, safe=None, others=(),
+              outline=None, clk=None):
+    """A front CLK unit's supply run to the jumper rail or pin 9, or None.
+
+    The front pour is 3V3, so a front unit that blinks cannot feed its
+    resistor from the plane: the supply arrives as a routed F.Cu trace from
+    res_in to the jumper's centre pad (jumper style) or pin 9 (trace style).
+    The unit's GND side is untouched: its via (or novia run) stays.
+
+    Routed AFTER every classic run: this net is a stranger on its layer, so
+    it dodges the GND runs, every sibling's via barrel and stub, and the
+    jumper's other pads; those were all routed without knowing about it,
+    and one side dodging is all the clearance rule needs.
+    """
+    if clk is None or not led.clk or led.side == "back":
+        return None
+    key = _route_key("clk", led, pins, safe, others, outline, None, clk)
+    if key in _ROUTE_CACHE:
+        return _ROUTE_CACHE[key]
+    g = led_geometry(led)
+    cx, cy = clamp_led_obj(led, safe)
+    rx, ry = _r(*g["res_in"], led.rot)
+    start = (cx + rx, cy + ry)
+    net = clk["net"]
+    targets = [clk["front"]]
+
+    hazards = _unit_copper_quads(led, safe, skip_start=True, start_pad="res_in")
+    hazards += _unit_via_quads(led, safe, clk)
+    siblings = [o for o in others if o is not led and o.side == led.side]
+    for o in siblings:
+        hazards += _unit_copper_quads(o, safe, skip_start=False)
+        hazards += _unit_via_quads(o, safe, clk)
+    hazards += _far_side_hazards(led, others, safe)
+    for o in others:
+        if o is not led and o.side != led.side:
+            hazards += _unit_via_quads(o, safe, clk, stub=False)
+    for num, px, py, pnet, _row in connector_pads(True):
+        if num not in pins or pnet == net:
+            continue
+        hazards.append(_round_hazard(px, py, 0.875 + NOVIA_CLEAR))
+    hazards += _jumper_copper_quads(clk, net, "front")
+    own = novia_route(led, pins, safe, others, outline=outline,
+                      term=novia_term(led, others, pins, safe, clk), clk=clk)
+    runs = [own] + [
+        novia_route(o, pins, safe, others, outline=outline,
+                    term=novia_term(o, others, pins, safe, clk), clk=clk)
+        for o in siblings if o.novia and not (o.clk and o.side == "back")]
+    for r2 in runs:
+        if r2 and len(r2["pts"]) > 1:
+            hazards += [_quad_seg(a, b, TRACK_W)
+                        for a, b in zip(r2["pts"], r2["pts"][1:])]
+
+    waypoints = list(_expanded_corners(led, safe, NOVIA_ESCAPE))
+    for o in siblings:
+        waypoints += _expanded_corners(o, safe, NOVIA_ESCAPE)
+    for num, px, py, pnet, _row in connector_pads(True):
+        if num not in pins or pnet == net:
+            continue
+        r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE
+        waypoints += [(px - r, py - r), (px + r, py - r),
+                      (px + r, py + r), (px - r, py + r)]
+    waypoints += _jumper_waypoints(clk)
+
+    if len(_ROUTE_CACHE) > 2048:
+        _ROUTE_CACHE.clear()
+    out = _route_run(start, targets, net, led.cnodes, hazards, waypoints,
+                     outline, False)
+    _ROUTE_CACHE[key] = out
+    return out
+
+
+def clk_link(leds=(), pins=ALL_PINS, safe=None, outline=None, clk=None):
+    """The trace from the jumper's CLK pad to pin 9, on the jumper's own
+    face, or None.
+
+    Only the jumper style has one (the trace style lands the runs on pin 9
+    directly). Routed LAST, after every unit run, so it dodges them all:
+    the units' pads, vias, stubs and runs on this face, whatever the other
+    face's units land through the board, the connector pads on other nets,
+    and the jumper's own rail and 3V3 pads.
+    """
+    if clk is None or not clk["jumper"]:
+        return None
+    leds = list(leds)
+    key = _route_key("link", None, pins, safe, leds, outline, None, clk)
+    if key in _ROUTE_CACHE:
+        return _ROUTE_CACHE[key]
+    net = "CLK"
+    jside = clk["side"]
+    start = (clk["pads"][0][1], clk["pads"][0][2])
+    targets = [clk["pin9"]]
+
+    hazards = []
+    for led in leds:
+        if led.side == jside:
+            hazards += _unit_copper_quads(led, safe, skip_start=False)
+            hazards += _unit_via_quads(led, safe, clk)
+        else:
+            g = led_geometry(led)
+            if "drill" in PKG[g["pkg"]]:
+                for x, y, r in th_pad_circles(led, safe):
+                    hazards.append(_round_hazard(x, y, r + NOVIA_CLEAR))
+            if g["hole"]:
+                ocx, ocy = clamp_led_obj(led, safe)
+                hazards.append(_round_hazard(ocx, ocy, g["hole"] / 2 + NOVIA_CLEAR))
+            hazards += _unit_via_quads(led, safe, clk, stub=False)
+    for num, px, py, pnet, _row in connector_pads(True):
+        if num not in pins or pnet == net:
+            continue
+        hazards.append(_round_hazard(px, py, 0.875 + NOVIA_CLEAR))
+    hazards += _jumper_copper_quads(clk, net, jside)
+    for led in leds:
+        if led.side != jside:
+            continue  # its runs are copper on the other face, not this one
+        runs = [novia_route(led, pins, safe, leds, outline=outline,
+                            term=novia_term(led, leds, pins, safe, clk), clk=clk),
+                clk_route(led, pins, safe, leds, outline=outline, clk=clk)]
+        for r2 in runs:
+            if r2 and r2["net"] != net and len(r2["pts"]) > 1:
+                hazards += [_quad_seg(a, b, TRACK_W)
+                            for a, b in zip(r2["pts"], r2["pts"][1:])]
+
+    waypoints = []
+    for led in leds:
+        waypoints += _expanded_corners(led, safe, NOVIA_ESCAPE)
+    for num, px, py, pnet, _row in connector_pads(True):
+        if num not in pins or pnet == net:
+            continue
+        r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE
+        waypoints += [(px - r, py - r), (px + r, py - r),
+                      (px + r, py + r), (px - r, py + r)]
+    waypoints += _jumper_waypoints(clk)
+
+    if len(_ROUTE_CACHE) > 2048:
+        _ROUTE_CACHE.clear()
+    out = _route_run(start, targets, net, clk["nodes"], hazards, waypoints,
+                     outline, False)
+    _ROUTE_CACHE[key] = out
+    return out
+
+
+def clk_v3_link(leds=(), pins=ALL_PINS, safe=None, outline=None, clk=None):
+    """The trace feeding a back-side jumper's 3V3 pad from a 3V3 connector
+    pin on its own face, or None.
+
+    Exists only while the jumper sits on the back with its dedicated via
+    turned off (BadgeSpec.jumper_via False): the pin's plated hole carries
+    the front pour's net, so a plain same-face trace is all the steady side
+    needs. Routed after everything else, the CLK link included: this net is
+    3V3, so it dodges every run and pad on any other net and may freely
+    cross the pour's own copper.
+    """
+    if clk is None or not clk["jumper"] or not clk.get("v3link"):
+        return None
+    leds = list(leds)
+    key = _route_key("v3link", None, pins, safe, leds, outline, None, clk)
+    if key in _ROUTE_CACHE:
+        return _ROUTE_CACHE[key]
+    net = "3V3"
+    jside = clk["side"]
+    start = (clk["pads"][2][1], clk["pads"][2][2])
+    # A hand-picked destination pin wins outright and is never traded for a
+    # reachable one (an unreachable choice comes back flagged tight), the
+    # same contract as a via-less run's chosen terminal. An invalid choice
+    # (wrong net, dropped pin) falls back to nearest-first.
+    term = next(((px, py) for num, px, py, pnet, _row in connector_pads(True)
+                 if num == clk.get("v3pin") and pnet == net and num in pins),
+                None)
+    if term is not None:
+        targets = [term]
+    else:
+        targets = sorted(
+            ((px, py) for num, px, py, pnet, _row in connector_pads(True)
+             if pnet == net and num in pins),
+            key=lambda t: (t[0] - start[0]) ** 2 + (t[1] - start[1]) ** 2)
+        if not targets:
+            return None  # no 3V3 pin kept at all; power_missing() says so
+
+    hazards = []
+    for led in leds:
+        if led.side == jside:
+            hazards += _unit_copper_quads(led, safe, skip_start=False)
+            hazards += _unit_via_quads(led, safe, clk)
+        else:
+            g = led_geometry(led)
+            if "drill" in PKG[g["pkg"]]:
+                for x, y, r in th_pad_circles(led, safe):
+                    hazards.append(_round_hazard(x, y, r + NOVIA_CLEAR))
+            if g["hole"]:
+                ocx, ocy = clamp_led_obj(led, safe)
+                hazards.append(_round_hazard(ocx, ocy, g["hole"] / 2 + NOVIA_CLEAR))
+            hazards += _unit_via_quads(led, safe, clk, stub=False)
+    for num, px, py, pnet, _row in connector_pads(True):
+        if num not in pins or pnet == net:
+            continue
+        hazards.append(_round_hazard(px, py, 0.875 + NOVIA_CLEAR))
+    hazards += _jumper_copper_quads(clk, net, jside)
+    for led in leds:
+        if led.side != jside:
+            continue  # its runs are copper on the other face, not this one
+        runs = [novia_route(led, pins, safe, leds, outline=outline,
+                            term=novia_term(led, leds, pins, safe, clk), clk=clk),
+                clk_route(led, pins, safe, leds, outline=outline, clk=clk)]
+        for r2 in runs:
+            if r2 and r2["net"] != net and len(r2["pts"]) > 1:
+                hazards += [_quad_seg(a, b, TRACK_W)
+                            for a, b in zip(r2["pts"], r2["pts"][1:])]
+    lk = clk_link(leds, pins, safe, outline, clk)
+    if lk is not None and len(lk["pts"]) > 1:
+        hazards += [_quad_seg(a, b, TRACK_W)
+                    for a, b in zip(lk["pts"], lk["pts"][1:])]
+
+    waypoints = []
+    for led in leds:
+        waypoints += _expanded_corners(led, safe, NOVIA_ESCAPE)
+    for num, px, py, pnet, _row in connector_pads(True):
+        if num not in pins or pnet == net:
+            continue
+        r = 0.875 + NOVIA_CLEAR + NOVIA_ESCAPE
+        waypoints += [(px - r, py - r), (px + r, py - r),
+                      (px + r, py + r), (px - r, py + r)]
+    waypoints += _jumper_waypoints(clk)
+
+    if len(_ROUTE_CACHE) > 2048:
+        _ROUTE_CACHE.clear()
+    out = _route_run(start, targets, net, clk["v3nodes"], hazards, waypoints,
+                     outline, term is not None)
+    _ROUTE_CACHE[key] = out
     return out
 
 
 def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
                        others=(), outline=None,
-                       face: str | None = None) -> list[tuple[str, list]]:
+                       face: str | None = None,
+                       clk=None) -> list[tuple[str, list]]:
     """Convex quads covering the unit's copper plus the margin art must clear.
 
     Pads inflated 0.5 mm per side (solder-mask-bridge rule + hand-soldering
     margin), the via as a square 0.45 mm clear of its barrel, traces as
     1.1 mm-wide rects (track 0.3 + 0.4 each side), and the reverse hole
-    (+0.5). Labeled (board mm, unit-rotated) — the web UI paints identical
+    (+0.5). Labeled (board mm, unit-rotated); the web UI paints identical
     pieces, so art hugs units the same way in the preview and on the board.
     Much tighter than the old bounding-box rectangle.
 
@@ -1038,7 +1616,7 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
     face. It only changes a far-side ("LED on the other side") unit, whose
     copper is genuinely split across the board: the LED face carries just the
     LED pads, the power via and any routed hole, while on the resistor face
-    the departed LED pads shrink to the two via barrels sunk in them — art
+    the departed LED pads shrink to the two via barrels sunk in them; art
     and windows reclaim the rest of the old pad room instead of leaving a
     pad-shaped slab of copper on a face the part is not even on.
     """
@@ -1076,31 +1654,39 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
     apts = unit_trace_pts(led, "a", safe)
     pieces += [("trace_a", _quad_seg(a, b, 1.1)) for a, b in zip(apts, apts[1:])]
     route = novia_route(led, pins, safe, others, outline=outline,
-                        term=novia_term(led, others, pins, safe))
+                        term=novia_term(led, others, pins, safe, clk), clk=clk)
     if route:
         # No via to clear, but a long run to the connector pad that artwork
-        # must keep off just the same — copper art touching it would short
+        # must keep off just the same: copper art touching it would short
         # the trace to the pour it crosses.
         pts = route["pts"]
         for n, (a, b) in enumerate(zip(pts, pts[1:])):
             pieces.append((f"trace_pad{n}" if n else "trace_pad",
                            _quad_seg(a, b, 1.1)))
     else:
-        # A round collar round the barrel — see _via_collar for why it is a
+        # A round collar round the barrel; see _via_collar for why it is a
         # 16-gon at the 0.2 mm netclass minimum rather than the old octagon
         # at the pour rule (whose corners reached 0.76 mm and left a patch of
         # plane that read as a mysterious oversized pad through a window).
-        # Mirrored by unitCopperPieces in index.html — the preview draws
+        # Mirrored by unitCopperPieces in index.html: the preview draws
         # the same carve, and tests/test_browser.py holds the two in parity.
         pieces.append(("via", _via_collar(*pt(*vo))))
         vpts = unit_trace_pts(led, "v", safe)
         pieces += [("trace_stub", _quad_seg(a, b, 1.1))
                    for a, b in zip(vpts, vpts[1:])]
+    # A front CLK unit's supply run: one more band of copper on its face
+    # that artwork has to keep off. (A back CLK unit's supply IS `route`.)
+    crun = clk_route(led, pins, safe, others, outline=outline, clk=clk)
+    if crun and len(crun["pts"]) > 1:
+        cpts = crun["pts"]
+        pieces += [(f"trace_clk{n}" if n else "trace_clk",
+                    _quad_seg(a, b, 1.1))
+                   for n, (a, b) in enumerate(zip(cpts, cpts[1:]))]
     if g["hole"]:
         pieces.append(("hole", quad_rect(0.0, 0.0, g["hole"] + 1.0, g["hole"] + 1.0)))
     if "drill" in p:
         # A through-hole LED's silkscreen outline follows its lens, which
-        # reaches well past the pads — so the pad quads above do NOT cover it
+        # reaches well past the pads, so the pad quads above do NOT cover it
         # and artwork would print straight over the part's own silk (the fab
         # then clips whichever lost). Claim the body plus a silk margin.
         bw, bh = p["body"]
@@ -1113,7 +1699,7 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
         far_face = "back" if led.side != "back" else "front"
         if face == far_face:
             # Only the LED half crossed over: its pads (vias sunk in them),
-            # the power via's barrel and a routed hole exist here — the
+            # the power via's barrel and a routed hole exist here; the
             # resistor, its pads and every trace stayed behind.
             keep = {"pad_led_k", "pad_led_a", "via", "hole"}
             pieces = [(lb, q) for lb, q in pieces if lb in keep]
@@ -1128,14 +1714,14 @@ def unit_copper_pieces(led: Led, safe=None, pins=ALL_PINS,
 
 
 def unit_copper_poly(led: Led, safe=None, pins=ALL_PINS, others=(),
-                     outline=None, face: str | None = None):
+                     outline=None, face: str | None = None, clk=None):
     """unit_copper_pieces as one shapely geometry (for art keepouts)."""
     from shapely.geometry import Polygon
     from shapely.ops import unary_union
 
     return unary_union([Polygon(q) for _, q in
                         unit_copper_pieces(led, safe, pins, others, outline,
-                                           face)])
+                                           face, clk)])
 
 
 def th_pad_circles(led: Led, safe=None) -> list[tuple[float, float, float]]:
@@ -1158,7 +1744,7 @@ def th_pad_circles(led: Led, safe=None) -> list[tuple[float, float, float]]:
 
 
 def _quads_overlap(a: list, b: list, gap: float = 0.0) -> bool:
-    """SAT overlap for convex quads — the exact mirror of the UI's polysClear."""
+    """SAT overlap for convex quads: the exact mirror of the UI's polysClear."""
     for poly in (a, b):
         n = len(poly)
         for i in range(n):
@@ -1177,7 +1763,7 @@ def _quads_overlap(a: list, b: list, gap: float = 0.0) -> bool:
 def _ray_exit_edge(sx: float, sy: float, dx: float, dy: float, rings):
     """First outline crossing along (dx,dy) from (sx,sy): (distance, edge).
 
-    Rings are closed point lists (exterior first, then holes) — a hole
+    Rings are closed point lists (exterior first, then holes); a hole
     boundary counts as an exit too, so bridges never span board cut-outs.
     The edge comes back with the distance because a pullback measured along
     the ray is not a clearance: only the angle the ray makes with the edge it
@@ -1203,7 +1789,7 @@ def _ray_exit_edge(sx: float, sy: float, dx: float, dy: float, rings):
 
 
 # Bridge traces: 0.3 mm copper from each unit to the pour's perimeter ring.
-# They replace the old reserved 2 mm window corridor — glow/bare windows may
+# They replace the old reserved 2 mm window corridor: glow/bare windows may
 # now hug a unit, and the thin bridge stays visible where it crosses one.
 BRIDGE_INSET = 0.8   # endpoint pullback from the outline (lands in the ring)
 BRIDGE_MIN = 0.5     # shortest useful bridge
@@ -1216,7 +1802,7 @@ def _bridge_route(start, own_pieces, skip_labels, obstacles, rings):
 
     Candidates are 16 compass directions ordered nearest-exit-first; a
     candidate survives if its 1.0 mm-wide swath (track + pour clearance)
-    misses every obstacle quad. Deterministic — the web UI runs the same
+    misses every obstacle quad. Deterministic: the web UI runs the same
     scan and draws the same segment. None when everything is blocked.
     """
     import math
@@ -1231,8 +1817,8 @@ def _bridge_route(start, own_pieces, skip_labels, obstacles, rings):
         if hit is None:
             continue
         t, ((e0x, e0y), (e1x, e1y)) = hit
-        # BRIDGE_INSET is a CLEARANCE — how far the endpoint has to sit back
-        # from the outline — so it has to be taken perpendicular to the edge
+        # BRIDGE_INSET is a CLEARANCE (how far the endpoint has to sit back
+        # from the outline), so it has to be taken perpendicular to the edge
         # the ray meets, not along the ray. The scan walks 16 directions
         # 22.5 deg apart, so a ray meeting a horizontal edge at 22.5 deg used
         # to pull back only 0.8*sin(22.5) = 0.306 mm of real clearance; less
@@ -1272,7 +1858,7 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     unconnected. Only the filled copper can settle that, so each unit's route
     is judged against a real fill.
 
-    The route always goes to the NEAREST pad carrying the net — the same
+    The route always goes to the NEAREST pad carrying the net, the same
     choice the browser preview makes, so what is drawn is what gets built.
     Hunting for a further pad that happens to work salvages under 1% of
     placements and would make the preview lie, so unreachable units are
@@ -1282,7 +1868,8 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     from shapely.ops import unary_union
 
     leds = list(spec.leds)
-    if not any(led.novia for led in leds):
+    clk = clk_info(spec)
+    if not any(led.novia for led in leds) and clk is None:
         return leds, []
     if safe is None:
         safe = unit_safe(spec)
@@ -1297,29 +1884,47 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     bridges = unit_bridges(spec, safe)
 
     for i, led in enumerate(leds):
-        if not led.novia:
-            continue
-        route = novia_route(led, spec.pins, safe, leds, outline=spec.outline,
-                            term=novia_term(led, leds, spec.pins, safe))
-        if route is None or route.get("direct"):
+        runs = []
+        if led.novia or (clk is not None and led.clk and led.side == "back"):
+            runs.append(novia_route(
+                led, spec.pins, safe, leds, outline=spec.outline,
+                term=novia_term(led, leds, spec.pins, safe, clk), clk=clk))
+        runs.append(clk_route(led, spec.pins, safe, leds,
+                              outline=spec.outline, clk=clk))
+        runs = [r for r in runs if r is not None and not r.get("direct")]
+        if not runs:
             continue  # nothing routed, so nothing can cut the pour
-        if route.get("tight"):
+        if any(r.get("tight") for r in runs):
             problems.append(i)
             continue
-        # The channel this run cuts can fence the pour's own connector pads
-        # apart. That splits the whole RAIL, not just this unit — KiCad answers
-        # with unconnected_items on the net — so the unit's contact and every
-        # kept pad of its pour have to end up on one island.
+        # The channel a run cuts can fence the pour's own connector pads
+        # apart. That splits the whole RAIL, not just this unit (KiCad answers
+        # with unconnected_items on the net), so the unit's contact and every
+        # kept pad of its pour have to end up on one island. A CLK unit's
+        # supply pad is not a pour contact at all (its run is real emitted
+        # copper), so only the side that still feeds from the pour counts;
+        # and with the jumper on this face's pour, its 3V3 pad has to stay
+        # attached too, or bridging the jumper to steady would do nothing.
         front = led.side != "back"
         layer, pour = ("F.Cu", "3V3") if front else ("B.Cu", "GND")
         g = led_geometry(led)
         cx, cy = clamp_led_obj(led, safe)
-        ox, oy = _r(*(g["res_in"] if front else g["led_k"]), led.rot)
-        must = [(cx + ox, cy + oy)] + [
-            (px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
-            if pnet == pour and num in spec.pins]
+        must = []
+        if not front or not (clk is not None and led.clk):
+            ox, oy = _r(*(g["res_in"] if front else g["led_k"]), led.rot)
+            must.append((cx + ox, cy + oy))
+        must += [(px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
+                 if pnet == pour and num in spec.pins]
+        if front and clk is not None and clk["jumper"]:
+            if clk["side"] == "front":
+                must.append((clk["pads"][2][1], clk["pads"][2][2]))
+            elif clk["v3via"]:
+                must.append(clk["v3via"])
+            # via off: the steady side is fed by an emitted trace to a 3V3
+            # pin whose hole is already in the must list; the trace itself
+            # is judged by its own tight flag, not by the fill.
         # The unit's perimeter bridge is real same-net copper on this layer
-        # and can be the only thing joining its island to the plane — a
+        # and can be the only thing joining its island to the plane; a
         # far-side LED's contact is just its via-in-pad collar, tied to the
         # ring by the bridge, and judging the fill without it refused boards
         # whose download was DRC-clean (while the 2D preview happily routed).
@@ -1334,7 +1939,7 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     # Then the question that check cannot ask: a channel is cut across a whole
     # pour, and the unit it fences off is very often SOMEBODY ELSE. Asking only
     # whether each via-less unit's own contact still reaches a pad missed the
-    # case entirely — two via-less runs can jointly enclose a third unit's
+    # case entirely: two via-less runs can jointly enclose a third unit's
     # ordinary via, and that third unit was never examined at all because it is
     # not via-less. So walk every unit's rail contacts too.
     for i, led in enumerate(leds):
@@ -1360,6 +1965,11 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
             # lands on (or, for a front through-hole LED, through its own
             # plated lead), so there is no far-layer terminal to strand.
             contacts.pop("B.Cu" if front else "F.Cu", None)
+        if clk is not None and led.clk:
+            # The supply is a routed CLK trace now: a front unit's res_in no
+            # longer touches the 3V3 pour, and a back unit's 3V3 via is gone.
+            # Either way there is nothing of this unit left on F.Cu's rail.
+            contacts.pop("F.Cu", None)
         for layer, (pt, pour) in contacts.items():
             pads = [(px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
                     if pnet == pour and num in spec.pins]
@@ -1383,7 +1993,7 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
 def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
     """Per unit: {i: {"F.Cu": seg | None, "B.Cu": seg | None}} in board mm.
 
-    F bridges carry 3V3, B bridges carry GND — each starts at the pad or
+    F bridges carry 3V3, B bridges carry GND; each starts at the pad or
     via that feeds the unit on that layer, so a window that fully encircles
     the unit can no longer strand its copper island. A None means no clear
     straight path existed; the caller falls back to the reserved corridor.
@@ -1397,7 +2007,19 @@ def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
         hw = 1.225  # pad copper 0.875 + 0.35 clearance
         pads.append([(px - hw, py - hw), (px + hw, py - hw),
                      (px + hw, py + hw), (px - hw, py + hw)])
-    all_pieces = [unit_copper_pieces(led, safe, spec.pins, spec.leds, spec.outline)
+    clk = clk_info(spec)
+    if clk is not None and clk["jumper"]:
+        # The jumper's copper (and its routed link to pin 9) blocks bridges
+        # exactly like a connector pad would.
+        pads += [q for _lbl, q in jumper_copper_pieces(clk)]
+        for run in (clk_link(spec.leds, spec.pins, safe, spec.outline, clk),
+                    clk_v3_link(spec.leds, spec.pins, safe, spec.outline,
+                                clk)):
+            if run is not None and len(run["pts"]) > 1:
+                pads += [_quad_seg(a, b, 1.0)
+                         for a, b in zip(run["pts"], run["pts"][1:])]
+    all_pieces = [unit_copper_pieces(led, safe, spec.pins, spec.leds,
+                                     spec.outline, clk=clk)
                   for led in spec.leds]
     out: dict = {}
     for i, led in enumerate(spec.leds):
@@ -1415,10 +2037,15 @@ def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
         }
         if led.novia:
             # No via, so nothing of this unit lives on the far layer to be
-            # stranded — its trace reaches a connector pad instead. Dropping
+            # stranded; its trace reaches a connector pad instead. Dropping
             # the key (rather than setting None) keeps the caller from
             # reserving a window corridor it no longer needs.
             del starts["B.Cu" if front else "F.Cu"]
+        if clk is not None and led.clk:
+            # The supply is a CLK trace now, not a 3V3 pour feed: a front
+            # unit's res_in carries CLK (bridging it to the 3V3 ring would be
+            # a dead short), and a back unit's 3V3 via is gone entirely.
+            starts.pop("F.Cu", None)
         obstacles = pads + [q for j, ps in enumerate(all_pieces) if j != i
                             for _lbl, q in ps]
         th = "drill" in PKG[g["pkg"]]
@@ -1428,12 +2055,12 @@ def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
             own = all_pieces[i]
             if lbl == "via":
                 # This bridge runs on the unit's FAR layer, where its SMD pads
-                # and traces are not copper at all — they live on the mounting
+                # and traces are not copper at all: they live on the mounting
                 # face only. Treating them as obstacles walled the via in: an
                 # inline unit's via sits 1.0 mm from the resistor pad center,
                 # inside that pad's inflated quad, so every one of the 16 rays
                 # "collided" and the unit fell back to the reserved 2 mm window
-                # corridor — a fat band of pour where a 0.3 mm trace belongs.
+                # corridor, a fat band of pour where a 0.3 mm trace belongs.
                 # Only pieces that penetrate the board can truly block this
                 # layer: the reverse-mount hole, a TH LED's pad annuli, and a
                 # far-side LED's via-in-pads.
@@ -1457,9 +2084,9 @@ def resolve_overlap(
     server-side backstop for hand-crafted requests.
 
     Callers run this AFTER resolve_pad_overlap, so a slide that parks b back
-    on a connector pad quietly undoes the pad backstop and ships a short —
-    measured on two reverse 1206s at y=3.59, where the pad resolver moved the
-    second unit from x=16.49 to 13.63 and this routine put it straight back.
+    on a connector pad quietly undoes the pad backstop and ships a short
+    (measured on two reverse 1206s at y=3.59, where the pad resolver moved the
+    second unit from x=16.49 to 13.63 and this routine put it straight back).
     Landing on a pad is therefore a tiebreak, not a hard rule: the search runs
     once refusing the kept pads and again without them, so separating the two
     units still wins if nothing else can.
@@ -1544,7 +2171,7 @@ def _resolve_overlap_min_push(b, gap, safe, pa, fits, avoid=True):
 
     resolve_overlap's four axis slides clear a's whole axis-aligned ENVELOPE,
     which is far more room than two tilted units actually need, and on the big
-    packages all four land outside `safe` — so the unit stayed exactly where it
+    packages all four land outside `safe`, so the unit stayed exactly where it
     was and shipped a pad-to-pad short (measured: 35 of 600 random two-unit
     boards, every one of them a give-up rather than a bad slide).
 
@@ -1647,7 +2274,7 @@ def resolve_pad_overlap(
         #
         # A slide that runs off `safe` is CLAMPED back onto the board rather
         # than discarded. The pair being cleared is in one axis; the clamp only
-        # moves the other one, so the slide still does its job — and discarding
+        # moves the other one, so the slide still does its job, and discarding
         # it stranded units whose envelope only fits the board one way round.
         cands = []
         for x, y in (
@@ -1733,7 +2360,11 @@ class Text:
 #            window that back-side LED light diffuses through
 #   bare   - copper removed AND mask opened on both sides: raw FR4 laminate,
 #            the brightest light window
-ART_MATERIALS = ("silk", "copper", "glow", "bare")
+#   cut    - the board itself removed: the region becomes a real cutout
+#            through copper, mask and laminate. Cut regions never become an
+#            ArtLayer; the webapp subtracts them from the outline instead,
+#            so everything downstream sees the true board shape.
+ART_MATERIALS = ("silk", "copper", "glow", "bare", "cut")
 
 
 @dataclass
@@ -1749,13 +2380,13 @@ class ArtLayer:
     # through the whole board, so their side only matters for bookkeeping.
     side: str = "front"
     # For windows (glow/bare): which face(s) this layer cuts copper from.
-    # "through" cuts both; "front"/"back" cut one face — the other keeps its
+    # "through" cuts both; "front"/"back" cut one face: the other keeps its
     # copper (and, for bare, its mask: bare opens only the mask of the faces
     # it cuts). The webapp splits every glow and through-bare drawing into
     # one layer per face, each carved around that face's own copper, so the
     # far side of a unit keeps its via and nothing else instead of a slab of
     # pour shadowing the whole part. Light still crosses wherever the two
-    # face layers overlap — which is everywhere except those unit shadows,
+    # face layers overlap, which is everywhere except those unit shadows,
     # where a part blocks the light anyway.
     window: str = "through"
 
@@ -1768,18 +2399,48 @@ class BadgeSpec:
     art: list[ArtLayer] = field(default_factory=list)
     mask_color: str = "green"
     # Surface finish: "enig" (gold) or "hasl" (silver). Board-wide fab
-    # choice — it colors every exposed pad, via, and copper-art opening.
+    # choice: it colors every exposed pad, via, and copper-art opening.
     finish: str = "enig"
     # Connector pins kept on this badge, by pad number. Any combination is
     # allowed; power_missing() reports when the LEDs are left without a rail.
     pins: tuple[str, ...] = ALL_PINS
-    # Custom board outline as rings of (x, y) board-mm points — first ring
+    # Custom board outline as rings of (x, y) board-mm points: first ring
     # is the exterior, the rest are holes. None = the standard 20x20 square.
     outline: list[list[tuple[float, float]]] | None = None
     # Via tenting: cover vias with soldermask (every fab's default). Off
     # writes `(tenting none)` on each via so the annulus plates bare, and
     # window mask openings stop keeping a cap of mask over vias they cross.
     tenting: bool = True
+    # How CLK units (Led.clk) meet the blink clock, once any exist. True =
+    # the 3-pad solder jumper (bridge one side: steady 3V3 or blinking CLK);
+    # False = their supply is wired straight to pin 9. See clk_info().
+    clk_jumper: bool = True
+    # Jumper centre in board mm (None = JUMPER_AT) and its rotation in
+    # degrees clockwise. Only meaningful while clk_jumper is on.
+    jumper: tuple | None = None
+    jumper_rot: float = 0
+    # Which face carries the jumper's pads and silk. On the back, its 3V3
+    # pad has no 3V3 copper of its own (the back pour is GND), so it is fed
+    # per jumper_via below. Blinking LEDs on the opposite face from the
+    # jumper ALWAYS reach its rail through the rail via; no option gates
+    # that.
+    jumper_side: str = "front"
+    # How a BACK-side jumper's 3V3 pad is fed: True = its own via straight
+    # down into the front pour; False = a routed trace on its own face to a
+    # kept 3V3 connector pin (whose plated hole carries the pour's net).
+    # Ignored on a front-side jumper, whose 3V3 pad sits in the pour.
+    jumper_via: bool = True
+    # Hand-placed bends for the jumper's routed links, same contract as
+    # Led.nodes: jumper_nodes bends the CLK-pad-to-pin-9 link, and
+    # jumper_v3nodes bends the 3V3-pad-to-3V3-pin link (which only exists
+    # while jumper_side is "back" and jumper_via is off).
+    jumper_nodes: tuple = ()
+    jumper_v3nodes: tuple = ()
+    # Which kept 3V3 connector pin the traced 3V3 hookup lands on, by pad
+    # number ("7"/"15"). None = the nearest, like a via-less run; an invalid
+    # choice (wrong net, dropped pin) falls back to None rather than
+    # refusing, the same contract as Led.term.
+    jumper_v3pin: str | None = None
 
     @property
     def rows(self) -> tuple[str, ...]:
@@ -1865,13 +2526,20 @@ LAYERS = """  (layers
 
 
 def _nets(spec: BadgeSpec) -> tuple[list[str], dict[str, int]]:
-    names = ["", "3V3", "GND"] + [f"/LED{i + 1}_A" for i in range(len(spec.leds))]
+    names = ["", "3V3", "GND"]
+    clk = clk_info(spec)
+    if clk is not None:
+        names.append("CLK")
+        if clk["jumper"]:
+            names.append(CLK_RAIL)
+    names += [f"/LED{i + 1}_A" for i in range(len(spec.leds))]
     index = {name: i for i, name in enumerate(names)}
     lines = [f'  (net {i} "{name}")' for i, name in enumerate(names)]
     return lines, index
 
 
-def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
+def _connector_footprint(nets: dict[str, int], pins=ALL_PINS,
+                         clk: bool = False) -> str:
     out = [
         f'  (footprint "MiniBadge:MiniBadge_Simple" (layer "F.Cu") (tstamp {_ts("fp-conn")})',
         f"    (at {_n(ORIGIN)} {_n(ORIGIN)})",
@@ -1886,7 +2554,7 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
         "    )",
     ]
     # Pin captions print on BOTH silkscreens (the editor preview shows them
-    # on both faces — the fab board should match; the Dwgs.User layer the
+    # on both faces: the fab board should match; the Dwgs.User layer the
     # official footprint used never prints at all). Centered text mirrors
     # in place, so the back copy only needs the mirror flag.
     for i, key in enumerate(active_pairs(pins)):
@@ -1895,7 +2563,7 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
             continue
         x, y = pair_caption_at(key, pins)
         # Each caption names the PAIR, left word for the left pad. Seen from
-        # the back the pair is mirrored, so the words have to swap too —
+        # the back the pair is mirrored, so the words have to swap too;
         # otherwise the back silk labels 3V3 as GND and vice versa, which is
         # exactly the kind of thing someone hand-soldering trusts. A pair with
         # only one pin kept names just that pin, so nothing to swap.
@@ -1908,7 +2576,7 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
                 f"      (tstamp {_ts(f'fp-conn-label-{i}-{layer}')})",
                 "    )",
             ]
-    for num, x, y, net, _row in CONNECTOR_PADS:
+    for num, x, y, net, _row in connector_pads(clk):
         if num not in pins:
             continue
         net_s = f' (net {nets[net]} "{net}")' if net else ""
@@ -1917,11 +2585,11 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
             f'(drill 0.95) (layers "*.Cu" "*.Mask"){net_s} (tstamp {_ts(f"pad-{num}")}))'
         )
     # 3D: a 1x02 male header per kept pad pair, mounted on the BACK with the
-    # pins pointing away from the front face — how a minibadge actually
+    # pins pointing away from the front face: how a minibadge actually
     # plugs into the badge's socket strip. Model x-rotation 180 flips it
     # under the board; the z-rotation lays the two pins along the pair.
     # A pair with one pin dropped gets a single-pin header over the pad that
-    # is left, not nothing — the part really is there on the finished badge.
+    # is left, not nothing: the part really is there on the finished badge.
     headers = {
         2: model_path("Connector_PinHeader_2.54mm", "PinHeader_1x02_P2.54mm_Vertical"),
         1: model_path("Connector_PinHeader_2.54mm", "PinHeader_1x01_P2.54mm_Vertical"),
@@ -1936,7 +2604,7 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
         px = sum(xs) / len(xs)
         py = PAD_PAIRS[key]["header"][1]
         # offset z -1.6 (board thickness) + x-rot 180: body flush on the
-        # BACK face, pins pointing away from the front — how a minibadge
+        # BACK face, pins pointing away from the front: how a minibadge
         # plugs into the badge's socket strip.
         out.append(
             f'    (model "{headers[len(kept)]}"\n'
@@ -1949,11 +2617,73 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS) -> str:
     return "\n".join(out)
 
 
+def _jumper_footprint(nets: dict[str, int], clk) -> str:
+    """The 3-pad CLK solder jumper, emitted at its board position.
+
+    Pad 1 carries CLK (the end nearest pin 9 by default), pad 2 the rail
+    the CLK units' supply runs land on, pad 3 sits in the 3V3 pour. The
+    builder bridges 2-3 for steady LEDs or 1-2 to blink with the badge;
+    the silk names each end so nobody has to guess with an iron in their
+    hand. The footprint anchor is emitted unrotated and every child carries
+    the rotation itself, mirroring how the canvas draws it.
+    """
+    jx, jy, rot = clk["jumper"]
+    back = clk["side"] == "back"
+    cu, mask, silk, fab = (("B.Cu", "B.Mask", "B.SilkS", "B.Fab") if back
+                           else ("F.Cu", "F.Mask", "F.SilkS", "F.Fab"))
+    mirror = " (justify mirror)" if back else ""
+    krot = (-rot) % 360  # KiCad angles count counterclockwise; ours clockwise
+    at_rot = f" {_n(krot)}" if krot else ""
+    out = [
+        f'  (footprint "Jumper:SolderJumper_3_CLK" (layer "{cu}") (tstamp {_ts("fp-jumper")})',
+        f"    (at {_n(ORIGIN + jx)} {_n(ORIGIN + jy)})",
+        "    (attr smd exclude_from_pos_files exclude_from_bom)",
+        f'    (fp_text reference "JP1" (at 0 -2.4{at_rot} unlocked) (layer "{fab}")',
+        f"      (effects (font (size 1 1) (thickness 0.15)){mirror})",
+        f"      (tstamp {_ts('fp-jumper-ref')})",
+        "    )",
+        f'    (fp_text value "CLK_SEL" (at 0 2.4{at_rot} unlocked) (layer "{fab}")',
+        f"      (effects (font (size 1 1) (thickness 0.15)){mirror})",
+        f"      (tstamp {_ts('fp-jumper-val')})",
+        "    )",
+    ]
+    # CLK / 3V3 labels just past each end pad, 0.6 mm silk like the pin
+    # captions, so the bridge choice is legible on the finished board.
+    for lbl, sgn in (("CLK", -1), ("3V3", 1)):
+        lx, ly = _r(sgn * (JUMPER_PITCH + JUMPER_PAD[0] / 2 + 1.0), 0.0, rot)
+        out += [
+            f'    (fp_text user "{lbl}" (at {_n(lx)} {_n(ly)}{at_rot} unlocked) (layer "{silk}")',
+            f"      (effects (font (size 0.6 0.6) (thickness 0.11)){mirror})",
+            f"      (tstamp {_ts(f'fp-jumper-label-{lbl}')})",
+            "    )",
+        ]
+    # A thin bracket above and below the pad row.
+    hx, hy = 1.9, JUMPER_PAD[1] / 2 + 0.3
+    for tag, y0 in (("t", -hy), ("b", hy)):
+        (ax, ay), (bx, by) = _r(-hx, y0, rot), _r(hx, y0, rot)
+        out.append(
+            f"    (fp_line (start {_n(ax)} {_n(ay)}) (end {_n(bx)} {_n(by)}) "
+            f'(stroke (width 0.12) (type solid)) (layer "{silk}") '
+            f"(tstamp {_ts(f'fp-jumper-line-{tag}')}))"
+        )
+    for num, net, dx in (("1", "CLK", -JUMPER_PITCH), ("2", CLK_RAIL, 0.0),
+                         ("3", "3V3", JUMPER_PITCH)):
+        px, py = _r(dx, 0.0, rot)
+        out.append(
+            f'    (pad "{num}" smd rect (at {_n(px)} {_n(py)}{at_rot}) '
+            f"(size {_n(JUMPER_PAD[0])} {_n(JUMPER_PAD[1])}) "
+            f'(layers "{cu}" "{mask}") (net {nets[net]} "{net}") '
+            f"(tstamp {_ts(f'fp-jumper-pad-{num}')}))"
+        )
+    out.append("  )")
+    return "\n".join(out)
+
+
 def _seg_outside_discs(a, b, discs, min_len: float = 0.15) -> list:
     """The pieces of segment a->b that lie outside every disc (cx, cy, r).
 
-    Silkscreen must not print over an exposed via's mask aperture — the fab
-    clips it and DRC flags it — so when tenting is off, a unit's silk lines
+    Silkscreen must not print over an exposed via's mask aperture (the fab
+    clips it and DRC flags it), so when tenting is off, a unit's silk lines
     are broken around the via the way TH dome silk is already broken around
     its pads. Pieces shorter than min_len are dropped: a fleck of ink that
     small prints as nothing.
@@ -2024,7 +2754,7 @@ def _smd(
 
     def line(x0: float, y0: float, x1: float, y1: float, width: float, tag: str) -> str:
         a, b = _r(f * x0, y0, ang), _r(f * x1, y1, ang)
-        # silk_avoid discs (an exposed via's mask aperture) break the line —
+        # silk_avoid discs (an exposed via's mask aperture) break the line;
         # ink over open mask gets clipped by the fab and flagged by DRC.
         pieces = (_seg_outside_discs(a, b, silk_avoid) if silk_avoid
                   else [(a, b)])
@@ -2120,8 +2850,8 @@ def _smd(
             )
     elif drill:
         # Rectangular body (a bar, or a small dome on a rectangular base):
-        # outline on Fab plus two horizontal silk lines along the body edges
-        # — they clear the pads' mask openings vertically. A dome narrower
+        # outline on Fab plus two horizontal silk lines along the body edges;
+        # they clear the pads' mask openings vertically. A dome narrower
         # than its base gets its own Fab circle.
         sy = bh / 2 + 0.15
         lines += [
@@ -2150,20 +2880,20 @@ def _smd(
         # model's z-rotation turns the same way our _r turns board geometry;
         # a back-side footprint is flipped through the board plane, which
         # reverses that sense, so the angle negates. Getting this wrong leaves
-        # the body lying across its own pads at twice the angle — invisible on
+        # the body lying across its own pads at twice the angle: invisible on
         # a round part, obvious on a chip (both signs checked against renders).
         mz = (ang + (180 if flip else 0)) % 360
         if p == "B":
             mz = (-mz) % 360
         # SMD models sit centered on our footprint origin and need no offset.
         # The THT LED models are anchored at pin 1, so the offset walks them
-        # to pad 1 — in the model's own (already flipped) frame, hence mz, and
+        # to pad 1, in the model's own (already flipped) frame, hence mz, and
         # with 3D y counting upward against our y-down board.
         if drill:
             # Front: pad 1 is at _r(f * -dx, ang) and `f` supplies the inline
             # flip. Back: the flip is already inside mz (it carries the +180),
             # so applying `f` as well would flip twice and land the body a
-            # whole pad pitch away — which is what used to happen.
+            # whole pad pitch away, which is what used to happen.
             ox, oy = _r(-dx, 0, mz) if p == "B" else _r(f * -dx, 0, ang)
             off = f"{_n(ox)} {_n(-oy)} 0"
         else:
@@ -2184,6 +2914,7 @@ def _led_unit(
     others: tuple = (),
     outline=None,
     tenting: bool = True,
+    clk=None,
 ) -> str:
     """LED + resistor footprints, connecting traces, and the power via."""
     ang = led.rot
@@ -2193,6 +2924,9 @@ def _led_unit(
     front = led.side != "back"
     cu = "F.Cu" if front else "B.Cu"
     gnd, v33 = (nets["GND"], "GND"), (nets["3V3"], "3V3")
+    if clk is not None and led.clk:
+        # The resistor feeds from the CLK hookup, not the 3V3 pour.
+        v33 = (nets[clk["net"]], clk["net"])
     an = (nets[anode], anode)
     # KiCad 9 tents vias by default; only "leave them bare" needs saying.
     tent = "" if tenting else " (tenting none)"
@@ -2215,20 +2949,20 @@ def _led_unit(
         led_model = model_path(
             "LED_SMD", f"LED_{g['pkg']}_{PKG_METRIC[g['pkg']]}Metric")
     # "LED on the other side": the LED alone crosses to the far face and a via
-    # inside each of its pads carries the connections through — the via-in-pad
+    # inside each of its pads carries the connections through, the via-in-pad
     # style other minibadge designers use. The resistor and its trace stay put.
     far = (bool(led.farled) and not g["hole"]
            and "drill" not in PKG[g["pkg"]])
     led_side = ("back" if led.side != "back" else "front") if far else led.side
     route = novia_route(led, pins, safe, others, outline=outline,
-                        term=novia_term(led, others, pins, safe))
+                        term=novia_term(led, others, pins, safe, clk), clk=clk)
     avoid_led: tuple = ()
     avoid_res: tuple = ()
     if not tenting and route is None:
         # An exposed via opens a mask aperture right beside the unit's silk
         # (an inline resistor's bracket passes 0.19 mm from the barrel), and
         # ink over open mask is clipped by the fab and flagged by DRC. Break
-        # the silk around the aperture instead — same treatment TH dome silk
+        # the silk around the aperture instead: same treatment TH dome silk
         # already gets around its pads. Discs are in each footprint's emitted
         # frame: board-oriented mm, relative to its anchor.
         vo = g["via_front"] if front else g["via_back"]
@@ -2295,6 +3029,13 @@ def _led_unit(
             f"  (via (at {_n(via[0])} {_n(via[1])}) (size {_n(VIA_SIZE)}) "
             f'(drill {_n(VIA_DRILL)}) (layers "F.Cu" "B.Cu"){tent} '
             f"(net {stub_net}) (tstamp {_ts(f'via-{i}')}))")
+    # A front CLK unit's supply run: F.Cu trace from res_in to the jumper's
+    # rail pad or pin 9. (A back CLK unit's supply came through `route`.)
+    crun = clk_route(led, pins, safe, others, outline=outline, clk=clk)
+    if crun and len(crun["pts"]) > 1:
+        cpts = [(ORIGIN + px, ORIGIN + py) for px, py in crun["pts"]]
+        for n, (a, b) in enumerate(zip(cpts, cpts[1:])):
+            parts.append(seg(a, b, cu, nets[crun["net"]], f"seg-c{i}-{n}"))
     return "\n".join(parts)
 
 
@@ -2310,15 +3051,17 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
     solid-connect fill so the board is electrically complete (and DRC-clean)
     straight out of the zip. Refilling in KiCad simply replaces these.
     """
-    from shapely.geometry import LineString, Point, box
+    from shapely.geometry import LineString, Point, Polygon, box
     from shapely.ops import unary_union
 
     board = outline_polygon(spec)
     region = board.buffer(-POUR_EDGE_INSET)
+    clk = clk_info(spec)
 
     obstacles = []
     anchors = []  # same-net copper; fill islands must touch one to survive
-    for num, px, py, net, _row in CONNECTOR_PADS:  # through-hole: both layers
+    for num, px, py, net, _row in connector_pads(clk is not None):
+        # through-hole: both layers
         if num not in spec.pins:
             continue
         pad = Point(px, py).buffer(0.875, quad_segs=16)
@@ -2368,8 +3111,11 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
 
         # The via barrel exists on both copper layers. A via-less unit has
         # none: its power run is a trace on its own layer, handled below.
+        # (A back CLK unit's supply run arrives through the same door, so
+        # its 3V3 via disappears here exactly like a novia one.)
         route = novia_route(led, spec.pins, safe, spec.leds, outline=spec.outline,
-                            term=novia_term(led, spec.leds, spec.pins, safe))
+                            term=novia_term(led, spec.leds, spec.pins, safe, clk),
+                            clk=clk)
         if route is None:
             if via_net != zone_net:
                 obstacles.append(
@@ -2391,10 +3137,11 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
                     obstacles.append(pt.buffer(VIA_SIZE / 2 + POUR_CLEARANCE, quad_segs=16))
                 else:
                     anchors.append(pt.buffer(VIA_SIZE / 2, quad_segs=16))
+        supply = clk["net"] if (clk is not None and led.clk) else "3V3"
         unit_pads = [
             (*g["led_k"], "GND", rled, pw2, ph2, th or far),
             (*g["led_a"], anode, rled, pw2, ph2, th or far),
-            (*g["res_in"], "3V3", rres, rw2, rh2, False),
+            (*g["res_in"], supply, rres, rw2, rh2, False),
             (*g["res_out"], anode, rres, rw2, rh2, False),
         ]
         for dx, dy, net, extra, w2, h2, both in unit_pads:
@@ -2410,7 +3157,7 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
         if zone_net != anode:
             obstacles.append(
                 LineString(unit_trace_pts(led, "a", safe)).buffer(track_r))
-        # Power stub from the pad to the via — or, for a via-less unit, the
+        # Power stub from the pad to the via, or, for a via-less unit, the
         # long run to the connector pad. Either way the other net's pour on
         # this layer opens a channel around it.
         if route is not None:
@@ -2419,12 +3166,60 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
         elif zone_net != via_net:
             obstacles.append(
                 LineString(unit_trace_pts(led, "v", safe)).buffer(track_r))
+        # A front CLK unit's supply run cuts its own channel across this
+        # layer's pour, exactly like a via-less run would.
+        crun = clk_route(led, spec.pins, safe, spec.leds,
+                         outline=spec.outline, clk=clk)
+        if (crun is not None and zone_net != crun["net"]
+                and len(crun["pts"]) > 1):
+            obstacles.append(LineString(crun["pts"]).buffer(track_r))
+
+    # The CLK jumper's copper: three SMD pads on its own face (a same-net
+    # pad merges into that face's pour; the others open clearance holes),
+    # via barrels on BOTH layers, feed stubs, and the routed link to pin 9,
+    # which cuts a channel like a novia run. A back-side jumper's 3V3 via
+    # anchors the FRONT pour: it is what feeds the steady side at all.
+    if clk is not None and clk["jumper"]:
+        jlayer = "F.Cu" if clk["side"] == "front" else "B.Cu"
+        if layer == jlayer:
+            for pnet, cx, cy in clk["pads"]:
+                pad = Polygon(_jumper_pad_quad(clk, cx, cy))
+                if pnet != zone_net:
+                    obstacles.append(pad.buffer(POUR_CLEARANCE))
+                else:
+                    anchors.append(pad)
+            jx, jy, _jrot = clk["jumper"]
+            if clk["via"]:
+                obstacles.append(
+                    LineString([(jx, jy), clk["via"]]).buffer(track_r))
+            if clk["v3via"]:
+                v3 = clk["pads"][2]
+                obstacles.append(
+                    LineString([(v3[1], v3[2]), clk["v3via"]]).buffer(track_r))
+            link = clk_link(spec.leds, spec.pins, safe, spec.outline, clk)
+            if link is not None and len(link["pts"]) > 1:
+                obstacles.append(LineString(link["pts"]).buffer(track_r))
+            v3l = clk_v3_link(spec.leds, spec.pins, safe, spec.outline, clk)
+            if (v3l is not None and len(v3l["pts"]) > 1
+                    and zone_net != "3V3"):
+                obstacles.append(LineString(v3l["pts"]).buffer(track_r))
+        if clk["via"]:
+            obstacles.append(
+                Point(*clk["via"]).buffer(VIA_SIZE / 2 + POUR_CLEARANCE,
+                                          quad_segs=16))
+        if clk["v3via"]:
+            pt = Point(*clk["v3via"])
+            if zone_net == "3V3":
+                anchors.append(pt.buffer(VIA_SIZE / 2, quad_segs=16))
+            else:
+                obstacles.append(
+                    pt.buffer(VIA_SIZE / 2 + POUR_CLEARANCE, quad_segs=16))
 
     # Window art strips copper so the laminate shows through. A window layer
     # cuts the face(s) its `window` field names: the webapp splits a glow (or
     # through-bare) drawing into one layer per face, each carved around only
     # that face's copper, so the far face of a unit keeps its via and nothing
-    # else — not a slab of pour shadowing the whole part. A hand-built spec's
+    # else, not a slab of pour shadowing the whole part. A hand-built spec's
     # glow layer defaults to "through" and cuts both faces, as before.
     # Expanded 0.1 mm past the mask opening so the copper edge hides under
     # the mask despite fab registration tolerance.
@@ -2452,7 +3247,7 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
 
     # Copper-material art enclosed by a glow/bare window becomes an isolated
     # island (the window severs it from the plane). Those are intentional
-    # decoration — a skull's gold eyes inside a bare face — so they survive
+    # decoration (a skull's gold eyes inside a bare face), so they survive
     # the floating-copper filter below (the zone's island_removal_mode keeps
     # them through a KiCad refill as well).
     keep = []
@@ -2495,8 +3290,8 @@ def _open_holes(poly) -> list:
     """Vent a fill polygon's holes to its boundary without severing the plane.
 
     ``(filled_polygon (pts ...))`` has no syntax for an interior ring and
-    KiCad treats every polygon in a zone as its own island — even where two of
-    them share an edge or overlap, both measured here — so each hole has to be
+    KiCad treats every polygon in a zone as its own island (even where two of
+    them share an edge or overlap, both measured here), so each hole has to be
     opened out to the boundary by actually removing a slit of copper.
 
     A slit from a hole to the boundary is topologically harmless on its own.
@@ -2527,7 +3322,7 @@ def _open_holes(poly) -> list:
         if not p.interiors:
             done.append(p)
             continue
-        # The slit must start at a point genuinely inside the void — a hole's
+        # The slit must start at a point genuinely inside the void: a hole's
         # bounding-box centre lands on copper for C/U-shaped holes, which
         # would leave the hole intact and let the emitter flood other-net pads.
         pt = ShapelyPolygon(p.interiors[0]).representative_point()
@@ -2543,19 +3338,19 @@ def _open_holes(poly) -> list:
         for _len, slit in cands:
             trial = p.difference(slit)
             # One piece out means the vent reduced the hole count and nothing
-            # else — no fenced-off island, so no stranded rail.
+            # else: no fenced-off island, so no stranded rail.
             if trial.geom_type == "Polygon" and not trial.is_empty:
                 cut = trial
                 break
         if cut is None:
             # Every direction fences something. Take the shortest slit and let
-            # the floating-copper filter in the caller judge the fragments —
+            # the floating-copper filter in the caller judge the fragments,
             # strictly better than shipping an unrepresentable hole.
             cut = p.difference(cands[0][1])
         pending += parts(cut)
 
     # A slit that grazes another void leaves a hair of copper beside it, and
-    # KiCad reports those as [copper_sliver] — a fab flags them, and a sliver
+    # KiCad reports those as [copper_sliver]; a fab flags them, and a sliver
     # that lifts can bridge to whatever it lands on. Shave them off with a
     # morphological opening well under POUR_MIN_WIDTH, so it cannot touch any
     # neck the zone's own min_thickness already guarantees, and only where the
@@ -2578,7 +3373,7 @@ def _window_geometry(spec: BadgeSpec, face: str | None = None):
     sits *inside* a window (a skull's gold eyes in a bare face) is carved
     back out, so it keeps its copper.
 
-    With a face given, only windows that actually cut copper there count —
+    With a face given, only windows that actually cut copper there count;
     every window layer (glow included) carries the face(s) it cuts in its
     `window` field, and a layer for one face leaves the other's copper alone.
     """
@@ -2620,8 +3415,8 @@ def _keepout_zones(spec: BadgeSpec) -> list[str]:
 
     The shipped fills already exclude the windows, but a zone fill is not a
     fixed artifact: the moment anyone refills (pressing B, as the README
-    asks), KiCad recomputes from its own rules — which know nothing about
-    why that copper is missing — and floods the windows solid, quietly
+    asks), KiCad recomputes from its own rules (which know nothing about
+    why that copper is missing) and floods the windows solid, quietly
     turning every glow/bare window back into ordinary board. A keepout
     encodes the intent so the refill agrees with us.
     """
@@ -2641,7 +3436,7 @@ def _keepout_zones_for(spec: BadgeSpec, face: str, layer: str) -> list[str]:
     for i, poly in enumerate(polys):
         if poly.is_empty or poly.area < 0.01:
             continue
-        # A hole here just means "copper allowed" — and any sliver the
+        # A hole here just means "copper allowed", and any sliver the
         # fracture leaves behind is thinner than the zone's min_thickness,
         # so it never becomes copper.
         ring = poly.exterior if not poly.interiors else _fracture(poly).exterior
@@ -2694,7 +3489,7 @@ def _zone(key: str, net: int, net_name: str, layer: str, spec: BadgeSpec) -> str
     for poly in _fill_geometry(net_name, layer, spec):
         if poly.interiors:
             # Emitting only the exterior would pour copper over whatever the
-            # hole was protecting — refuse rather than generate a short.
+            # hole was protecting; refuse rather than generate a short.
             raise ValueError(f"zone fill for {net_name}/{layer} still has holes")
         pts = " ".join(
             f"(xy {_n(ORIGIN + px)} {_n(ORIGIN + py)})" for px, py in poly.exterior.coords[:-1]
@@ -2739,7 +3534,7 @@ def _slit_holes(geom, half_w: float):
 
     gr_poly (like zone fills) can't represent holes; a slit far below any
     printable feature size (2*half_w wide) turns each hole into an edge
-    notch that fabs — and eyes — can't tell from a true hole.
+    notch that fabs (and eyes) can't tell from a true hole.
     """
     from shapely.geometry import Polygon as ShapelyPolygon
     from shapely.geometry import box
@@ -2785,30 +3580,42 @@ def _window_mask_covers(spec: BadgeSpec, bridges: dict, safe) -> dict:
     """Per mask layer, the soldermask kept over copper that crosses windows.
 
     A bare window's mask opening used to expose whatever copper crossed it:
-    the hairline perimeter bridges plated bare — a trace with no mask is a
-    corrosion and short hazard, and no fab would leave it that way — and a
+    the hairline perimeter bridges plated bare (a trace with no mask is a
+    corrosion and short hazard, and no fab would leave it that way) and a
     via lost the tenting the rest of the board gives it. Every bridge now
     keeps a dam of mask over its track, and (while the board's tenting
     option is on) every via keeps its cap. Returns {layer: geometry | None};
-    the copper cut is untouched — only the mask opening shrinks.
+    the copper cut is untouched; only the mask opening shrinks.
     """
     from shapely.geometry import LineString, Point
     from shapely.ops import unary_union
 
     covers: dict = {"F.Mask": [], "B.Mask": []}
+    clk = clk_info(spec)
     for i, led in enumerate(spec.leds):
         for layer, mask in (("F.Cu", "F.Mask"), ("B.Cu", "B.Mask")):
             seg = bridges.get(i, {}).get(layer)
             if seg:
                 covers[mask].append(
                     LineString(seg).buffer(TRACK_W / 2 + 0.1, quad_segs=8))
-        if spec.tenting and not led.novia:
+        # A back CLK unit's 3V3 via is gone (its supply runs as a trace), so
+        # there is no barrel to cap.
+        has_via = not led.novia and not (clk is not None and led.clk
+                                         and led.side == "back")
+        if spec.tenting and has_via:
             g = led_geometry(led)
             x, y = clamp_led_obj(led, safe)
             vo = g["via_front"] if led.side != "back" else g["via_back"]
             rx, ry = _r(vo[0], vo[1], led.rot)
             # The barrel crosses the whole board: cap it on both faces.
             disc = Point(x + rx, y + ry).buffer(VIA_SIZE / 2 + 0.1, quad_segs=16)
+            covers["F.Mask"].append(disc)
+            covers["B.Mask"].append(disc)
+    if spec.tenting and clk is not None:
+        for v in (clk["via"], clk["v3via"]):
+            if not v:
+                continue
+            disc = Point(*v).buffer(VIA_SIZE / 2 + 0.1, quad_segs=16)
             covers["F.Mask"].append(disc)
             covers["B.Mask"].append(disc)
     return {k: (unary_union(v) if v else None) for k, v in covers.items()}
@@ -2849,7 +3656,7 @@ def _art_mask_items(art: ArtLayer, layer: str, key: str, cover) -> list[str]:
 
 # Which drawn layers an art material paints, per board face. Mask layers are
 # negatives: a polygon on F.Mask/B.Mask is an *opening* in the soldermask.
-# "glow" draws nothing — it only cuts the copper pours (see _fill_geometry).
+# "glow" draws nothing: it only cuts the copper pours (see _fill_geometry).
 def _art_target_layers(
     material: str, side: str = "front", window: str = "through"
 ) -> tuple[str, ...]:
@@ -2898,7 +3705,7 @@ def generate_pcb(spec: BadgeSpec) -> str:
 
     # The physical stackup carries the chosen mask color and surface
     # finish, so KiCad's 3D viewer (and the app's render preview) shows the
-    # board the way the fab would build it — green/purple/... mask, white
+    # board the way the fab would build it: green/purple/... mask, white
     # silk, gold (ENIG) or silver (HASL) exposed metal.
     mask = spec.mask_color.capitalize()
     finish = "ENIG" if spec.finish != "hasl" else "HAL lead-free"
@@ -2920,6 +3727,7 @@ def generate_pcb(spec: BadgeSpec) -> str:
         "    (pad_to_mask_clearance 0)\n"
         "  )"
     )
+    clk = clk_info(spec)
     body: list[str] = [
         '(kicad_pcb (version 20221018) (generator "minibadge-designer")',
         "  (general (thickness 1.6))",
@@ -2927,13 +3735,67 @@ def generate_pcb(spec: BadgeSpec) -> str:
         LAYERS,
         stackup,
         *net_lines,
-        _connector_footprint(nets, spec.pins),
+        _connector_footprint(nets, spec.pins, clk is not None),
     ]
     safe = unit_safe(spec)
+    tent = "" if spec.tenting else " (tenting none)"
+    if clk is not None and clk["jumper"]:
+        body.append(_jumper_footprint(nets, clk))
+        jx, jy, _jrot = clk["jumper"]
+        jcu = "F.Cu" if clk["side"] == "front" else "B.Cu"
+        if clk["via"]:
+            # The rail via: the plated hole the OTHER face's supply runs
+            # land on, fed from the centre pad by a short stub.
+            vx, vy = clk["via"]
+            body.append(
+                f"  (segment (start {_n(ORIGIN + jx)} {_n(ORIGIN + jy)}) "
+                f"(end {_n(ORIGIN + vx)} {_n(ORIGIN + vy)}) (width {_n(TRACK_W)}) "
+                f'(layer "{jcu}") (net {nets[CLK_RAIL]}) (tstamp {_ts("jumper-stub")}))'
+            )
+            body.append(
+                f"  (via (at {_n(ORIGIN + vx)} {_n(ORIGIN + vy)}) (size {_n(VIA_SIZE)}) "
+                f'(drill {_n(VIA_DRILL)}) (layers "F.Cu" "B.Cu"){tent} '
+                f"(net {nets[CLK_RAIL]}) (tstamp {_ts('jumper-via')}))"
+            )
+        if clk["v3via"]:
+            # A back-side jumper's steady option: its 3V3 pad rises to the
+            # front pour through this via.
+            v3 = clk["pads"][2]
+            vx, vy = clk["v3via"]
+            body.append(
+                f"  (segment (start {_n(ORIGIN + v3[1])} {_n(ORIGIN + v3[2])}) "
+                f"(end {_n(ORIGIN + vx)} {_n(ORIGIN + vy)}) (width {_n(TRACK_W)}) "
+                f'(layer "{jcu}") (net {nets["3V3"]}) (tstamp {_ts("jumper-3v3-stub")}))'
+            )
+            body.append(
+                f"  (via (at {_n(ORIGIN + vx)} {_n(ORIGIN + vy)}) (size {_n(VIA_SIZE)}) "
+                f'(drill {_n(VIA_DRILL)}) (layers "F.Cu" "B.Cu"){tent} '
+                f"(net {nets['3V3']}) (tstamp {_ts('jumper-3v3-via')}))"
+            )
+        link = clk_link(spec.leds, spec.pins, safe, spec.outline, clk)
+        if link is not None:
+            lpts = [(ORIGIN + px, ORIGIN + py) for px, py in link["pts"]]
+            for n, (a, b) in enumerate(zip(lpts, lpts[1:])):
+                body.append(
+                    f"  (segment (start {_n(a[0])} {_n(a[1])}) "
+                    f"(end {_n(b[0])} {_n(b[1])}) (width {_n(TRACK_W)}) "
+                    f'(layer "{jcu}") (net {nets["CLK"]}) '
+                    f"(tstamp {_ts(f'jumper-link-{n}')}))"
+                )
+        v3l = clk_v3_link(spec.leds, spec.pins, safe, spec.outline, clk)
+        if v3l is not None and len(v3l["pts"]) > 1:
+            vpts = [(ORIGIN + px, ORIGIN + py) for px, py in v3l["pts"]]
+            for n, (a, b) in enumerate(zip(vpts, vpts[1:])):
+                body.append(
+                    f"  (segment (start {_n(a[0])} {_n(a[1])}) "
+                    f"(end {_n(b[0])} {_n(b[1])}) (width {_n(TRACK_W)}) "
+                    f'(layer "{jcu}") (net {nets["3V3"]}) '
+                    f"(tstamp {_ts(f'jumper-v3link-{n}')}))"
+                )
     bridges = unit_bridges(spec, safe)
     for i, led in enumerate(spec.leds):
         body.append(_led_unit(i, led, nets, safe, spec.pins, spec.leds,
-                              spec.outline, spec.tenting))
+                              spec.outline, spec.tenting, clk))
         for layer, net in (("F.Cu", "3V3"), ("B.Cu", "GND")):
             seg = bridges.get(i, {}).get(layer)
             if seg is None:
@@ -2979,7 +3841,7 @@ def generate_pcb(spec: BadgeSpec) -> str:
 def generate_project(name: str) -> str:
     # min_copper_edge_clearance 0.2: the official minibadge connector pads sit
     # 0.235 mm from the outline, so KiCad's 0.25 default false-flags them.
-    # min_text_height 0.6: the printed pin captions are 0.6 mm silk — small
+    # min_text_height 0.6: the printed pin captions are 0.6 mm silk, small
     # but well within what fabs print; user text stays >= 0.8 in the UI.
     # lib_footprint_issues ignored: all footprints are embedded in the board.
     return (
@@ -3000,7 +3862,14 @@ def generate_project(name: str) -> str:
 
 
 def generate_bom(spec: BadgeSpec) -> str:
+    clk = clk_info(spec)
     lines = ["Reference,Value,Footprint,Side,Qty,Notes"]
+    if clk is not None and clk["jumper"]:
+        lines.append(
+            "JP1,CLK/3V3 select,solder jumper 3 pads (no part; bridge with "
+            f"solder),{clk['side']},1,bridge the 3V3 side for steady LEDs or "
+            "the CLK side to blink with the badge; NEVER bridge both"
+        )
     for i, led in enumerate(spec.leds):
         side = "back" if led.side == "back" else "front"
         g = led_geometry(led)
@@ -3017,12 +3886,16 @@ def generate_bom(spec: BadgeSpec) -> str:
                     "shines through the board; cathode toward silkscreen bar")
         if led.farled:
             far = "front" if side == "back" else "back"
-            note += f"; mounts on the {far} face — via in each pad"
+            note += f"; mounts on the {far} face (via in each pad)"
         if led.novia:
             if led.term and led.term[0] == "unit":
-                note += f"; no via — chained onto LED D{int(led.term[1]) + 1}'s pad"
+                note += f"; no via, chained onto LED D{int(led.term[1]) + 1}'s pad"
             else:
-                note += "; no via — wired to a connector pad"
+                note += "; no via, wired to a connector pad"
+        if led.clk and clk is not None:
+            note += ("; blinks with the badge CLK (via the JP1 jumper)"
+                     if clk["jumper"]
+                     else "; blinks with the badge CLK (wired to pin 9)")
         led_side = ("front" if side == "back" else "back") if led.farled else side
         lines.append(f"D{i + 1},LED {led.color},{fp},{led_side},1,{note}")
         r = LED_COLORS.get(led.color, "220")
@@ -3036,12 +3909,22 @@ def generate_bom(spec: BadgeSpec) -> str:
 def generate_readme(spec: BadgeSpec, slug: str | None = None) -> str:
     led_desc = ", ".join(f"D{i + 1} ({led.color})" for i, led in enumerate(spec.leds)) or "none"
     slug = slug or spec.name
+    holes = 0
     if spec.outline:
         b = outline_polygon(spec).bounds
+        # Rings after the first are interior contours: real routed holes. The
+        # fab quotes and tools for those, so the count belongs up front rather
+        # than only in the geometry.
+        holes = max(0, len(spec.outline) - 1)
         board_desc = (
             f"custom outline, {b[2] - b[0]:.1f} x {b[3] - b[1]:.1f} mm bounding box "
             "(minibadge v2 connector)"
         )
+        if holes:
+            board_desc += (
+                f", with {holes} routed cutout{'s' if holes != 1 else ''} "
+                "through the board"
+            )
     else:
         board_desc = "20 x 20 mm, minibadge v2 standard"
     finish_desc = (
@@ -3049,7 +3932,31 @@ def generate_readme(spec: BadgeSpec, slug: str | None = None) -> str:
         if spec.finish == "hasl"
         else "ENIG (shiny GOLD pads and copper art)"
     )
-    return f"""{spec.name} — SAINTCON minibadge
+    clk = clk_info(spec)
+    if clk is None:
+        clk_desc = ("Power comes from the badge's 3V3 pins. VBATT, CLK, and "
+                    "NC pins are left\nunconnected, per the standard (never "
+                    "connect NC; never tie VBATT to 3V3).")
+    else:
+        blinkers = ", ".join(f"D{i + 1}" for i, led in enumerate(spec.leds)
+                             if led.clk)
+        if clk["jumper"]:
+            clk_desc = (
+                f"LEDs {blinkers} run off the badge's CLK (blink) line "
+                "through the JP1 solder\njumper. Bridge JP1's centre pad to "
+                "its 3V3 side for steady light, or to its\nCLK side to blink "
+                "with the badge. Bridge exactly ONE side; bridging both\n"
+                "ties the badge's shared clock line to 3V3. Until a side is "
+                "bridged those\nLEDs stay dark. Power for everything else "
+                "comes from the 3V3 pins. VBATT\nand NC stay unconnected, "
+                "per the standard.")
+        else:
+            clk_desc = (
+                f"LEDs {blinkers} are wired straight to the badge's CLK "
+                "(blink) line on pin 9,\nso they pulse with the badge clock. "
+                "Power for everything else comes from\nthe 3V3 pins. VBATT "
+                "and NC stay unconnected, per the standard.")
+    return f"""{spec.name}: minibadge
 =================================
 
 Generated by minibadge designer. Board: {board_desc}.
@@ -3060,12 +3967,12 @@ Open and finish in KiCad (7 or newer)
 -------------------------------------
 1. Open {slug}.kicad_pro in KiCad and open the PCB editor.
 2. Press B to fill the copper zones (front = 3V3, back = GND).
-   The LED circuits connect through these pours — do not skip this.
+   The LED circuits connect through these pours. Do not skip this.
 3. Run DRC (Inspect > Design Rules Checker) and confirm no errors. Silkscreen
    *warnings* are possible where you deliberately put text or art over a pad:
    those are cosmetic, and the fab clips the overlap when it prints.
 4. File > Fabrication Outputs > Gerbers (plot all layers + drill files),
-   zip them, and upload to your fab (JLCPCB, PCBWay, OSH Park, ...) —
+   zip them, and upload to your fab (JLCPCB, PCBWay, OSH Park, ...),
    or use the designer's "Gerbers for fab" button, which plots this exact
    package for you. OSH Park also accepts the .kicad_pcb itself.
    Order 1.6 mm thickness, 2 layers, surface finish as noted above (the
@@ -3086,7 +3993,7 @@ layer is one solid 3V3 plane and the back layer is a GND plane.
 
 A unit with "LED on the other side" mounts its LED on the opposite face from
 its resistor, with a via inside each of the LED's pads carrying the
-connections through the board — so the LED faces out while the resistor hides
+connections through the board, so the LED faces out while the resistor hides
 behind it.
 
 Units with "No power via" ticked run power as a trace to a
@@ -3094,18 +4001,17 @@ connector pad instead, whose plated hole carries the net to the other side.
 A front-side through-hole LED needs no extra copper at all, since its own
 leads are already plated through to the back pour.
 
-So in the PCB editor a resistor pad or via can look "unattached" — it is
+So in the PCB editor a resistor pad or via can look "unattached": it is
 connected by the pour (check with the highlight-net tool). LED cathode goes
 toward the silkscreen bar next to the footprint; on a through-hole LED that
 is the SHORT lead (the flat side of the lens). See BOM.csv for parts and
 which side each part mounts on. SMD pads use KiCad's hand-solder proportions
-— extra copper past each end of the chip for the iron tip and a visible
-fillet — and a through-hole LED's resistor stays SMD. Note that a back-side LED faces the
+(extra copper past each end of the chip for the iron tip and a visible
+fillet), and a through-hole LED's resistor stays SMD. Note that a back-side LED faces the
 badge when plugged in, so it is only visible from behind unless you use a
 reverse-mount LED over a via/hole.
 
-Power comes from the badge's 3V3 pins. VBATT, CLK, and NC pins are left
-unconnected, per the standard (never connect NC; never tie VBATT to 3V3).
+{clk_desc}
 
 Artwork materials
 -----------------
@@ -3114,6 +4020,12 @@ over the copper plane (gold/ENIG finish shows). "Glow window" art strips
 the copper from both layers but keeps the mask: light from a nearby
 back-side LED diffuses through the laminate and glows in the mask color.
 "Bare board" also opens the mask on both sides (raw laminate, brightest).
+"Cut through board" is not ink at all: those regions are removed from the
+board outline, so they arrive as closed contours on Edge.Cuts and the fab
+routs them clean through the laminate. They need no special handling, but
+they are a routing operation rather than artwork -- check the Edge.Cuts
+layer matches what you expect before ordering. Connector pads always keep
+a tab of board, so a cut can never sever the badge from its mount.
 The shipped zone fills route thin fracture slits from copper cutouts to
 the board edge (a file-format requirement); refilling zones in KiCad (B)
 replaces them with proper holes, so always refill before plotting. Glow
@@ -3124,5 +4036,4 @@ Credits
 -------
 Minibadge standard and connector footprint: (c) Luke Jenkins and
 contributors, https://github.com/lukejenkins/minibadge (Apache-2.0).
-Spec: https://saintcon.org/minibadges/
 """

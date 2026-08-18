@@ -18,10 +18,10 @@ A defect invisible to one is routinely caught by another; two measured pairs
 make the point better than the rule does:
 
 * A via emitted as `(layers "F.Cu" "F.Cu")` passes full DRC and every coordinate
-  assertion — `assert_vias_cross_the_board` is the only thing that sees it.
+  assertion; `assert_vias_cross_the_board` is the only thing that sees it.
 * Move the anode trace onto the `3V3` net and DRC reports **zero violations**
   (the copper is byte-identical, and KiCad's connectivity comes from pads and
-  zones, not tracks) — `assert_tracks_carry_the_net_of_the_pads_they_touch` is
+  zones, not tracks); `assert_tracks_carry_the_net_of_the_pads_they_touch` is
   the only thing that sees it. *Delete* that same trace and the situation
   inverts: the in-process set is silent and DRC reports `unconnected_items`.
 * A 0603 unit left sitting on a connector pad (live defect #2) is a pad-to-pad
@@ -33,14 +33,14 @@ Conventions
 -----------
 * ``assert_*(...)``      raises ``AssertionError``. The message names the
   invariant, the actual value, and the user-visible consequence. "assert 3 == 1"
-  is a failure; "GND pour on B.Cu split into 3 islands (expected 1) — LEDs on
+  is a failure; "GND pour on B.Cu split into 3 islands (expected 1): LEDs on
   the severed island will never light" is a diagnosis.
 * ``check_*(...)``       returns ``list[str]`` of problems, so a caller can
   collect every problem in one artifact (a GLB has many parts) or reason over a
   *group* of boards (rotation invariance is not a per-board property). Feed the
   result to :func:`assert_clean`.
 * ``measure_*`` / nouns  return numbers. Numbers are what you assert on; there
-  are no golden files here and there must never be — five identical GLB exports
+  are no golden files here and there must never be: five identical GLB exports
   produce five different sha256, and five identical PNG renders likewise.
 
 Stating expectations independently
@@ -52,7 +52,7 @@ built its expected pinout from ``pcb.CONNECTOR_PADS`` was blind to a bug that
 edited ``pcb.CONNECTOR_PADS``. Every value in the "Independently stated
 expectations" block below is transcribed from the standard or from a fab rule,
 deliberately duplicating what ``pcb.py`` declares. If you change a fab-critical
-constant in ``pcb.py``, one of these is *supposed* to go red — read the message,
+constant in ``pcb.py``, one of these is *supposed* to go red: read the message,
 confirm the change is intended, and update it here too.
 
 Checks whose expectation is necessarily derived from production code are marked
@@ -61,17 +61,17 @@ Checks whose expectation is necessarily derived from production code are marked
 Assert on the artifact, not on the generator's intentions
 ---------------------------------------------------------
 The same trap has a geometry-shaped version that is easier to walk into.
-``Board.fills()`` calls ``pcb._fill_geometry`` — the function ``pcb._zone`` calls
-to produce the file — so a check reading it verifies what the generator *would*
+``Board.fills()`` calls ``pcb._fill_geometry`` (the function ``pcb._zone`` calls
+to produce the file), so a check reading it verifies what the generator *would*
 compute and never what it *wrote*. Measured: offsetting every emitted pour by
 5 mm at the emission site (``pcb.py:2027``) produced **46 real DRC violations**,
-a board that shorts, and the entire fast tier stayed green — 397 passed, 0
+a board that shorts, and the entire fast tier stayed green: 397 passed, 0
 failed, with kicad-cli disabled.
 
 So: anything describing a property of **copper** reads
 :meth:`Board.emitted_fills`, which parses ``(filled_polygon ...)`` back out of
-the file. ``Board.fills()`` is legitimate in exactly one role — the *intent* half
-of an explicit intent-vs-artifact comparison — and the two checks that use it
+the file. ``Board.fills()`` is legitimate in exactly one role, the *intent* half
+of an explicit intent-vs-artifact comparison, and the two checks that use it
 that way (:func:`assert_pours_actually_contain_copper` for placement,
 :func:`assert_pour_fills_have_no_holes` for quantity) say so in their docstrings.
 If you add a pour check, the question to answer in its docstring is not "is this
@@ -101,18 +101,44 @@ from minibadge_designer import pcb
 # NOT read from pcb.py. See the module docstring.
 # ---------------------------------------------------------------------------
 
-#: The minibadge v2 connector pinout, from https://saintcon.org/minibadges/ and
-#: lukejenkins/minibadge. ``None`` means "must carry no net at all".
+#: The minibadge v2 connector pinout, from the lukejenkins/minibadge
+#: standard. ``None`` means "must carry no net at all".
 STANDARD_PINOUT = {"1": None, "2": "GND", "7": "3V3", "8": "GND",
                    "9": None, "10": None, "15": "3V3", "16": "GND"}
 
-#: The SAINTCON minibadge outline is 20 mm square. ``pcb.OUTLINE`` says the same
+#: Pin 9 is the standard's blink clock. It is the ONE unpowered pin a design
+#: may legitimately wire up: a unit with ``Led.clk`` runs its supply off it so
+#: it pulses with the host badge. Net names stated here literally, NOT read
+#: from pcb.py (D2): the supply rail behind the solder jumper must be a net of
+#: its own ("CLK_LED"; tying it straight to CLK would make the jumper's steady
+#: side short the badge's shared clock line to 3V3), and the direct-trace
+#: hookup puts the units straight on "CLK".
+CLK_NET, CLK_RAIL_NET = "CLK", "CLK_LED"
+
+
+def clk_used(spec) -> bool:
+    """Whether the design actually runs units off the badge clock.
+
+    The same rule ``pcb.clk_info`` applies, restated independently: a CLK unit
+    exists AND pin 9 is kept. With pin 9 dropped the flag is inert and the
+    board must be indistinguishable from a non-CLK one (the webapp refuses
+    such designs; the generator falls back rather than shipping a supply pad
+    wired to a pin that is not there).
+    """
+    return any(led.clk for led in spec.leds) and "9" in spec.pins
+
+
+def clk_supply_net(spec) -> str:
+    """The net a CLK unit's resistor input must carry, per the hookup style."""
+    return CLK_RAIL_NET if spec.clk_jumper else CLK_NET
+
+#: The standard minibadge outline is 20 mm square. ``pcb.OUTLINE`` says the same
 #: thing in page coordinates; this is the physical fact.
 STANDARD_BOARD_MM = 20.0
 STANDARD_BOARD_TOL = 1e-3
 
 #: Via geometry, in mm (commit d0a5bcf, "Shrink vias to 0.7/0.3"). Stated here so
-#: that editing ``pcb.VIA_SIZE`` / ``pcb.VIA_DRILL`` cannot pass unnoticed — a
+#: that editing ``pcb.VIA_SIZE`` / ``pcb.VIA_DRILL`` cannot pass unnoticed: a
 #: 0.3 mm drill is the cheap-tier limit at every fab this project targets and a
 #: bigger one changes the quote. If you deliberately move the via size, update
 #: this line in the same commit.
@@ -125,12 +151,12 @@ MIN_DRILL_MM = 0.2              # smallest drill in the cheap tier
 #: geometry invariants below enforce exactly these numbers in-process.
 RULE_CLEARANCE_MM = 0.15        # copper to other-net copper
 RULE_EDGE_CLEARANCE_MM = 0.2    # copper to board edge
-FAB_CLEARANCE_FLOOR_MM = 0.127  # 5 mil — below this no cheap fab will build it
+FAB_CLEARANCE_FLOOR_MM = 0.127  # 5 mil; below this no cheap fab will build it
 
 #: ``pcb._n`` writes coordinates at four decimal places, so a vertex read back
 #: out of the file can sit up to 5e-5 mm from the geometry that produced it.
 #: Every comparison between emitted copper and computed geometry allows this
-#: much and no more — it is 1500x smaller than the 0.15 mm clearance rule, so it
+#: much and no more: it is 1500x smaller than the 0.15 mm clearance rule, so it
 #: cannot hide a real violation. Measured worst-case area disagreement over the
 #: 26-board corpus: 0.0012 mm^2.
 EMITTED_ROUNDING_MM = 1e-4
@@ -213,7 +239,7 @@ def _val(node, name, idx=1, default=None):
 @dataclass
 class Pad:
     fp: str          # footprint library name, e.g. "minibadge-designer:LED_RED_0805"
-    ref: str         # reference designator: "D1", "R1", "J1" — the stable identity
+    ref: str         # reference designator: "D1", "R1", "J1"; the stable identity
     fp_layer: str    # "F.Cu" / "B.Cu"
     num: str
     kind: str        # "smd" / "thru_hole"
@@ -235,7 +261,7 @@ class Pad:
         *centre* is measured to a place with no copper in it: an 0805 pad is
         1.0 mm wide, so a 0.25 mm pour shift that leaves only 0.10 mm of real
         copper-to-copper gap still reads as 0.4 mm from the centre and passes a
-        0.15 mm rule. Measured — that exact mutation escaped every check until
+        0.15 mm rule. Measured: that exact mutation escaped every check until
         this method existed.
         """
         from shapely.affinity import rotate as _srotate
@@ -332,7 +358,7 @@ class Board:
         self._emitted: dict = {}
 
     def fills(self, spec, net: str, layer: str):
-        """``pcb._fill_geometry``, memoised — the copper the generator *intended*.
+        """``pcb._fill_geometry``, memoised: the copper the generator *intended*.
 
         **This is not the board.** It is the same function ``pcb._zone`` calls, so
         anything that asserts on it verifies what the generator would compute and
@@ -361,8 +387,8 @@ class Board:
         The artifact-side counterpart to :meth:`fills`: it parses ``self.text``
         and asks ``pcb`` nothing, so it can disagree with the generator, and that
         disagreement is the whole point. Every pour invariant that describes a
-        property of *copper* — where it sits, what it touches, what it leaves
-        clear — reads this. Only a check that deliberately compares intent
+        property of *copper* (where it sits, what it touches, what it leaves
+        clear) reads this. Only a check that deliberately compares intent
         against artifact may also call :meth:`fills`.
 
         Coordinates are written by ``pcb._n`` at four decimal places, so a vertex
@@ -406,7 +432,7 @@ def sexpr_balanced(text: str) -> bool:
     """Paren balance honouring quoted strings and backslash escapes.
 
     An unescaped user string (a mask colour, a board name) can close the
-    expression early and produce a file KiCad refuses to open — served with a
+    expression early and produce a file KiCad refuses to open, served with a
     200 and a plausible-looking download.
     """
     depth, inq, esc = 0, False, False
@@ -434,10 +460,10 @@ def sexpr_balanced(text: str) -> bool:
 def assert_parses(text: str) -> Board:
     """The board text is a balanced s-expression; returns the parsed Board."""
     assert text.startswith("(kicad_pcb"), (
-        f"board text starts {text[:40]!r}, not '(kicad_pcb' — KiCad will "
+        f"board text starts {text[:40]!r}, not '(kicad_pcb'; KiCad will "
         "refuse to open the downloaded project")
     assert sexpr_balanced(text), (
-        "generated board is not a balanced s-expression — the download opens "
+        "generated board is not a balanced s-expression; the download opens "
         "as a corrupt file, with no error shown to the user")
     return Board(text)
 
@@ -454,7 +480,7 @@ def assert_project_zip(resp, slug: str) -> str:
             f"{slug}/BOM.csv", f"{slug}/README.txt"}
     got = set(zf.namelist())
     assert got == want, (
-        f"project zip holds {sorted(got)}, expected {sorted(want)} — a missing "
+        f"project zip holds {sorted(got)}, expected {sorted(want)}; a missing "
         "member means the user unzips a project KiCad cannot open")
     board = zf.read(f"{slug}/{slug}.kicad_pcb").decode()
     assert_parses(board)
@@ -464,7 +490,7 @@ def assert_project_zip(resp, slug: str) -> str:
 def assert_not_crashed(resp) -> None:
     """The only assertion a hostile-input case is allowed to make."""
     assert resp.status_code < 500, (
-        f"hostile input produced {resp.status_code} — the user sees a bare "
+        f"hostile input produced {resp.status_code}; the user sees a bare "
         f"server error page\n{resp.get_data(as_text=True)[:400]}")
 
 
@@ -474,7 +500,7 @@ def assert_rejected(resp) -> None:
     body = resp.get_json()
     assert isinstance(body, dict) and isinstance(body.get("error"), str) \
         and body["error"], (
-        f"rejection carried no usable error message: {body!r} — the UI has "
+        f"rejection carried no usable error message: {body!r}; the UI has "
         "nothing to show the user")
 
 
@@ -499,7 +525,7 @@ def assert_deterministic(spec) -> None:
 
 
 # ===========================================================================
-# 3. Board invariants — netlist
+# 3. Board invariants: netlist
 # ===========================================================================
 
 
@@ -512,7 +538,7 @@ def assert_the_board_carries_what_the_spec_implies(b: Board, spec) -> None:
     loop over ``[]`` passes. Measured, by emptying one collection at a time and
     re-running the battery: ``b.tracks = []``, ``b.vias = []`` and
     ``b.footprints = []`` each left **26 of 26 checks green**. A generator
-    regression that emitted no tracks — every LED unconnected — or no vias, or
+    regression that emitted no tracks (every LED unconnected) or no vias, or
     no footprints at all, went through the entire in-process battery without a
     murmur. That is the same shape as the missing-copper hole
     (:func:`assert_pours_actually_contain_copper`) and the same shape as
@@ -520,7 +546,7 @@ def assert_the_board_carries_what_the_spec_implies(b: Board, spec) -> None:
     describe *properties of* things, and nothing asserted the things exist.
 
     So this one holds no ``for`` loop and no property. It counts, against
-    numbers derived from the spec alone — two footprints per unit plus the
+    numbers derived from the spec alone: two footprints per unit plus the
     connector, four pads per unit, one connector pad per kept pin, an anode net
     and an anode track per unit, a via barrel for every unit that is not
     ``novia``. Break any of those and the failure names what is missing rather
@@ -532,43 +558,71 @@ def assert_the_board_carries_what_the_spec_implies(b: Board, spec) -> None:
     and tight (worst-case slack 0) for the via inequality.
     """
     n = len(spec.leds)
-    want_fp = 2 * n + (1 if spec.pins else 0)
+    # A blinking design carries one extra part: the 3-pad solder jumper
+    # (only in the jumper hookup; the direct-trace style adds no footprint).
+    jumper = clk_used(spec) and spec.clk_jumper
+    want_fp = 2 * n + (1 if spec.pins else 0) + (1 if jumper else 0)
     assert len(b.footprints) == want_fp, (
-        f"the board carries {len(b.footprints)} footprint(s); {n} unit(s) and "
-        f"{len(spec.pins)} connector pin(s) require {want_fp} (an LED and a "
-        "resistor each, plus the connector) — parts the user placed are simply "
-        "not on the board they download")
+        f"the board carries {len(b.footprints)} footprint(s); {n} unit(s), "
+        f"{len(spec.pins)} connector pin(s)"
+        + (" and the CLK jumper" if jumper else "")
+        + f" require {want_fp} (an LED and a resistor each, plus the "
+        "connector); parts the user placed are simply not on the board they "
+        "download")
     conn = [p for p in b.pads if "MiniBadge" in p.fp]
-    unit = [p for p in b.pads if "MiniBadge" not in p.fp]
+    jpads = [p for p in b.pads if "SolderJumper" in p.fp]
+    unit = [p for p in b.pads if "MiniBadge" not in p.fp
+            and "SolderJumper" not in p.fp]
     assert len(conn) == len(spec.pins), (
-        f"{len(conn)} connector pad(s) emitted for {len(spec.pins)} kept pin(s) "
-        "— the badge does not seat in the host, or seats with dead pins")
+        f"{len(conn)} connector pad(s) emitted for {len(spec.pins)} kept pin(s); "
+        "the badge does not seat in the host, or seats with dead pins")
+    assert len(jpads) == (3 if jumper else 0), (
+        f"{len(jpads)} solder-jumper pad(s) emitted, expected "
+        f"{3 if jumper else 0}; the builder has nothing to bridge and the "
+        "blinking LEDs can never be powered at all")
     assert len(unit) == 4 * n, (
         f"{len(unit)} unit pad(s) emitted for {n} unit(s), expected {4 * n} "
-        "(two per LED, two per resistor) — a part has nothing to solder to")
+        "(two per LED, two per resistor); a part has nothing to solder to")
     layerless = [f"pad {p.num} of {p.ref}" for p in b.pads if not p.layers]
     assert not layerless, (
-        f"{layerless} declare no layers at all — the pad exists in the file and "
+        f"{layerless} declare no layers at all; the pad exists in the file and "
         "on no copper, mask or paste layer, so the part is not soldered to "
         "anything and every per-layer check passes over it")
     want_nets = {"3V3", "GND"} | {f"/LED{i + 1}_A" for i in range(n)}
+    if clk_used(spec):
+        want_nets.add(CLK_NET)
+        if spec.clk_jumper:
+            want_nets.add(CLK_RAIL_NET)
     absent = sorted(want_nets - set(b.nets.values()))
     assert not absent, (
-        f"the net table is missing {absent} — KiCad has no node to attach that "
+        f"the net table is missing {absent}; KiCad has no node to attach that "
         "rail or unit to and the connection does not exist on the fabricated "
         "board")
     unrouted = sorted(f"/LED{i + 1}_A" for i in range(n)
                       if not [t for t in b.tracks
                               if t.net == b.net_of.get(f"/LED{i + 1}_A")])
     assert not unrouted, (
-        f"no copper track is emitted on {unrouted} — the resistor and the LED "
+        f"no copper track is emitted on {unrouted}; the resistor and the LED "
         "are declared on the same net and nothing joins them, so the unit "
         "never lights")
-    need_vias = sum(1 for led in spec.leds if not led.novia)
+    # A back-side CLK unit gives up its 3V3 via (its supply arrives as a
+    # trace); everyone else keeps exactly the vias they always had. The
+    # jumper adds the rail via when a blinking unit sits on its far face
+    # (and the cross-face via is allowed), and a back-side jumper adds the
+    # via that feeds its 3V3 pad from the front pour.
+    need_vias = sum(1 for led in spec.leds
+                    if not led.novia
+                    and not (clk_used(spec) and led.clk and led.side == "back"))
+    if jumper:
+        far = "front" if spec.jumper_side == "back" else "back"
+        if any(led.clk and led.side == far for led in spec.leds):
+            need_vias += 1  # the rail via; nothing gates it
+        if spec.jumper_side == "back" and spec.jumper_via:
+            need_vias += 1  # the 3V3 pad's own via into the front pour
     assert len(b.vias) >= need_vias, (
-        f"the board carries {len(b.vias)} via(s) but {need_vias} unit(s) route "
-        "their rail through the board — those units reach the far-side plane "
-        "through a barrel that was never drilled")
+        f"the board carries {len(b.vias)} via(s) but {need_vias} are required "
+        "to route rails (and the CLK hookup) through the board; a connection "
+        "the design needs was never drilled")
 
 
 def assert_signal_pins_never_powered(b: Board, spec) -> None:
@@ -576,14 +630,28 @@ def assert_signal_pins_never_powered(b: Board, spec) -> None:
 
     Standard-mandated: tying VBATT to 3V3 back-feeds the host badge's battery,
     and NC is reserved. Fabs will happily build it.
+
+    Pin 9 is the one exception, and only when the design actually uses the
+    blink clock: it must then carry exactly "CLK" and nothing else. Pin 9 on
+    3V3 or GND is a short across the host badge's clock driver whichever way
+    the flag is set.
     """
     forbidden = {num for num, net in STANDARD_PINOUT.items() if net is None}
+    if clk_used(spec):
+        forbidden.discard("9")
     for p in b.pads:
-        if p.kind == "thru_hole" and "MiniBadge" in p.fp and p.num in forbidden:
+        if p.kind != "thru_hole" or "MiniBadge" not in p.fp:
+            continue
+        if p.num in forbidden:
             assert p.net == 0, (
                 f"connector pin {p.num} ({pcb.PIN_LABELS[p.num]}) carries net "
-                f"{p.net_name!r}; signal/battery pins must stay unconnected — "
-                "this back-feeds the host badge and the fab will build it")
+                f"{p.net_name!r}; signal/battery pins must stay unconnected. "
+                "This back-feeds the host badge and the fab will build it")
+        elif p.num == "9":
+            assert p.net_name == CLK_NET, (
+                f"connector pin 9 carries net {p.net_name!r} on a design that "
+                f"blinks with the badge clock; it must carry {CLK_NET!r}, or "
+                "the host's clock driver is shorted to a power rail")
 
 
 def assert_connector_power_pins_wired(b: Board, spec) -> None:
@@ -591,13 +659,13 @@ def assert_connector_power_pins_wired(b: Board, spec) -> None:
     want = {num: net for num, net in STANDARD_PINOUT.items() if net}
     present = {p.num for p in b.pads if "MiniBadge" in p.fp}
     assert present == set(spec.pins), (
-        f"connector pads {sorted(present)} but spec keeps {sorted(spec.pins)} — "
+        f"connector pads {sorted(present)} but spec keeps {sorted(spec.pins)}; "
         "the badge would not seat in the host, or would seat with dead pins")
     for p in b.pads:
         if "MiniBadge" in p.fp and p.num in want:
             assert p.net_name == want[p.num], (
                 f"connector pin {p.num} on net {p.net_name!r}, expected "
-                f"{want[p.num]!r} — the badge draws power from the wrong pin")
+                f"{want[p.num]!r}; the badge draws power from the wrong pin")
 
 
 def assert_led_circuits_complete(b: Board, spec) -> None:
@@ -605,13 +673,13 @@ def assert_led_circuits_complete(b: Board, spec) -> None:
 
     Derived entirely from the spec: nothing here depends on package sizes,
     coordinates, resistor values, or the file-format spelling. Catches a swapped
-    LED polarity, a bypassed resistor, and an off-by-one net index — none of
+    LED polarity, a bypassed resistor, and an off-by-one net index; none of
     which any coordinate assertion notices.
     """
     for i, _led in enumerate(spec.leds):
         anode = f"/LED{i + 1}_A"
         assert anode in b.net_of, (
-            f"unit {i}: net {anode!r} missing from the net table — the LED is "
+            f"unit {i}: net {anode!r} missing from the net table; the LED is "
             "wired to nothing")
         led = sorted((p for p in b.pads if p.ref == f"D{i + 1}"), key=lambda p: p.num)
         res = sorted((p for p in b.pads if p.ref == f"R{i + 1}"), key=lambda p: p.num)
@@ -619,17 +687,147 @@ def assert_led_circuits_complete(b: Board, spec) -> None:
         assert len(res) == 2, f"unit {i}: expected 2 resistor pads, got {len(res)}"
         assert led[0].net_name == "GND", (
             f"unit {i}: LED pad 1 (cathode) is on {led[0].net_name!r}, expected "
-            "GND — reversed polarity fabs fine and never lights")
+            "GND; reversed polarity fabs fine and never lights")
         assert led[1].net_name == anode, (
             f"unit {i}: LED pad 2 (anode) is on {led[1].net_name!r}, expected "
-            f"{anode!r} — the LED is cross-wired to another unit")
-        assert res[0].net_name == "3V3", (
-            f"unit {i}: resistor pad 1 is on {res[0].net_name!r}, expected 3V3 "
-            "— the unit never sees power")
+            f"{anode!r}; the LED is cross-wired to another unit")
+        # A CLK unit's supply is the blink hookup, not the 3V3 pour. This is
+        # the failure DRC cannot see: leave the pad on 3V3 with the geometry
+        # unchanged and the fill quietly merges it back into the pour; the
+        # board is electrically consistent and the LED burns steady forever.
+        supply = clk_supply_net(spec) if (clk_used(spec) and _led.clk) else "3V3"
+        assert res[0].net_name == supply, (
+            f"unit {i}: resistor pad 1 is on {res[0].net_name!r}, expected "
+            f"{supply!r}; the unit "
+            + ("never blinks (or shorts the clock hookup to the pour)"
+               if supply != "3V3" else "never sees power"))
         assert res[1].net_name == anode, (
             f"unit {i}: resistor pad 2 is on {res[1].net_name!r}, expected "
-            f"{anode!r} — a resistor bridged to the wrong node leaves the LED "
+            f"{anode!r}; a resistor bridged to the wrong node leaves the LED "
             "uncurrent-limited and it burns out on first power-up")
+
+
+def assert_clk_hookup_is_wired(b: Board, spec) -> None:
+    """A blinking design's supply chain actually exists on the board.
+
+    Every CLK unit's supply net leaves its resistor input as an emitted
+    track; in the jumper hookup the jumper's three pads carry CLK / CLK_LED /
+    3V3 in pad order, the routed link lands dead on pin 9's hole, and a back
+    unit's run bottoms out on the rail via. Any missing link ships an LED
+    that never lights, and the project ignores KiCad's isolated_copper rule,
+    so DRC forgives exactly this class of absence.
+
+    On a design that does NOT use the clock (flag off, or pin 9 dropped) the
+    hookup must leave nothing behind: no jumper pads and no CLK nets, or the
+    fab builds parts the user never asked for.
+    """
+    jumper_pads = sorted((p for p in b.pads if "SolderJumper" in p.fp),
+                         key=lambda p: p.num)
+    if not clk_used(spec):
+        assert not jumper_pads, (
+            f"{len(jumper_pads)} solder-jumper pad(s) on a design that does "
+            "not use the badge clock; the fab builds a part the user never "
+            "asked for")
+        leftover = [n for n in (CLK_NET, CLK_RAIL_NET) if n in b.net_of]
+        assert not leftover, (
+            f"net(s) {leftover} declared on a design that does not use the "
+            "badge clock; a dangling rail invites a mis-wired rework")
+        return
+
+    close = lambda pt, x, y: (abs(pt[0] - x) <= PAD_COINCIDENCE_MM
+                              and abs(pt[1] - y) <= PAD_COINCIDENCE_MM)
+    supply = clk_supply_net(spec)
+    sid = b.net_of.get(supply)
+    assert sid is not None, (
+        f"supply net {supply!r} missing from the net table; the blinking "
+        "units are wired to nothing")
+    blinkers = [i for i, led in enumerate(spec.leds) if led.clk]
+    assert blinkers, (
+        "clk_used(spec) held with no blinking unit; the guard and the spec "
+        "disagree and this check is about to prove nothing")
+    for i in blinkers:
+        rin = next(p for p in b.pads if p.ref == f"R{i + 1}" and p.num == "1")
+        assert any(t.net == sid and (close(t.a, rin.x, rin.y)
+                                     or close(t.b, rin.x, rin.y))
+                   for t in b.tracks), (
+            f"unit {i} blinks with the badge clock but no {supply!r} track "
+            "leaves its resistor input; the LED ships dark and DRC's ignored "
+            "isolated_copper rule never says so")
+    p9 = next(p for p in b.pads if "MiniBadge" in p.fp and p.num == "9")
+    if spec.clk_jumper:
+        assert [p.net_name for p in jumper_pads] == [CLK_NET, CLK_RAIL_NET, "3V3"], (
+            f"jumper pads 1..3 carry {[p.net_name for p in jumper_pads]}, "
+            f"expected {[CLK_NET, CLK_RAIL_NET, '3V3']}; bridging a mis-netted "
+            "jumper shorts a rail instead of choosing one")
+        cid = b.net_of.get(CLK_NET)
+        jclk = jumper_pads[0]
+        link_ends = [t for t in b.tracks if t.net == cid]
+        assert any(close(t.a, p9.x, p9.y) or close(t.b, p9.x, p9.y)
+                   for t in link_ends), (
+            "no CLK track lands on pin 9's hole; the jumper's blink side is "
+            "wired to nothing and bridging it does nothing")
+        assert any(close(t.a, jclk.x, jclk.y) or close(t.b, jclk.x, jclk.y)
+                   for t in link_ends), (
+            "no CLK track lands on the jumper's CLK pad; the routed link "
+            "goes somewhere else and the blink side is dead")
+        far = "front" if spec.jumper_side == "back" else "back"
+        far_cu = "F.Cu" if far == "front" else "B.Cu"
+        if any(led.clk and led.side == far for led in spec.leds):
+            rail_vias = [v for v in b.vias if v.net == sid]
+            assert rail_vias, (
+                f"a {far}-side unit blinks but no rail via carries the "
+                "jumper's centre pad through the board; its supply run has "
+                "no plated hole to land on")
+            assert any(t.net == sid and t.layer == far_cu
+                       and any(close(t.a, v.x, v.y) or close(t.b, v.x, v.y)
+                               for v in rail_vias)
+                       for t in b.tracks), (
+                f"no {far_cu} supply track reaches the rail via; the "
+                f"{far}-side unit's run ends in open copper and the LED "
+                "ships dark")
+        if spec.jumper_side == "back":
+            v3id = b.net_of.get("3V3")
+            j3 = jumper_pads[2]
+            if spec.jumper_via:
+                assert any(v.net == v3id for v in b.vias), (
+                    "the jumper sits on the back but no 3V3 via feeds its "
+                    "steady pad from the front pour; bridging to 3V3 would "
+                    "do nothing")
+            else:
+                # Via off: the steady pad is wired by a same-face trace to a
+                # kept 3V3 pin, whose plated hole carries the front pour.
+                v3pins = [(p.x, p.y) for p in b.pads
+                          if "MiniBadge" in p.fp and p.net_name == "3V3"]
+                v3tracks = [t for t in b.tracks if t.net == v3id]
+                assert any(close(t.a, j3.x, j3.y) or close(t.b, j3.x, j3.y)
+                           for t in v3tracks), (
+                    "the jumper's steady pad has no via and no 3V3 trace "
+                    "leaves it; bridging to 3V3 would do nothing")
+                assert any(any(close(t.a, px, py) or close(t.b, px, py)
+                               for px, py in v3pins)
+                           for t in v3tracks), (
+                    "the jumper's 3V3 trace never lands on a 3V3 connector "
+                    "pin's hole; the steady side is wired to open copper")
+                # A hand-picked destination pin is honoured, never traded
+                # for a nearer one: the preview showed the run going there.
+                if spec.jumper_v3pin in spec.pins:
+                    chosen = next(((p.x, p.y) for p in b.pads
+                                   if "MiniBadge" in p.fp
+                                   and p.num == spec.jumper_v3pin
+                                   and p.net_name == "3V3"), None)
+                    if chosen is not None:
+                        assert any(close(t.a, *chosen) or close(t.b, *chosen)
+                                   for t in v3tracks), (
+                            f"the user sent the 3V3 trace to pin "
+                            f"{spec.jumper_v3pin} and the board landed it "
+                            "somewhere else; the download lies about the "
+                            "design")
+    else:
+        assert any(t.net == sid and (close(t.a, p9.x, p9.y)
+                                     or close(t.b, p9.x, p9.y))
+                   for t in b.tracks), (
+            "no supply track lands on pin 9's hole in the direct-trace "
+            "hookup; the blinking units never see the clock")
 
 
 def assert_net_index_matches_name(b: Board, spec) -> None:
@@ -648,7 +846,7 @@ def assert_net_index_matches_name(b: Board, spec) -> None:
             continue
         assert b.nets.get(p.net) == p.net_name, (
             f"pad {p.num} of {p.ref} says net {p.net} = {p.net_name!r} but the "
-            f"net table has {b.nets.get(p.net)!r} — KiCad resolves by index, so "
+            f"net table has {b.nets.get(p.net)!r}; KiCad resolves by index, so "
             "this unit is silently wired to a different node")
 
 
@@ -664,7 +862,7 @@ def assert_tracks_carry_the_net_of_the_pads_they_touch(b: Board, spec) -> None:
     **KiCad's connectivity comes from pads and zones, not from tracks.** A track's
     stored net is re-absorbed into whatever cluster its endpoints land in, so a
     track emitted on the wrong net is geometrically byte-identical to the right
-    one — same coordinates, same width, same layer, same tstamp — and only the
+    one (same coordinates, same width, same layer, same tstamp) and only the
     net number moves. Measured consequences of that:
 
     * ``kicad-cli pcb drc --severity-all`` reports **0 violations and 0
@@ -691,7 +889,7 @@ def assert_tracks_carry_the_net_of_the_pads_they_touch(b: Board, spec) -> None:
                 assert p.net == t.net, (
                     f"the track on {t.layer} from {t.a} to {t.b} is on net "
                     f"{b.nets.get(t.net)!r} but it ends on pad {p.num} of "
-                    f"{p.ref}, which is on {p.net_name!r} — that is a short "
+                    f"{p.ref}, which is on {p.net_name!r}; that is a short "
                     "between the two nets on the finished board, and it is "
                     "invisible to kicad DRC because the copper is identical "
                     "either way")
@@ -706,7 +904,7 @@ def assert_every_net_is_declared(b: Board, spec) -> None:
     for label, items in (("pad", b.pads), ("track", b.tracks), ("via", b.vias)):
         for it in items:
             assert it.net in declared, (
-                f"{label} references undeclared net {it.net} — KiCad drops the "
+                f"{label} references undeclared net {it.net}; KiCad drops the "
                 "connection on load")
     for z in b.zones:
         assert z.net in declared, f"zone references undeclared net {z.net}"
@@ -715,7 +913,7 @@ def assert_every_net_is_declared(b: Board, spec) -> None:
     for idx, name in b.nets.items():
         if name.startswith("/LED"):
             assert idx in used, (
-                f"anode net {name!r} declared but nothing is on it — that unit "
+                f"anode net {name!r} declared but nothing is on it; that unit "
                 "has no circuit")
 
 
@@ -730,11 +928,11 @@ def assert_vias_cross_the_board(b: Board, spec) -> None:
     for v in b.vias:
         assert set(v.layers) == {"F.Cu", "B.Cu"}, (
             f"via at ({v.x:.3f}, {v.y:.3f}) on net {b.nets.get(v.net)!r} spans "
-            f"{v.layers} — a 2-layer board cannot build a blind via, so this "
+            f"{v.layers}; a 2-layer board cannot build a blind via, so this "
             "connection does not exist on the fabricated board")
         assert v.drill < v.size, (
             f"via at ({v.x:.3f}, {v.y:.3f}): drill {v.drill} >= pad {v.size}, "
-            "no annular ring — the drill eats the pad and the barrel is open")
+            "no annular ring; the drill eats the pad and the barrel is open")
 
 
 def assert_via_geometry_is_fab_safe(b: Board, spec) -> None:
@@ -750,13 +948,13 @@ def assert_via_geometry_is_fab_safe(b: Board, spec) -> None:
     for v in b.vias:
         assert abs(v.size - VIA_PAD_MM) < _EPS and abs(v.drill - VIA_DRILL_MM) < _EPS, (
             f"via at ({v.x:.3f}, {v.y:.3f}) is {v.size}/{v.drill} mm pad/drill, "
-            f"this project ships {VIA_PAD_MM}/{VIA_DRILL_MM} — a different via "
+            f"this project ships {VIA_PAD_MM}/{VIA_DRILL_MM}; a different via "
             "size changes the fab quote and can push the order out of the cheap "
             "tier")
         assert (v.size - v.drill) / 2 >= MIN_ANNULAR_RING_MM - _EPS, (
             f"via at ({v.x:.3f}, {v.y:.3f}) has a "
             f"{(v.size - v.drill) / 2:.4f} mm annular ring, floor is "
-            f"{MIN_ANNULAR_RING_MM} mm — drill tolerance can break the barrel")
+            f"{MIN_ANNULAR_RING_MM} mm; drill tolerance can break the barrel")
         assert v.drill >= MIN_DRILL_MM - _EPS, (
             f"via at ({v.x:.3f}, {v.y:.3f}) drills {v.drill} mm, below the "
             f"{MIN_DRILL_MM} mm cheap-tier floor")
@@ -766,19 +964,19 @@ def assert_through_hole_pads_reach_both_faces(b: Board, spec) -> None:
     """A ``thru_hole`` pad's barrel must be plated to both copper layers.
 
     A front through-hole LED's cathode reaches the back GND pour through its own
-    lead — restrict the pad to F.Cu and the circuit silently opens.
+    lead; restrict the pad to F.Cu and the circuit silently opens.
     """
     for p in b.pads:
         if p.kind != "thru_hole":
             continue
         cu = {ly for ly in p.layers if ly.endswith(".Cu") or ly == "*.Cu"}
         assert "*.Cu" in cu or cu >= {"F.Cu", "B.Cu"}, (
-            f"through-hole pad {p.num} of {p.fp} is only on {p.layers} — the "
+            f"through-hole pad {p.num} of {p.fp} is only on {p.layers}; the "
             "plated barrel never reaches the far-side pour and the part floats")
 
 
 # ===========================================================================
-# 4. Board invariants — pours and light windows
+# 4. Board invariants: pours and light windows
 # ===========================================================================
 
 
@@ -787,7 +985,7 @@ def assert_exactly_one_pour_per_face(b: Board, spec) -> None:
     real = [z for z in b.zones if not z.keepout]
     got = sorted((z.net_name, z.layer) for z in real)
     assert got == [("3V3", "F.Cu"), ("GND", "B.Cu")], (
-        f"expected one 3V3 pour on F.Cu and one GND pour on B.Cu, got {got} — "
+        f"expected one 3V3 pour on F.Cu and one GND pour on B.Cu, got {got}; "
         "a missing or duplicated plane means units on that face have no rail")
 
 
@@ -797,7 +995,7 @@ def assert_pours_actually_contain_copper(b: Board, spec) -> None:
     ``assert_exactly_one_pour_per_face`` counts *zone declarations*; a board can
     declare both planes and fill neither. Measured: stripping every
     ``(filled_polygon ...)`` line from the generator left all 25 other checks
-    green — the two rails were declared, empty, and nobody noticed. Only real
+    green: the two rails were declared, empty, and nobody noticed. Only real
     DRC caught it, so a developer without kicad-cli installed would have shipped
     a board with no power planes at all.
 
@@ -812,7 +1010,7 @@ def assert_pours_actually_contain_copper(b: Board, spec) -> None:
         emitted = b.text.count(f'(filled_polygon (layer "{layer}")')
         assert emitted, (
             f"the {net} pour on {layer} is declared but the board contains no "
-            f'(filled_polygon (layer "{layer}") ...) — the rail ships '
+            f'(filled_polygon (layer "{layer}") ...); the rail ships '
             "unconnected and no LED on that face can light")
         # Presence is not enough: an emission bug can write the right polygons
         # to the wrong place. Offsetting this pour by 5 mm at the emission site
@@ -820,7 +1018,7 @@ def assert_pours_actually_contain_copper(b: Board, spec) -> None:
         # was invisible to the whole fast tier until this comparison existed.
         # So compare *where the copper landed* against where the generator meant
         # to put it. The computed geometry is the cross-check here, never the
-        # source of truth — that is the whole point.
+        # source of truth; that is the whole point.
         intended = b.fills(spec, net, layer)
         got = b.emitted_fills(layer)
         # Not `if not got: continue`. The text count above already proved the
@@ -829,7 +1027,7 @@ def assert_pours_actually_contain_copper(b: Board, spec) -> None:
         # every emitted-copper check in this file (D11).
         assert got, (
             f"{emitted} (filled_polygon (layer \"{layer}\") ...) block(s) are in "
-            "the file but Board.emitted_fills parsed none of them — the emitted"
+            "the file but Board.emitted_fills parsed none of them; the emitted"
             "-copper checks are all reading [] and passing vacuously")
         if not intended:
             continue
@@ -841,7 +1039,7 @@ def assert_pours_actually_contain_copper(b: Board, spec) -> None:
             f"the {net} pour on {layer} was emitted at "
             f"({ex0:.3f}, {ey0:.3f})-({ex1:.3f}, {ey1:.3f}) but the geometry "
             f"says ({ix0:.3f}, {iy0:.3f})-({ix1:.3f}, {iy1:.3f}), off by "
-            f"{drift:.3f} mm — copper lands where the generator did not intend "
+            f"{drift:.3f} mm; copper lands where the generator did not intend "
             "it, shorting whatever it crosses")
 
 
@@ -864,7 +1062,7 @@ def assert_pours_stay_inside_the_outline(b: Board, spec, slack: float = 0.01) ->
         for poly in b.emitted_fills(layer):
             assert board.contains(poly), (
                 f"copper emitted on {layer} spills {poly.difference(board).area:.4f} "
-                "mm^2 outside the board outline — the router mills through live "
+                "mm^2 outside the board outline; the router mills through live "
                 "copper")
 
 
@@ -883,8 +1081,8 @@ def assert_pours_keep_fab_clearance(b: Board, spec) -> None:
     it green on a board with 46 real DRC violations (pour offset 5 mm at the
     emission site, ``actual 0.0000 mm`` clearance to other-net pads).
 
-    Pads are measured as :meth:`Pad.copper` — the real rectangle or circle the
-    file declares — not as centre points. A centre-point measurement has half a
+    Pads are measured as :meth:`Pad.copper` (the real rectangle or circle the
+    file declares), not as centre points. A centre-point measurement has half a
     pad of free slack built into it and let a 0.25 mm pour shift through with
     0.10 mm of actual copper-to-copper gap against a 0.15 mm rule.
 
@@ -899,7 +1097,7 @@ def assert_pours_keep_fab_clearance(b: Board, spec) -> None:
             for e in edges:
                 assert poly.distance(e) >= RULE_EDGE_CLEARANCE_MM - EMITTED_ROUNDING_MM, (
                     f"{net} pour on {layer} comes within {poly.distance(e):.4f} "
-                    f"mm of the board edge (rule {RULE_EDGE_CLEARANCE_MM} mm) — "
+                    f"mm of the board edge (rule {RULE_EDGE_CLEARANCE_MM} mm): "
                     "copper on the routed edge; fabs reject it")
         for p in b.pads:
             if p.net_name == net or p.net == 0:
@@ -912,7 +1110,7 @@ def assert_pours_keep_fab_clearance(b: Board, spec) -> None:
                 assert d >= RULE_CLEARANCE_MM - EMITTED_ROUNDING_MM, (
                     f"{net} pour on {layer} comes within {d:.4f} mm of the "
                     f"copper of pad {p.num} of {p.ref} (net {p.net_name!r}, "
-                    f"{p.w} x {p.h} mm) — rule {RULE_CLEARANCE_MM} mm; that is "
+                    f"{p.w} x {p.h} mm), rule {RULE_CLEARANCE_MM} mm; that is "
                     "a short on the finished board")
         for t in b.tracks:
             if t.layer != layer or b.nets.get(t.net) == net:
@@ -922,8 +1120,8 @@ def assert_pours_keep_fab_clearance(b: Board, spec) -> None:
                 d = poly.distance(run)
                 assert d >= RULE_CLEARANCE_MM - EMITTED_ROUNDING_MM, (
                     f"{net} pour on {layer} comes within {d:.4f} mm of a "
-                    f"{b.nets.get(t.net)!r} track (rule {RULE_CLEARANCE_MM} mm) "
-                    "— a short between the rail and a signal")
+                    f"{b.nets.get(t.net)!r} track (rule {RULE_CLEARANCE_MM} mm): "
+                    "a short between the rail and a signal")
 
 
 def assert_pour_fills_have_no_holes(b: Board, spec) -> None:
@@ -932,7 +1130,7 @@ def assert_pour_fills_have_no_holes(b: Board, spec) -> None:
     Two halves, on purpose, because the hole problem has a computed side and an
     emitted side and neither sees the other.
 
-    **Computed side — and reading ``pcb._fill_geometry`` here is genuinely
+    **Computed side, and reading ``pcb._fill_geometry`` here is genuinely
     right.** ``(filled_polygon (pts ...))`` has no syntax for an interior ring:
     a hole cannot be represented in the file at all, so no amount of reading the
     emitted text can find one. The property is a *precondition of the emitter*:
@@ -944,7 +1142,7 @@ def assert_pour_fills_have_no_holes(b: Board, spec) -> None:
     **Emitted side.** That leaves the failure the computed half cannot reach:
     the emitter dropping the hole instead of refusing, or writing a subset or a
     superset of the polygons it was given. Total emitted copper area is compared
-    against total intended area — a flooded hole, a missing island or a
+    against total intended area: a flooded hole, a missing island or a
     duplicated polygon all move it, and none of them move the bounding box that
     :func:`assert_pours_actually_contain_copper` compares. Tolerance is
     :data:`EMITTED_AREA_TOL_MM2`, 40x the worst rounding disagreement measured
@@ -954,7 +1152,7 @@ def assert_pour_fills_have_no_holes(b: Board, spec) -> None:
         intended = b.fills(spec, net, layer)
         for poly in intended:
             assert not list(poly.interiors), (
-                f"{net} fill on {layer} kept an unfractured hole — the emitter "
+                f"{net} fill on {layer} kept an unfractured hole; the emitter "
                 "must refuse it; emitting the exterior alone floods copper over "
                 "whatever the hole was protecting")
         got = b.emitted_fills(layer)
@@ -963,7 +1161,7 @@ def assert_pour_fills_have_no_holes(b: Board, spec) -> None:
         assert abs(got_area - want_area) <= EMITTED_AREA_TOL_MM2, (
             f"the {net} pour on {layer} emitted {got_area:.4f} mm^2 of copper "
             f"in {len(got)} polygon(s) but the geometry says {want_area:.4f} "
-            f"mm^2 in {len(intended)} — copper the generator did not intend is "
+            f"mm^2 in {len(intended)}; copper the generator did not intend is "
             "on the board (a dropped hole floods other-net pads) or copper it "
             "did intend is missing (that part of the rail is dead)")
 
@@ -973,8 +1171,8 @@ def _interior_probes(geom, n: int = 24, grid: int = 5):
 
     Samples a ``grid`` x ``grid`` lattice across each part in addition to its
     representative point. One representative point per part is not enough: it
-    lands at the centre, and a window cut too small — a shrunken inset, a
-    clip against the wrong interior ring — leaves the centre clear and copper
+    lands at the centre, and a window cut too small (a shrunken inset, a
+    clip against the wrong interior ring) leaves the centre clear and copper
     everywhere else, which a single central probe reads as clean. Probes are
     ordered representative-point-first so the common case still costs one
     containment test.
@@ -1008,8 +1206,8 @@ def assert_light_windows_are_clear_of_copper(b: Board, spec) -> None:
 
     The copper is read **as emitted** (:meth:`Board.emitted_fills`): "is there
     copper in the light path" is a question about the shipped board, and asking
-    ``pcb._fill_geometry`` answered it about the generator's intentions instead
-    — a pour written 5 mm off its computed position drops solid copper across
+    ``pcb._fill_geometry`` answered it about the generator's intentions instead:
+    a pour written 5 mm off its computed position drops solid copper across
     the window and this check could not see it.
 
     D2-DERIVED for the *window region* (``pcb._window_geometry``), so it would go
@@ -1027,17 +1225,17 @@ def assert_light_windows_are_clear_of_copper(b: Board, spec) -> None:
             for poly in fills:
                 assert not poly.contains(Point(probe)), (
                     f"copper survives on {layer} at {probe} inside a light "
-                    "window — the LED shines into solid copper")
+                    "window; the LED shines into solid copper")
 
 
 def assert_light_windows_carry_keepouts(b: Board, spec) -> None:
     """A cut face carries a keepout rule area over its window.
 
     The README tells users to press B (refill). Without a keepout rule area the
-    refill recomputes the pour from KiCad's own rules — which know nothing about
-    the light window — and floods it solid.
+    refill recomputes the pour from KiCad's own rules (which know nothing about
+    the light window) and floods it solid.
 
-    Reads the emitted zones; D2-DERIVED only for the *gate* — whether a window
+    Reads the emitted zones; D2-DERIVED only for the *gate*: whether a window
     exists at all comes from ``pcb._window_geometry``, the same dependency as
     :func:`assert_light_windows_are_clear_of_copper`. That gate is what
     :func:`assert_light_windows_exist_when_art_asks_for_them` now guards from the
@@ -1048,8 +1246,8 @@ def assert_light_windows_carry_keepouts(b: Board, spec) -> None:
         if geom is None or geom.is_empty:
             continue
         assert any(z.keepout and z.layer == layer for z in b.zones), (
-            f"a light window cuts {layer} but no keepout rule area protects it "
-            "— the first refill in KiCad floods the window solid")
+            f"a light window cuts {layer} but no keepout rule area protects it; "
+            "the first refill in KiCad floods the window solid")
 
 
 def _spec_window_regions(b: Board, spec) -> dict:
@@ -1060,10 +1258,10 @@ def _spec_window_regions(b: Board, spec) -> dict:
     both faces, ``bare`` cuts the face(s) its ``window`` mode names. Two
     clippings are applied, and both are read off the board rather than assumed:
 
-    * the emitted ``Edge.Cuts`` outline, inset 1.5 mm — the generator holds
+    * the emitted ``Edge.Cuts`` outline, inset 1.5 mm: the generator holds
       windows inside a perimeter ring so the pour keeps a path round the edge,
       so art hanging over that ring is not entitled to a cut there;
-    * ``copper`` art is subtracted — copper artwork inside a window deliberately
+    * ``copper`` art is subtracted: copper artwork inside a window deliberately
       keeps its copper.
 
     Everything else in this file that talks about windows derives the region
@@ -1088,7 +1286,7 @@ def _spec_window_regions(b: Board, spec) -> dict:
     if not wants:
         return {}
     rings = [g for g in b.graphics("Edge.Cuts") if g[0] in ("gr_poly", "gr_rect")]
-    assert rings, "no Edge.Cuts outline emitted — nothing to clip windows to"
+    assert rings, "no Edge.Cuts outline emitted; nothing to clip windows to"
     board = max((_edge_polygon(g) for g in rings), key=lambda p: p.area)
     board = Polygon([(x - pcb.ORIGIN, y - pcb.ORIGIN)
                      for x, y in board.exterior.coords])
@@ -1116,12 +1314,12 @@ def assert_light_windows_exist_when_art_asks_for_them(b: Board, spec) -> None:
     board and the feature could disappear without a red test.
 
     A guard that asks ``_window_geometry`` whether ``_window_geometry`` produced
-    something cannot do that job, and until now this one did exactly that — its
+    something cannot do that job, and until now this one did exactly that: its
     ``b`` parameter was unused, so it was a unit test of one ``pcb`` helper
     wearing a board-invariant signature, sitting in a list named ``ALL_CHECKS``.
     It now states the region from the spec (:func:`_spec_window_regions`) and
     asserts on the copper the file actually contains, so it fails if the window
-    is not cut *for any reason* — the helper returning ``None``, the fill code
+    is not cut *for any reason*: the helper returning ``None``, the fill code
     ignoring it, or the emitter writing the pour somewhere else.
     """
     from shapely.geometry import Point
@@ -1129,23 +1327,23 @@ def assert_light_windows_exist_when_art_asks_for_them(b: Board, spec) -> None:
         layer = "F.Cu" if face == "front" else "B.Cu"
         assert not region.is_empty, (
             f"the spec has art that opens a light window on the {face} face, but "
-            "none of it lands where a window can be cut — the LED shines into "
+            "none of it lands where a window can be cut; the LED shines into "
             "solid copper and the two window invariants pass vacuously")
         probes = _interior_probes(region)
         assert probes, (
             f"the {face}-face window region ({region.area:.3f} mm^2) is too thin "
-            "to sample — this check cannot see whether copper was cut, so treat "
+            "to sample; this check cannot see whether copper was cut, so treat "
             "it as unverified rather than green")
         for probe in probes:
             for poly in b.emitted_fills(layer):
                 assert not poly.contains(Point(probe)), (
                     f"art asks for a light window on the {face} face but the "
-                    f"emitted {layer} copper still covers {probe} — no window "
+                    f"emitted {layer} copper still covers {probe}; no window "
                     "was cut and the LED shines into solid copper")
 
 
 # ===========================================================================
-# 5. Board invariants — geometry
+# 5. Board invariants: geometry
 # ===========================================================================
 
 
@@ -1160,8 +1358,8 @@ def assert_copper_clears_the_board_edge(b: Board, spec,
                                         rule: float = RULE_EDGE_CLEARANCE_MM) -> None:
     """Tracks and vias keep the project's copper-to-edge clearance.
 
-    The fast in-process stand-in for kicad-cli's ``copper_edge_clearance`` check
-    — the same violation, found in 0.1 ms instead of 620 ms. ``rule`` is stated
+    The fast in-process stand-in for kicad-cli's ``copper_edge_clearance`` check:
+    the same violation, found in 0.1 ms instead of 620 ms. ``rule`` is stated
     independently (:data:`RULE_EDGE_CLEARANCE_MM`).
     """
     from shapely.geometry import LineString, Point, Polygon
@@ -1170,27 +1368,27 @@ def assert_copper_clears_the_board_edge(b: Board, spec,
         d = min(LineString([t.a, t.b]).distance(e) for e in edges)
         assert d >= rule + t.width / 2 - _EPS, (
             f"track on {t.layer} net {b.nets.get(t.net)!r} from {t.a} to {t.b} "
-            f"is {d - t.width / 2:.4f} mm from the board edge; rule is {rule} mm "
-            "— the fab either rejects the order or mills through live copper")
+            f"is {d - t.width / 2:.4f} mm from the board edge; rule is {rule} mm. "
+            "The fab either rejects the order or mills through live copper")
     for v in b.vias:
         d = min(Point(v.x, v.y).distance(e) for e in edges)
         assert d >= rule + v.size / 2 - _EPS, (
             f"via at ({v.x:.3f}, {v.y:.3f}) is {d - v.size / 2:.4f} mm from the "
-            f"board edge; rule is {rule} mm — the router breaks the barrel out")
+            f"board edge; rule is {rule} mm. The router breaks the barrel out")
 
 
 def assert_board_is_the_standard_size(b: Board, spec) -> None:
     """A default-outline badge is the 20 mm square the standard specifies.
 
     Stated independently of ``pcb.OUTLINE`` (D2): every other outline check
-    derives its expectation from that constant, so editing it would be invisible
-    — and a badge that is not 20 mm square does not fit a host badge's socket.
+    derives its expectation from that constant, so editing it would be invisible,
+    and a badge that is not 20 mm square does not fit a host badge's socket.
     Skipped when the spec supplies its own outline, which is a user input.
     """
     if spec.outline:
         return
     polys = [g for g in b.graphics("Edge.Cuts") if g[0] in ("gr_poly", "gr_rect")]
-    assert polys, "no Edge.Cuts outline emitted — the board has no shape to route"
+    assert polys, "no Edge.Cuts outline emitted; the board has no shape to route"
     best, area = None, -1.0
     for g in polys:
         p = _edge_polygon(g)
@@ -1200,8 +1398,8 @@ def assert_board_is_the_standard_size(b: Board, spec) -> None:
     w, h = x1 - x0, y1 - y0
     assert (abs(w - STANDARD_BOARD_MM) < STANDARD_BOARD_TOL
             and abs(h - STANDARD_BOARD_MM) < STANDARD_BOARD_TOL), (
-        f"the default badge outline measures {w:.4f} x {h:.4f} mm, the SAINTCON "
-        f"minibadge standard is {STANDARD_BOARD_MM} x {STANDARD_BOARD_MM} mm — "
+        f"the default badge outline measures {w:.4f} x {h:.4f} mm, the "
+        f"minibadge standard is {STANDARD_BOARD_MM} x {STANDARD_BOARD_MM} mm; "
         "a badge off this size does not seat in the host")
 
 
@@ -1231,7 +1429,7 @@ def assert_board_outline_is_closed_and_matches_the_spec(b: Board, spec) -> None:
     ring = Polygon(_outline_rings(spec)[0]).area
     assert abs(outer - ring) < 1e-3, (
         f"Edge.Cuts outer contour has area {outer:.4f} mm^2, spec outline has "
-        f"{ring:.4f} mm^2 — the routed board is not the shape the user drew")
+        f"{ring:.4f} mm^2; the routed board is not the shape the user drew")
 
 
 def assert_units_sit_inside_the_safe_region(b: Board, spec) -> None:
@@ -1240,16 +1438,16 @@ def assert_units_sit_inside_the_safe_region(b: Board, spec) -> None:
 
     The rule is unchanged; the data source is. This check used to compare
     ``pcb.led_unit_bbox(led, pcb.unit_safe(spec))`` against
-    ``pcb.unit_safe(spec)`` — two ``pcb`` functions against each other, with its
+    ``pcb.unit_safe(spec)``: two ``pcb`` functions against each other, with its
     ``b`` parameter unused. That is a property of the placement arithmetic, and
     it holds by construction: ``led_unit_bbox`` clamps into ``safe`` itself, so
     the assertion could not fail on any input and no board was ever examined
     despite the check shipping inside ``ALL_CHECKS``.
 
     It now reads the emitted pads of every non-connector footprint. That keeps
-    the reason the check exists — it is the cheap way to notice clamping being
+    the reason the check exists (it is the cheap way to notice clamping being
     turned off, at which point a unit dragged to the corner puts real copper off
-    the board — and makes it able to fail. Worst pad-to-boundary margin measured
+    the board) and makes it able to fail. Worst pad-to-boundary margin measured
     over the corpus is 2.1 mm, so it is nowhere near the edge of firing.
 
     D2-DERIVED for the safe region itself (``pcb.unit_safe``), which is an input
@@ -1264,7 +1462,7 @@ def assert_units_sit_inside_the_safe_region(b: Board, spec) -> None:
         assert (x0 - _EPS <= p.x <= x1 + _EPS
                 and y0 - _EPS <= p.y <= y1 + _EPS), (
             f"pad {p.num} of {p.ref} ({p.fp}) is emitted at "
-            f"({p.x:.3f}, {p.y:.3f}), outside the safe region {safe} — the part "
+            f"({p.x:.3f}, {p.y:.3f}), outside the safe region {safe}; the part "
             "hangs off the board edge and the fab routes through its copper")
 
 
@@ -1274,17 +1472,17 @@ def assert_every_unit_reaches_its_rails(b: Board, spec) -> None:
 
     This is the property the perimeter bridges exist for: a glow or bare window
     that rings a unit can fence its copper onto an island, and the board then
-    ships with an LED wired to nothing. Same reasoning as ``resolve_novia`` — only
+    ships with an LED wired to nothing. Same reasoning as ``resolve_novia``: only
     the filled copper can settle it.
 
     TIER NOTE: only meaningful on specs that went through the placement backstop
     (:func:`resolved_spec`). On hand-placed overlapping units it fires for the
-    placement, not for a code defect — that is D12's biggest false-positive
+    placement, not for a code defect; that is D12's biggest false-positive
     generator.
 
     D2-DERIVED for contact *positions* (``pcb.led_geometry`` / ``clamp_led_obj``)
     and for the perimeter bridges (``pcb.unit_bridges``); the connectivity itself
-    is recomputed from the emitted fill polygons — :meth:`Board.emitted_fills`,
+    is recomputed from the emitted fill polygons: :meth:`Board.emitted_fills`,
     parsed back out of the file, not ``pcb._fill_geometry``.
 
     That sentence used to be in this docstring while line 941 called
@@ -1313,6 +1511,13 @@ def assert_every_unit_reaches_its_rails(b: Board, spec) -> None:
         }
         if led.novia:
             contacts.pop("B.Cu" if front else "F.Cu", None)
+        if clk_used(spec) and led.clk:
+            # The supply is a routed CLK trace, not a pour feed: a front
+            # unit's res_in carries CLK now, and a back unit's 3V3 via is
+            # gone. Nothing of this unit touches the F.Cu rail any more;
+            # assert_led_circuits_complete and assert_clk_hookup_is_wired
+            # own the supply side instead.
+            contacts.pop("F.Cu", None)
         for layer, (pt, net) in contacts.items():
             pads = [(px, py) for num, px, py, pnet, _r2 in pcb.CONNECTOR_PADS
                     if pnet == net and num in spec.pins]
@@ -1329,7 +1534,7 @@ def assert_every_unit_reaches_its_rails(b: Board, spec) -> None:
                 raise AssertionError(
                     f"unit {i}: its {net} contact at ({pt[0]:.2f}, {pt[1]:.2f}) "
                     f"is not on a {layer} pour island that reaches a {net} "
-                    "connector pad — the LED would ship wired to nothing")
+                    "connector pad; the LED would ship wired to nothing")
 
 
 def assert_reverse_mount_leds_are_routed_through(b: Board, spec) -> None:
@@ -1344,7 +1549,7 @@ def assert_reverse_mount_leds_are_routed_through(b: Board, spec) -> None:
     n = sum(1 for led in spec.leds if pcb.led_geometry(led)["hole"])
     got = len(re.findall(r'\(gr_circle[^\n]*\(layer "Edge\.Cuts"\)', b.text))
     assert got == n, (
-        f"{n} reverse-mount unit(s) but {got} routed hole(s) on Edge.Cuts — the "
+        f"{n} reverse-mount unit(s) but {got} routed hole(s) on Edge.Cuts; the "
         "LED faces into the board and nothing shines through")
 
 
@@ -1359,7 +1564,7 @@ def assert_far_side_leds_have_a_via_in_each_pad(b: Board, spec) -> None:
     full-precision float; ``v.x`` was written by ``pcb._n`` at four decimals and
     parsed back, so it may legitimately sit up to 5e-5 mm away. This check used
     ``_EPS`` (1e-6) and therefore **failed on 52 far-side pads across a
-    445-board sweep whose vias were all present** — every one of them within
+    445-board sweep whose vias were all present**: every one of them within
     4.914e-5 mm of where it was wanted, i.e. inside the file's own quantum. Any
     real miss is at least a pad pitch (~1 mm) away, four orders of magnitude
     clear of this slack, so nothing is being hidden.
@@ -1380,7 +1585,7 @@ def assert_far_side_leds_have_a_via_in_each_pad(b: Board, spec) -> None:
                        and abs(v.y - want[1]) < EMITTED_ROUNDING_MM
                        for v in b.vias), (
                 f"unit {i}: far-side LED pad at {want} has no via through the "
-                "board — the LED sits on the far face connected to nothing")
+                "board; the LED sits on the far face connected to nothing")
 
 
 def assert_back_side_parts_live_on_back_layers(b: Board, spec) -> None:
@@ -1394,12 +1599,12 @@ def assert_back_side_parts_live_on_back_layers(b: Board, spec) -> None:
             if any(ly.startswith("*") for ly in lay):
                 continue
             assert all(ly.startswith(face + ".") for ly in lay), (
-                f"footprint {name} is on {layer} but a pad is on {lay} — the "
+                f"footprint {name} is on {layer} but a pad is on {lay}; the "
                 "part is soldered to a face its pads do not reach")
 
 
 # ===========================================================================
-# 6. Board invariants — fab choices
+# 6. Board invariants: fab choices
 # ===========================================================================
 
 
@@ -1413,16 +1618,16 @@ def assert_fab_choices_reach_the_stackup(b: Board, spec) -> None:
     """
     assert b.setup is not None, "no (setup ...) block"
     stack = _kid(b.setup, "stackup")
-    assert stack is not None, "no (stackup ...) block — the fab gets no colour "\
+    assert stack is not None, "no (stackup ...) block; the fab gets no colour "\
         "or finish and ships whatever is on the panel"
     colors = {str(_val(ly, "color")) for ly in _kids(stack, "layer")
               if "Mask" in str(ly[1])}
     assert colors == {spec.mask_color.capitalize()}, (
         f"soldermask layers carry colours {colors}, spec asked for "
-        f"{spec.mask_color!r} — the user picks purple and is shipped green")
+        f"{spec.mask_color!r}; the user picks purple and is shipped green")
     finish = str(_val(stack, "copper_finish"))
     assert ("HAL" in finish) == (spec.finish == "hasl"), (
-        f"copper_finish {finish!r} does not match spec finish {spec.finish!r} — "
+        f"copper_finish {finish!r} does not match spec finish {spec.finish!r}; "
         "the user pays for ENIG and gets HASL, or vice versa")
 
 
@@ -1442,17 +1647,17 @@ def assert_project_rules_match_the_invariants(pro_text: str) -> None:
     got_edge = float(rules["min_copper_edge_clearance"])
     assert got_clear <= RULE_CLEARANCE_MM + _EPS, (
         f"the project declares min_clearance {got_clear} mm but the in-process "
-        f"pour check only enforces {RULE_CLEARANCE_MM} mm — boards that fail "
+        f"pour check only enforces {RULE_CLEARANCE_MM} mm; boards that fail "
         "real DRC would pass every fast test")
     assert got_edge <= RULE_EDGE_CLEARANCE_MM + _EPS, (
         f"the project declares min_copper_edge_clearance {got_edge} mm but the "
-        f"in-process edge check only enforces {RULE_EDGE_CLEARANCE_MM} mm — "
+        f"in-process edge check only enforces {RULE_EDGE_CLEARANCE_MM} mm: "
         "same blind spot")
     for name, got in (("min_clearance", got_clear),
                       ("min_copper_edge_clearance", got_edge)):
         assert got >= FAB_CLEARANCE_FLOOR_MM - _EPS, (
             f"the project declares {name} {got} mm, below the "
-            f"{FAB_CLEARANCE_FLOOR_MM} mm fab floor — DRC passes locally and "
+            f"{FAB_CLEARANCE_FLOOR_MM} mm fab floor; DRC passes locally and "
             "the panel comes back scrap")
 
 
@@ -1466,6 +1671,7 @@ ALL_CHECKS = [
     assert_signal_pins_never_powered,
     assert_connector_power_pins_wired,
     assert_led_circuits_complete,
+    assert_clk_hookup_is_wired,
     assert_net_index_matches_name,
     assert_tracks_carry_the_net_of_the_pads_they_touch,
     assert_every_net_is_declared,
@@ -1516,7 +1722,7 @@ def check_board(spec, text: str | None = None, checks=None) -> Board:
 def resolved_spec(spec):
     """Apply the webapp's placement backstop, exactly as a real download does.
 
-    ``generate_pcb`` is **not** responsible for DRC cleanliness — it emits what
+    ``generate_pcb`` is **not** responsible for DRC cleanliness: it emits what
     the spec says. De-confliction lives in ``webapp.py:774-825``: clamp, clear the
     connector pads, separate units from each other. Feeding hand-written
     ``Led(x, y)`` coordinates straight to ``generate_pcb`` and then asserting
@@ -1536,7 +1742,7 @@ def resolved_spec(spec):
 
     ``_leds, bad = pcb.resolve_novia(resolved_spec(spec), pcb.unit_safe(spec))``
 
-    — a non-empty ``bad`` means the user gets an error message, not this board.
+    A non-empty ``bad`` means the user gets an error message, not this board.
     (1 of the 8 boards that failed :func:`assert_every_unit_reaches_its_rails` on
     a 445-board sweep was exactly this; the other 7 were real.)
     """
@@ -1559,7 +1765,7 @@ def with_connector_tabs(rings, pins=None):
     never ships a user shape raw: it unions a minimal board tab under every kept
     connector pad pair, bridging any tab the shape does not reach solidly. A
     hand-written ``outline=[[...circle...]]`` fed straight to ``generate_pcb``
-    produces a board whose connector pads are **off the board** — every rail
+    produces a board whose connector pads are **off the board**; every rail
     invariant then fires for the test's own geometry, not for a code defect.
 
     -> a list of rings suitable for ``BadgeSpec(outline=...)``.
@@ -1613,7 +1819,7 @@ def drc_violations(board_path, kicad_cli):
     """
     board_path = _Path(board_path)
     assert board_path.with_suffix(".kicad_pro").exists(), (
-        f"no .kicad_pro beside {board_path.name} — kicad-cli would fall back to "
+        f"no .kicad_pro beside {board_path.name}; kicad-cli would fall back to "
         "KiCad's default rules, not the ones this project ships")
     out = board_path.with_name(board_path.stem + "-drc.json")
     subprocess.run([str(kicad_cli), *DRC_ARGS, "-o", str(out), str(board_path)],
@@ -1628,14 +1834,14 @@ def assert_drc_clean(target, kicad_cli, tmp_path=None, ignore=(),
                      resolve: bool = True):
     """The external oracle: KiCad's own DRC finds nothing.
 
-    ``target`` is either a ``BadgeSpec`` — in which case ``tmp_path`` is required
-    and the spec goes through :func:`resolved_spec` first — or a path to an
+    ``target`` is either a ``BadgeSpec`` (in which case ``tmp_path`` is required
+    and the spec goes through :func:`resolved_spec` first) or a path to an
     already-written ``.kicad_pcb`` (``board_dir(...).pcb``).
 
     Sees what the in-process invariants cannot: courtyard overlap, silk over
     copper, solder-mask bridges, copper slivers, hole clearance, **pad-to-pad
     shorts**, crossing tracks, unconnected items. Blind to what they do see: via
-    layer spans, the stackup, and net index/name agreement. Run both — measured,
+    layer spans, the stackup, and net index/name agreement. Run both: measured,
     each oracle catches defects the other does not.
 
     ``ignore`` is a set of violation ``type`` strings to tolerate; keep it empty
@@ -1659,13 +1865,13 @@ def assert_drc_clean(target, kicad_cli, tmp_path=None, ignore=(),
         lines.append(f"{v.get('severity')} {v.get('type')}: "
                      f"{v.get('description')} [{where}]")
     raise AssertionError(
-        f"kicad-cli DRC found {len(bad)} violation(s) on {name} — the user "
+        f"kicad-cli DRC found {len(bad)} violation(s) on {name}; the user "
         "downloads a project that their fab will reject:\n  "
         + "\n  ".join(lines))
 
 
 # ===========================================================================
-# 9. GLB invariants — what the user actually sees in the 3D view
+# 9. GLB invariants: what the user actually sees in the 3D view
 #
 # kicad-cli 9.0.4 writes GLB through OpenCASCADE, in METRES, Y-up:
 #     glTF x == board page x (mm) / 1000
@@ -1803,7 +2009,7 @@ def board_geometry(src) -> dict:
     (board x, height, board y). Component boxes also carry ``mount_y`` (the model
     origin's height, i.e. the plane KiCad sat the part on) and ``model``.
 
-    The body centre is the world AABB midpoint — tessellation-independent, unlike
+    The body centre is the world AABB midpoint: tessellation-independent, unlike
     a vertex mean, and unlike the node translation, which is only the anchor
     (pin 1 for THT models). ``src`` may be a path or a parsed ``(gltf, bin)``.
     """
@@ -1868,7 +2074,7 @@ def check_board_slab(geom, outline_mm=(0.16, 0.16, 20.16, 20.16),
     out = []
     slab = geom["layers"].get("PCB")
     if slab is None:
-        return [("no board slab in the GLB (mesh '<project>_PCB' missing) — "
+        return [("no board slab in the GLB (mesh '<project>_PCB' missing); "
                  "the 3D view shows floating parts and no board")]
     x0, y0, x1, y1 = outline_mm
     want = ((slab["min"], np.array([origin + x0, CORE_Y[0], origin + y0]), "min"),
@@ -1877,15 +2083,15 @@ def check_board_slab(geom, outline_mm=(0.16, 0.16, 20.16, 20.16),
         d = np.abs(got - exp)
         if d.max() > tol:
             out.append(f"board slab {tag} {np.round(got, 4).tolist()} != "
-                       f"{np.round(exp, 4).tolist()} (max |d| {d.max():.4f} mm) "
-                       "— the 3D preview is not the board being fabricated")
+                       f"{np.round(exp, 4).tolist()} (max |d| {d.max():.4f} mm); "
+                       "the 3D preview is not the board being fabricated")
     for role, (lo, hi) in LAYER_Y.items():
         r = geom["layers"].get(role)
         if r is None:
             continue
         if abs(r["min"][1] - lo) > tol or abs(r["max"][1] - hi) > tol:
             out.append(f"layer {role!r} height "
-                       f"[{r['min'][1]:.4f},{r['max'][1]:.4f}] != [{lo},{hi}] — "
+                       f"[{r['min'][1]:.4f},{r['max'][1]:.4f}] != [{lo},{hi}]; "
                        "the stackup the fab is quoted on has moved")
     return out
 
@@ -1894,19 +2100,19 @@ def check_present(geom, refs) -> list[str]:
     """Every expected reference has a 3D model in the export.
 
     kicad-cli prints 'Could not add 3D model for <ref>' and EXITS 2 when a model
-    file is missing — but still writes a complete, valid GLB with the part
+    file is missing, but still writes a complete, valid GLB with the part
     silently absent. Never trust the exit code alone; assert the set of component
     node names on every 3D test.
     """
     have = set(geom["components"])
     return [(f"component {r!r} has no 3D model in the GLB "
-             f"(have {sorted(have)}) — the user's 3D preview is missing a part "
+             f"(have {sorted(have)}); the user's 3D preview is missing a part "
              "that is on the board")
             for r in refs if r not in have]
 
 
 def check_mount_plane(geom, ref, face, z_offset_mm=0.0, tol=TOL_EXACT) -> list[str]:
-    """The part sits ON its face — not floating above, not sunk into it.
+    """The part sits ON its face: not floating above, not sunk into it.
 
     Height defects move ``node.translation.y`` and nothing else in the plane, so
     a placement check is blind to them; this catches them with a 1.0 mm signal
@@ -1923,7 +2129,7 @@ def check_mount_plane(geom, ref, face, z_offset_mm=0.0, tol=TOL_EXACT) -> list[s
         return []
     how = "floats above" if (c["mount_y"] - want) * sign > 0 else "sinks into"
     return [(f"{ref} {how} the {face} face by {d:.4f} mm (mount plane "
-             f"{c['mount_y']:.4f}, expected {want:.4f}) — the part is not "
+             f"{c['mount_y']:.4f}, expected {want:.4f}); the part is not "
              "sitting on the board it is soldered to")]
 
 
@@ -1939,7 +2145,7 @@ def check_face(geom, ref, face) -> list[str]:
     got = "front" if c["mount_y"] > BOARD_MIDPLANE else "back"
     return [] if got == face else [
         (f"{ref} is on the {got} face, spec says {face} (mount plane "
-         f"{c['mount_y']:.4f} vs midplane {BOARD_MIDPLANE}) — the user placed "
+         f"{c['mount_y']:.4f} vs midplane {BOARD_MIDPLANE}); the user placed "
          "the LED on one side and it is assembled on the other")]
 
 
@@ -1966,7 +2172,7 @@ def check_placement(geom, ref, page_xy, tol=TOL_PLACE) -> list[str]:
     dx, dy, d = placement_error(geom, ref, page_xy)
     return [] if d <= tol else [
         (f"{ref} body centre is {d:.4f} mm off its footprint origin "
-         f"(dx {dx:+.4f}, dy {dy:+.4f}); tolerance {tol} — the part straddles "
+         f"(dx {dx:+.4f}, dy {dy:+.4f}); tolerance {tol}. The part straddles "
          "bare laminate and one pad is left exposed")]
 
 
@@ -1975,7 +2181,7 @@ def canonical_residual(dx, dy, rot, face):
 
     The stock 3D models are not all symmetric about their pin-1 anchor, so the
     raw error is package-dependent. De-rotated and un-mirrored it is a CONSTANT
-    for a given (package, layout) — measured identical to 0.0000 mm across all
+    for a given (package, layout): measured identical to 0.0000 mm across all
     four rotations on both faces.
     """
     t = math.radians(-float(rot) % 360)
@@ -1994,8 +2200,8 @@ def check_rotation_invariance(samples, tol=TOL_CANON) -> list[str]:
     build. On the injected y-sign defect this fired on 4/4 affected package groups
     where the absolute check fired on only 16/32 boards.
 
-    Any change to ``pcb._smd``'s model block — ``offset``, ``rotate``, ``mz``,
-    ``f``, or the ``drill`` branch — needs the full rotation x face sweep, not one
+    Any change to ``pcb._smd``'s model block (``offset``, ``rotate``, ``mz``,
+    ``f``, or the ``drill`` branch) needs the full rotation x face sweep, not one
     board.
     """
     import numpy as np
@@ -2008,14 +2214,14 @@ def check_rotation_invariance(samples, tol=TOL_CANON) -> list[str]:
     if spread <= tol:
         return []
     return [f"model placement is not rotation/face invariant: residual spread "
-            f"{spread:.4f} mm > {tol} — the 3D model sits on its pads at some "
+            f"{spread:.4f} mm > {tol}; the 3D model sits on its pads at some "
             "rotations and off them at others: " +
             ", ".join(f"{lab}=({ux:+.4f},{uy:+.4f})" for lab, ux, uy in canon)]
 
 
 def material_roles(geom) -> dict:
     """``{role: material index}``, using the same mesh-suffix mapping
-    ``webapp._GLB_LAYER_ROLES`` uses — so a regression in ``_tag_glb_layers``'s
+    ``webapp._GLB_LAYER_ROLES`` uses, so a regression in ``_tag_glb_layers``'s
     role attribution shows up here too."""
     return {k: v[0] for k, v in geom["layer_material"].items() if v}
 
@@ -2041,24 +2247,24 @@ def check_mask_material(geom, rgb, opaque, tol=0.01) -> list[str]:
     """
     idx = material_roles(geom).get("soldermask")
     if idx is None:
-        return ["no soldermask material in the GLB — the board renders bare"]
+        return ["no soldermask material in the GLB; the board renders bare"]
     m = geom["materials"][idx]
     f = m["pbrMetallicRoughness"]["baseColorFactor"]
     out = []
     if max(abs(a - b) for a, b in zip(f[:3], rgb)) > tol:
-        out.append(f"soldermask colour {[round(v, 4) for v in f[:3]]} != {rgb} — "
+        out.append(f"soldermask colour {[round(v, 4) for v in f[:3]]} != {rgb}; "
                    "the user picks a colour and the preview shows another")
     if opaque:
         if m.get("alphaMode", "OPAQUE") != "OPAQUE" or f[3] < 1.0 - _EPS:
             out.append(f"soldermask not opaque after tagging: "
-                       f"alphaMode={m.get('alphaMode')} alpha={f[3]} — copper "
+                       f"alphaMode={m.get('alphaMode')} alpha={f[3]}; copper "
                        "ghosts through the mask in the 3D view")
         if not str(m.get("name", "")).startswith("soldermask:"):
-            out.append(f"soldermask material not tagged: name={m.get('name')!r} — "
+            out.append(f"soldermask material not tagged: name={m.get('name')!r}; "
                        "the viewer's layer toggles cannot find it")
     elif m.get("alphaMode") != "BLEND" or abs(f[3] - 0.83) > 1e-3:
         out.append(f"raw export mask alpha changed: alphaMode="
-                   f"{m.get('alphaMode')} alpha={f[3]} (was BLEND/0.83) — "
+                   f"{m.get('alphaMode')} alpha={f[3]} (was BLEND/0.83); "
                    "_tag_glb_layers is fixing a problem that no longer exists")
     return out
 
@@ -2070,7 +2276,7 @@ def check_mask_material(geom, rgb, opaque, tol=0.01) -> list[str]:
 # classes whose authored colours are >=100/255 apart in at least two channels,
 # so classification is a nearest-of-N lookup with a huge margin: no thresholds
 # to tune, and a lighting or shading change in a future KiCad cannot flip a
-# class. Never golden a PNG — five identical render invocations produce five
+# class. Never golden a PNG: five identical render invocations produce five
 # different files, with anti-aliasing disabled as well as on.
 # ===========================================================================
 
@@ -2083,7 +2289,7 @@ CLASSES = {
     "pour": (254, 177, 106),       # pour copper seen with the mask hidden.
                                    # KiCad shades it differently from pad copper
                                    # and the value is NOT ours to set, so never
-                                   # assert on this class directly — use
+                                   # assert on this class directly; use
                                    # has_copper().
     "mask": (48, 254, 48),         # green soldermask
     "silk": (254, 254, 254),       # white silkscreen ink
@@ -2113,7 +2319,7 @@ def classify(path, *, max_unknown: float = MAX_UNKNOWN_FRAC):
 
     Raises if more than ``max_unknown`` of the image is further than 60 units
     (L-inf) from every class: that is the signal that the appearance preset did
-    not apply, or that a layer rendered in a colour we do not know about — the
+    not apply, or that a layer rendered in a colour we do not know about: the
     failure mode where a whole feature class is invisible and every area metric
     quietly reads zero.
     """
@@ -2126,7 +2332,7 @@ def classify(path, *, max_unknown: float = MAX_UNKNOWN_FRAC):
     if unknown > max_unknown:
         raise AssertionError(
             f"{path}: {unknown:.3%} of pixels match no known class (limit "
-            f"{max_unknown:.1%}) — the appearance preset did not apply, so every "
+            f"{max_unknown:.1%}); the appearance preset did not apply, so every "
             "area metric taken from this render is meaningless")
     return idx.astype(np.int8), unknown
 
@@ -2159,7 +2365,7 @@ def components(m, min_px: int = 0) -> list[int]:
 
     NOTE: do NOT reach for ``PIL.ImageDraw.floodfill`` as a substitute. On Pillow
     12.3.0 it is a **silent no-op** on a mode-"L" image built with
-    ``Image.fromarray`` — it returns without error and changes nothing, so a
+    ``Image.fromarray``: it returns without error and changes nothing, so a
     component count comes back as 0 and a naive test passes forever. That is why
     every metric in this section is calibrated against a deliberately broken
     artifact before it is trusted.
@@ -2316,7 +2522,7 @@ def assert_pour_is_one_island(copper_png, net_layer: str,
     n, share = copper_islands(copper_png, min_frac)
     assert n == 1, (
         f"{net_layer} pour split into {n} islands (expected 1; largest holds "
-        f"{share:.1%} of the copper) — every LED on a severed island is wired to "
+        f"{share:.1%} of the copper); every LED on a severed island is wired to "
         "nothing and will never light")
 
 
@@ -2324,8 +2530,8 @@ def silk_on_opening(materials_png, materials_clipped_png) -> float:
     """Fraction of the board carrying silkscreen ink that lands on a mask opening.
 
     Measured as authored-silk-area minus mask-clipped-silk-area, from two renders
-    that differ ONLY in ``subtract_mask_from_silk``. Everything else — camera,
-    lighting, geometry, anti-aliasing — is identical, so the difference is signal,
+    that differ ONLY in ``subtract_mask_from_silk``. Everything else (camera,
+    lighting, geometry, anti-aliasing) is identical, so the difference is signal,
     not noise. Gate at :data:`SILK_ON_OPENING_MAX`.
     """
     a = classify(materials_png)[0]
@@ -2339,7 +2545,7 @@ def assert_silk_stays_off_openings(materials_png, materials_clipped_png,
     v = silk_on_opening(materials_png, materials_clipped_png)
     assert v <= limit, (
         f"{v:.2e} of the board is silkscreen printed onto a mask opening "
-        f"(limit {limit:.0e}) — ink on bare copper does not adhere and the "
+        f"(limit {limit:.0e}); ink on bare copper does not adhere and the "
         "legend rubs off, or the pad will not take solder")
 
 
@@ -2348,7 +2554,7 @@ def assert_board_is_one_piece(board_png) -> None:
     on = onboard(classify(board_png)[0])
     n = len(components(on, min_px=int(0.001 * on.size)))
     assert n == 1, (
-        f"the board silhouette is {n} piece(s), expected 1 — the outline did not "
+        f"the board silhouette is {n} piece(s), expected 1; the outline did not "
         "close, or a cut-out ate the board and it falls apart on the panel")
 
 

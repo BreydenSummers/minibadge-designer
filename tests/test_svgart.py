@@ -132,8 +132,8 @@ def test_svg_art_emits_exact_polygons(client):
     board = _board(_post(client, params, {"art0": (io.BytesIO(svg), "logo.svg")}))
     polys = re.findall(r"\(gr_poly \(pts ((?:\(xy [-\d. ]+\) ?)+)\)", board)
     assert polys, "no art polygons emitted"
-    # An exact circle flattens to many vertices — nothing like a 4-point rect
-    # grid — and every raster rect signature (axis-aligned 4-pointers) is gone.
+    # An exact circle flattens to many vertices, nothing like a 4-point rect
+    # grid, and every raster rect signature (axis-aligned 4-pointers) is gone.
     counts = [p.count("(xy") for p in polys]
     assert max(counts) > 40
     # Vertex radii match the placed circle (r = 4.5 mm at width 10 of a 100-frame).

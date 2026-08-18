@@ -1,8 +1,8 @@
 """Text rendered to exact vector polygons via bundled TTF fonts.
 
 The KiCad stroke font (gr_text) can only live on the silkscreen. Turning a
-string into real polygons lets text use every art material — silk, exposed
-copper, glow window, bare board — and any bundled typeface, through the same
+string into real polygons lets text use every art material (silk, exposed
+copper, glow window, bare board) and any bundled typeface, through the same
 pipeline that places SVG artwork.
 """
 
@@ -14,7 +14,7 @@ from pathlib import Path
 FONT_DIR = Path(__file__).parent / "fonts"
 
 # key -> (UI label, filename). Keys are what the web UI sends; labels show
-# in the font <select>. Keep keys stable — they end up in saved designs.
+# in the font <select>. Keep keys stable: they end up in saved designs.
 FONTS: dict[str, tuple[str, str]] = {
     "archivo": ("Archivo Black", "ArchivoBlack-Regular.ttf"),
     "dmserif": ("DM Serif Display", "DMSerifDisplay-Regular.ttf"),
