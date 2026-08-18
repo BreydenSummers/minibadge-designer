@@ -172,7 +172,16 @@
   /* Mask/Finish/Vias: weight the columns by their longest value so the
      chosen option is never clipped mid-word (equal thirds cut "Silver
      HASL" and "Tented" off at the panel's width). */
-  .row.fabrow { display: grid; grid-template-columns: 0.9fr 1.2fr 1fr; }
+  .row.fabrow { display: grid; grid-template-columns: 0.82fr 1.4fr 0.95fr; }
+  .row.fabrow select { padding-left: 6px; padding-right: 4px; }
+  /* Once the rail narrows, three columns cannot hold their longest options
+     no matter how the weights are shared out: measured, "Gold ENIG",
+     "Untented" and the mask names want ~201px of a ~199px row, before the
+     native dropdown arrow. Wrapping to two columns gives every option room
+     instead of clipping whichever one loses the argument. */
+  @media (max-width: 1400px) {
+    .row.fabrow { grid-template-columns: 1fr 1fr; }
+  }
   .check { display: flex; align-items: center; gap: 8px; margin-top: 8px; font-size: 13px; }
   .sect {
     display: flex; justify-content: space-between; align-items: center;
@@ -808,9 +817,19 @@ const artHasCut = () => state.art.some(usesCut);
 // an outline part, or an art layer with cut regions.
 const boardCarved = () => customActive() || artHasCut();
 // When a layer FIRST gains bare, default its window to Through (the classic
-// light pipe); the user can still narrow it to one face afterwards.
+// light pipe); the user can still narrow it to one face afterwards. Moving a
+// control the user can see, without saying so, reads as the app losing their
+// setting -- so the change announces itself and names the way back.
+const THROUGH_NOTE = "Bare board opens a window right through, so this layer's "
+  + "face switched to Through. Set it back to Front or Back to open one side only.";
 function promoteToThrough(a, hadBare) {
-  if (!hadBare && usesBare(a) && (a.side || "front") === "front") a.side = "through";
+  if (hadBare || !usesBare(a) || (a.side || "front") !== "front") return false;
+  a.side = "through";
+  // Callers that post no status of their own get told here; one that does
+  // (the wand) folds the note into its own message rather than being
+  // overwritten by it.
+  setStatus(THROUGH_NOTE);
+  return true;
 }
 // A closed face is untouched: it keeps its mask AND its copper, which is why
 // a one-face bare window can sit over a part mounted on the other side.
@@ -2926,8 +2945,14 @@ function relocateStrandedLeds() {
     if (spot) { [L.x, L.y] = spot; moved = true; }
     else stuck = true;
   });
-  if (stuck) setStatus("An LED has no solid board under it. Drag it somewhere solid or adjust the shape.", true);
-  else if (moved) setStatus("Moved LED(s) onto solid board.");
+  // Only the relocation gets a status: it reports something the app just DID,
+  // which nothing else announces. A unit left stranded is a lasting condition,
+  // and refreshWarnings already owns it with a better message (it names the
+  // unit and says downloads are blocked) that clears the moment the unit fits
+  // again. Saying it here as well left a red "drag it somewhere solid" sitting
+  // over a board with nothing wrong for the 15 s until the status expired,
+  // through every edit that had already fixed it.
+  if (moved && !stuck) setStatus("Moved LED(s) onto solid board.");
 }
 function textOverParts(t) {
   const b = textBBox(t);
@@ -4583,10 +4608,10 @@ function attachPointer(cv, side) {
           } catch (e) {}
           const hadBare = usesBare(a);
           a.overrides.push({ u, v, material: picking.material, rgb });
-          promoteToThrough(a, hadBare);
+          const promoted = promoteToThrough(a, hadBare);
           picking = null;
           rebuildArt(a); renderArtList(); draw();
-          setStatus("Region reassigned.");
+          setStatus("Region reassigned." + (promoted ? " " + THROUGH_NOTE : ""));
         } else {
           picking = null;
           renderArtList();
@@ -4861,6 +4886,7 @@ function attachPointer(cv, side) {
       const ob = outlineBounds();
       t.x = Math.min(Math.max(mx + drag.dx, Math.min(0.8, ob[0] + 0.8)), Math.max(19.5, ob[2] - 0.8));
       t.y = Math.min(Math.max(my + drag.dy, ob[1] + 0.8), ob[3] - 0.8);
+      t.auto = false; // the user owns this position now; never move it for them
     } else if (drag.kind === "art") {
       const a = state.art[drag.index];
       const ab = artBoard();
@@ -5206,7 +5232,7 @@ function renderArtList() {
           <button class="del" title="Remove">&times;</button>
         </span></div>
         <div class="row" style="margin-top:6px">
-          <div><select class="m" title="Material">${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, a.material)).join("")}</select></div>
+          <div><select class="m" title="What this layer is made of. &quot;Cut through board&quot; is not ink: it routs a hole clean through, the same cut a board-shape part makes">${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, a.material)).join("")}</select></div>
           <div style="flex:0 0 96px">${sideSelectHTML(a)}</div>
         </div>
         ${a.kind === "circle" ? "" : `<div class="sub">Rotation (&deg;)</div>${pairHTML("rots", 0, 359, 1, a.rot)}`}
@@ -5226,7 +5252,8 @@ function renderArtList() {
         if (i < state.art.length - 1) { [state.art[i+1], state.art[i]] = [state.art[i], state.art[i+1]]; renderArtList(); draw(); }
       };
       div.querySelector(".dup").onclick = () => {
-        if (state.art.length >= MAX_ART) { setStatus("Artwork layer limit reached.", true); return; }
+        if (state.art.length >= MAX_ART) { setStatus(`That is the limit: ${MAX_ART} artwork layers on one badge. `
+        + "Remove one before adding another.", true); return; }
         state.art.splice(i + 1, 0, { ...a });
         renderArtList(); draw();
       };
@@ -5272,7 +5299,7 @@ function renderArtList() {
         <div style="flex:0 0 96px">${sideSelectHTML(a)}</div>
       </div>
       ${a.mode === "palette" ? paletteRows + `<div class="sub">The ${MAX_PAL} strongest colors are kept; everything else merges into the nearest swatch; use the wand to retarget.</div>` : `
-        <div style="margin-top:6px"><select class="m" title="Material">${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, a.material)).join("")}</select></div>
+        <div style="margin-top:6px"><select class="m" title="What this layer is made of. &quot;Cut through board&quot; is not ink: it routs a hole clean through, the same cut a board-shape part makes">${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, a.material)).join("")}</select></div>
         <div class="sub">Threshold <span class="tv">${a.threshold}</span></div>
         <input type="range" class="th" min="1" max="254" value="${a.threshold}">
         <div class="check"><input type="checkbox" class="inv" id="inv${i}"${a.invert ? " checked" : ""}><label for="inv${i}">Invert</label></div>`}
@@ -5306,7 +5333,8 @@ function renderArtList() {
       if (i < state.art.length - 1) { [state.art[i+1], state.art[i]] = [state.art[i], state.art[i+1]]; renderArtList(); draw(); }
     };
     div.querySelector(".dup").onclick = () => {
-      if (state.art.length >= MAX_ART) { setStatus("Artwork layer limit reached.", true); return; }
+      if (state.art.length >= MAX_ART) { setStatus(`That is the limit: ${MAX_ART} artwork layers on one badge. `
+        + "Remove one before adding another.", true); return; }
       const copy = {
         ...a,
         palette: (a.palette || []).map(p => ({ rgb: [...p.rgb], material: p.material })),
@@ -5954,7 +5982,12 @@ function renderTextList() {
     const refreshCount = () => {
       div.querySelector(".txn").textContent = t.text.length;
     };
-    div.querySelector(".tx").oninput = e => { t.text = e.target.value; refreshCount(); draw(); };
+    div.querySelector(".tx").oninput = e => {
+      t.text = e.target.value;
+      refreshCount();
+      settleAutoText(t); // the spot was picked for an empty layer; keep it legal
+      draw();
+    };
     bindPair(div, "sz", v => { t.size = v; draw(); });
     bindPair(div, "trot", v => { t.rot = ((Math.round(v) % 360) + 360) % 360; draw(); }, true);
     div.querySelector(".s").onchange = e => { t.side = e.target.value; draw(); };
@@ -5985,7 +6018,8 @@ document.addEventListener("click", e => {
   const kindBtn = e.target.closest("#shapemenu button");
   if (kindBtn) {
     menu.style.display = "none";
-    if (state.art.length >= MAX_ART) { setStatus("Artwork layer limit reached.", true); return; }
+    if (state.art.length >= MAX_ART) { setStatus(`That is the limit: ${MAX_ART} artwork layers on one badge. `
+        + "Remove one before adding another.", true); return; }
     const kind = kindBtn.dataset.kind;
     state.art.push({
       kind, material: "bare", side: "through",
@@ -6001,7 +6035,8 @@ document.addEventListener("click", e => {
   }
 });
 $("addart").addEventListener("click", () => {
-  if (state.art.length >= MAX_ART) { setStatus("Artwork layer limit reached.", true); return; }
+  if (state.art.length >= MAX_ART) { setStatus(`That is the limit: ${MAX_ART} artwork layers on one badge. `
+        + "Remove one before adding another.", true); return; }
   $("artfile").click();
 });
 // SVGs also get rasterized in the browser (native rendering): the PNG is
@@ -6061,6 +6096,16 @@ $("artfile").addEventListener("change", () => {
   const target = artReplace;
   artReplace = null;
   if (!f) return;
+  // The server keeps only the first MAX_ART layers, so a layer added past the
+  // cap is dropped from the download while the canvas still shows it: the
+  // preview would be promising artwork the board never gets. Refuse here, in
+  // the same words the "+ Shape" button uses. (Replacing an existing layer's
+  // picture is always fine: it adds no layer.)
+  if (target === null && state.art.length >= MAX_ART) {
+    setStatus(`That is the limit: ${MAX_ART} artwork layers on one badge. `
+      + "Remove one before adding another.", true);
+    return;
+  }
   loadImageFile(f, ({ upload, raster, isSvg, dataUrl, src, iw, ih }) => {
     const { palette, fewColors } = extractPalette(src, iw, ih);
     if (target !== null && state.art[target]) {
@@ -6317,6 +6362,43 @@ $("addled").addEventListener("click", () => {
   renderLedList();
   draw();
 });
+// Where a text layer should sit: the first of a few candidates (its own
+// staggered default first) that is on solid board AND clear of parts, pads
+// and the other texts, falling back to merely-solid. `sample` stands in for
+// the string being measured, so the same scan serves an empty new layer and
+// a re-check once real words are in it.
+function textSpot(t, sample) {
+  const ob = outlineBounds();
+  const cx = (ob[0] + ob[2]) / 2, cy = (ob[1] + ob[3]) / 2;
+  const cands = [[t.x, t.y], [10.16, 15.5], [10.16, 4.8], [5.4, 15.5],
+                 [15.0, 15.5], [5.4, 4.8], [15.0, 4.8],
+                 [cx, cy + 3.5], [cx, cy - 3.5], [cx, cy]];
+  const probe = { ...t, text: sample };
+  let clear = null, solid = null;
+  for (const [x, y] of cands) {
+    probe.x = x; probe.y = y;
+    if (!textOnSolidBoard(probe)) continue;
+    // "Clear" also means clear of the OTHER texts: two texts spawned onto the
+    // same spot hide each other completely.
+    const onText = state.texts.some(o => o !== t && Math.hypot(o.x - x, o.y - y) < 3);
+    if (!textOverParts(probe) && !onText) { clear = [x, y]; break; }
+    if (!solid) solid = [x, y];
+  }
+  return clear || solid;
+}
+// A layer spawns empty, so its spot is chosen for a stand-in string; the real
+// word can be wider and hang off the board or over a hole. Re-place it the
+// first time it has content, but ONLY while the position is still the app's
+// own choice: text the user has dragged stays exactly where they put it, even
+// if that is somewhere the board cannot print it (that is their call, and the
+// standing warning says so).
+function settleAutoText(t) {
+  if (!t.auto || !t.text.trim() || textOnSolidBoard(t)) return false;
+  const spot = textSpot(t, t.text);
+  if (!spot || (spot[0] === t.x && spot[1] === t.y)) return false;
+  [t.x, t.y] = spot;
+  return true;
+}
 $("addtext").addEventListener("click", () => {
   if (state.texts.length >= MAX_TEXTS) {
     setStatus(`That is the limit: ${MAX_TEXTS} text layers on one badge. `
@@ -6325,32 +6407,9 @@ $("addtext").addEventListener("click", () => {
   }
   const n = state.texts.length;
   const t = {x: 10.16, y: 10.16 + (n % 5) * 2.2 - 4.4, text: "", size: 1.5,
-             side: "front", font: "kicad", material: "silk", rot: 0};
-  // New text must land somewhere sensible, like a new LED does: scan a few
-  // candidates (the staggered default first) for a spot that is on solid
-  // board AND clear of parts and pads; spawning onto a unit used to greet
-  // the user with an overlap warning for something the app did to itself.
-  // Settle for merely-solid, then for the default, rather than refusing.
-  {
-    const ob = outlineBounds();
-    const cx = (ob[0] + ob[2]) / 2, cy = (ob[1] + ob[3]) / 2;
-    const cands = [[t.x, t.y], [10.16, 15.5], [10.16, 4.8], [5.4, 15.5],
-                   [15.0, 15.5], [5.4, 4.8], [15.0, 4.8],
-                   [cx, cy + 3.5], [cx, cy - 3.5], [cx, cy]];
-    const probe = { ...t, text: "text" };
-    let clear = null, solid = null;
-    for (const [x, y] of cands) {
-      probe.x = x; probe.y = y;
-      if (!textOnSolidBoard(probe)) continue;
-      // "Clear" also means clear of the other texts: two texts spawned onto
-      // the same spot hide each other completely.
-      const onText = state.texts.some(o => Math.hypot(o.x - x, o.y - y) < 3);
-      if (!textOverParts(probe) && !onText) { clear = [x, y]; break; }
-      if (!solid) solid = [x, y];
-    }
-    if (clear) [t.x, t.y] = clear;
-    else if (solid) [t.x, t.y] = solid;
-  }
+             side: "front", font: "kicad", material: "silk", rot: 0, auto: true};
+  const spot = textSpot(t, "text");
+  if (spot) [t.x, t.y] = spot;
   state.texts.push(t);
   renderTextList();
   const inputs = document.querySelectorAll("#textlist input.tx");

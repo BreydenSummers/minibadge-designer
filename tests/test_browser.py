@@ -2540,3 +2540,87 @@ def test_decoration_added_under_a_part_never_rubs_the_part_out(ui, under):
         "is painted over the part, and the user is left dragging something "
         "the preview does not show")
     ui.assert_clean(f"part over {under}")
+
+
+# ===========================================================================
+# Self-inflicted problems: the app must not create the error it then reports
+# ===========================================================================
+#: An outline with a wide slot cut out of the lower half, where the text
+#: placer's second-choice spot lives.  Holes are the case a part-avoiding
+#: placer misses, because a hole is not a part.
+_SLOTTED = [[(0.16, 0.16), (20.16, 0.16), (20.16, 20.16), (0.16, 20.16)],
+            [(4.0, 14.0), (16.0, 14.0), (16.0, 17.0), (4.0, 17.0)]]
+
+
+@pytest.mark.browser
+def test_a_newly_added_text_never_lands_on_a_hole_in_the_board(ui):
+    """"+ Add text" picks a spot; that spot has to be one the user can keep.
+
+    The placer already avoided parts.  It judged the spot with a four-letter
+    stand-in, though, so on a board with a hole it could pick a place where
+    the stand-in fits and a real word does not: the user typed one word and
+    was told their text hangs over the board, having never chosen the
+    position, with the download blocked until they moved it themselves.
+    """
+    # A front unit over the top of the board, so the placer's first choice is
+    # taken and it has to consider the spots further down -- one of which is
+    # the slot.
+    _set_design(ui, [_js_led(x=10.16, y=5.0, side="front")], rings=_SLOTTED)
+    ui.wait_state("state.leds.length === 1")
+
+    ui.show_panel("text")
+    ui.page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    ui.page.locator("#textlist .item input.tx").first.fill("DOGFOOD")
+    ui.page.wait_for_timeout(300)
+
+    where = ui.js("() => [state.texts[0].x, state.texts[0].y]")
+    assert ui.js("() => textOnSolidBoard(state.texts[0])"), (
+        f"the app parked its own new text at {where}, which is not on solid "
+        "board; the user is blamed for a position they never chose")
+    assert not ui.blocking(), (
+        f"adding text and typing one word left the design unbuildable: "
+        f"{ui.blocking()}")
+    ui.assert_clean("new text placement")
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("width", [1600, 1280, 960, 700])
+def test_every_fabrication_choice_shows_its_longest_option(ui, width):
+    """A dropdown the user cannot read is a control they cannot use.
+
+    Mask colour, finish and via tenting share one row in a rail that narrows
+    with the window.  Three columns cannot hold all three longest options at
+    the narrow end, so the row wraps; whichever way it lays out, the widest
+    option of every select must still fit inside its box.
+    """
+    ui.set_viewport(width, 900)
+    ui.show_panel("shape")
+    clipped = ui.js(
+        """() => {
+            const bad = [];
+            for (const id of ['mask', 'finish', 'tenting']) {
+                const el = document.getElementById(id);
+                if (!el || !el.offsetParent) continue;
+                const cs = getComputedStyle(el);
+                const c = document.createElement('canvas').getContext('2d');
+                c.font = cs.fontSize + ' ' + cs.fontFamily;
+                let widest = 0, worst = '';
+                for (const o of el.options) {
+                    const w = c.measureText(o.text).width;
+                    if (w > widest) { widest = w; worst = o.text; }
+                }
+                const room = el.clientWidth - parseFloat(cs.paddingLeft)
+                                            - parseFloat(cs.paddingRight);
+                // 12 px is a conservative allowance for the native arrow.
+                if (widest > room - 12) {
+                    bad.push({id, worst, needs: Math.round(widest + 12),
+                              has: Math.round(room)});
+                }
+            }
+            return bad;
+        }""")
+    assert not clipped, (
+        f"at {width}px these fabrication dropdowns clip their longest "
+        f"option: {clipped}")
+    ui.assert_clean(f"fab row at {width}px")

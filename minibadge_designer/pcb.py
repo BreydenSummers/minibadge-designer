@@ -3909,12 +3909,22 @@ def generate_bom(spec: BadgeSpec) -> str:
 def generate_readme(spec: BadgeSpec, slug: str | None = None) -> str:
     led_desc = ", ".join(f"D{i + 1} ({led.color})" for i, led in enumerate(spec.leds)) or "none"
     slug = slug or spec.name
+    holes = 0
     if spec.outline:
         b = outline_polygon(spec).bounds
+        # Rings after the first are interior contours: real routed holes. The
+        # fab quotes and tools for those, so the count belongs up front rather
+        # than only in the geometry.
+        holes = max(0, len(spec.outline) - 1)
         board_desc = (
             f"custom outline, {b[2] - b[0]:.1f} x {b[3] - b[1]:.1f} mm bounding box "
             "(minibadge v2 connector)"
         )
+        if holes:
+            board_desc += (
+                f", with {holes} routed cutout{'s' if holes != 1 else ''} "
+                "through the board"
+            )
     else:
         board_desc = "20 x 20 mm, minibadge v2 standard"
     finish_desc = (
@@ -4010,6 +4020,12 @@ over the copper plane (gold/ENIG finish shows). "Glow window" art strips
 the copper from both layers but keeps the mask: light from a nearby
 back-side LED diffuses through the laminate and glows in the mask color.
 "Bare board" also opens the mask on both sides (raw laminate, brightest).
+"Cut through board" is not ink at all: those regions are removed from the
+board outline, so they arrive as closed contours on Edge.Cuts and the fab
+routs them clean through the laminate. They need no special handling, but
+they are a routing operation rather than artwork -- check the Edge.Cuts
+layer matches what you expect before ordering. Connector pads always keep
+a tab of board, so a cut can never sever the badge from its mount.
 The shipped zone fills route thin fracture slits from copper cutouts to
 the board edge (a file-format requirement); refilling zones in KiCad (B)
 replaces them with proper holes, so always refill before plotting. Glow
