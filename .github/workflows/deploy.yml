@@ -30,6 +30,9 @@ jobs:
       # Deploy from the /opt clone rather than the runner's workspace: that is
       # where the server's own .env lives, and compose reads .env from the
       # directory of the compose file.
+      # Nothing is checked out into the runner workspace: this job only drives
+      # the /opt clone (see below), so a workspace checkout would be an unused
+      # copy of the tree plus a token in its .git/config on a shared box.
       - name: Move the deploy checkout to this commit
         run: |
           cd "$DEPLOY_DIR"

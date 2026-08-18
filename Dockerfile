@@ -63,9 +63,17 @@ COPY --from=models /models /usr/share/kicad/3dmodels
 
 # Debian marks the system interpreter externally managed; this image exists
 # to run one app, so install into it rather than carrying a venv.
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir --break-system-packages -r /tmp/requirements.txt \
- && rm /tmp/requirements.txt
+#
+# The LOCK file, with --require-hashes: the version floors in requirements.txt
+# say what the app needs, and this says what production actually runs. Without
+# it the dependency set was whatever PyPI happened to serve during an
+# unattended `docker compose up --build` on push to main. --require-hashes also
+# forbids unpinned entries outright, so the lock cannot quietly drift back into
+# a resolve.
+COPY requirements.lock /tmp/requirements.lock
+RUN pip install --no-cache-dir --break-system-packages --require-hashes \
+      -r /tmp/requirements.lock \
+ && rm /tmp/requirements.lock
 
 # kicad-cli wants a writable HOME for its config; a login user provides one.
 RUN useradd --create-home --shell /usr/sbin/nologin badge
