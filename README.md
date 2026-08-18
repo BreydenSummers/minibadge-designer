@@ -87,8 +87,11 @@ docker compose down             # stop and remove
 ```
 
 Rebuild after changing the code with `docker compose up --build`; only the
-layers you touched are redone. To serve on another port, change the left-hand
-side of the `ports` mapping in `docker-compose.yml` (`"9000:8000"`).
+layers you touched are redone. The port is published on **loopback only**
+(`127.0.0.1:8000:8000`), so the app is reachable from this machine and not
+from the network. To serve on another port, change the middle field of that
+`ports` mapping (`"127.0.0.1:9000:8000"`); to deliberately serve other people
+on the LAN, drop the `127.0.0.1:` prefix.
 
 ### What the build does
 
@@ -120,6 +123,9 @@ its own temp directory with its own kicad-cli. Tune per host via `.env`:
   timeout doubles as the backstop that recycles a worker stuck on a
   pathological upload)
 - `PORT`: bind port inside the container (default 8000)
+- `HOST`: bind address inside the container (default `0.0.0.0`, which is
+  the container's own namespace — what the outside world can reach is set
+  by the `ports` mapping above, not by this)
 
 ## Running it with local Python (development)
 
