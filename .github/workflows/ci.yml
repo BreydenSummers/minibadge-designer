@@ -1,0 +1,56 @@
+# CI for the working branch. Runs on the self-hosted `badge` runner, which is
+# also the deploy host, so the image this builds warms the layer cache that
+# deploy.yml later reuses.
+name: CI
+
+on:
+  push:
+    branches: [dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+# There is one runner, so everything queues regardless; cancelling superseded
+# dev pushes keeps that queue short. Deploys use a different group and are
+# never cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 45
+    env:
+      IMAGE: minibadge-designer:ci-${{ github.sha }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Not just a build: the last stage exports a two-LED board and fails if
+      # the 3D models did not resolve or lost their colours, which is the one
+      # class of breakage that otherwise ships silently (see the Dockerfile).
+      - name: Build the image
+        run: docker build -t "$IMAGE" .
+
+      # Tests run *inside* the image so they get the same kicad-cli and the
+      # same build-time assets (typefaces, model-viewer) the container serves
+      # with. --strict-tools turns "kicad is missing" into a failure instead of
+      # a green run full of skips. The browser tier is excluded: no Chromium in
+      # this image, and installing one per run costs more than it is worth.
+      - name: Test suite
+        run: |
+          docker run --rm --user root --workdir /app \
+            -e HOME=/root -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
+            "$IMAGE" bash -c '
+              pip install --quiet --no-cache-dir --break-system-packages -e ".[dev]" &&
+              pytest --strict-tools -m "not visual and not browser" -q'
+
+      - name: Clean up the CI tag
+        if: always()
+        run: |
+          docker image rm -f "$IMAGE" >/dev/null 2>&1 || true
+          docker image prune -f >/dev/null 2>&1 || true
