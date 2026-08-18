@@ -9,8 +9,11 @@ services:
     env_file:
       - path: .env
         required: false
+    # Loopback only: the published port is reachable from this machine, not
+    # from the network. Drop the "127.0.0.1:" prefix (or set it to a specific
+    # interface) to deliberately serve other people on the LAN.
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
     restart: unless-stopped
     # No curl in the image; the interpreter is already there.
     healthcheck:

@@ -9,7 +9,11 @@ PIL work scales across cores instead of serializing on the GIL.
 
 import os
 
-bind = f"0.0.0.0:{os.environ.get('PORT', '8000')}"
+# 0.0.0.0 here is the *container's* network namespace, not the host: what is
+# actually reachable is decided by the `ports` mapping in docker-compose.yml,
+# which publishes on 127.0.0.1. Running this config directly on a host (no
+# container) is the case that wants HOST=127.0.0.1.
+bind = f"{os.environ.get('HOST', '0.0.0.0')}:{os.environ.get('PORT', '8000')}"
 
 # 4 sync workers ≈ 4 users generating at the same instant; later arrivals
 # queue in the socket backlog rather than failing. Override per host with
