@@ -1545,6 +1545,16 @@ const clkActive = () => state.leds.some(L => L.clk) && pinOn("9");
 // Effective connector-pad net: pin 9 joins the netlist as CLK once used.
 const padNetEff = label =>
   padNetOf(label) || (clkActive() && label === "CLK" ? "CLK" : null);
+// The jumper body as board mm: its selection box and its warning marker are
+// the same rectangle, so they are drawn from one place.
+function jumperQuad(ci) {
+  const [jx, jy, rot] = ci.jumper;
+  return [[-2.4, -1.05], [2.4, -1.05], [2.4, 1.05], [-2.4, 1.05]]
+    .map(([qx, qy]) => {
+      const [rx, ry] = rotOff(qx, qy, rot);
+      return [jx + rx, jy + ry];
+    });
+}
 function clkInfo() {
   if (!clkActive()) return null;
   const p9q = PADS.find(p => p[4] === "9");
@@ -1707,6 +1717,80 @@ function unitViaQuads(L, stub) {
     }
   }
   return out;
+}
+// The room a unit's own copper actually claims: its four pads, the anode
+// trace, the power via with its stub, and a through-hole unit's drilled
+// hole -- each carrying the same 0.5 mm margin per side that geomOf()'s
+// envelope is drawn around, so for a stock unit the union of these IS that
+// envelope. The routed power run is deliberately left out: it ENDS on a
+// connector pad by design, and the router already holds it clear of
+// everything else. Mirrors pcb.unit_part_quads.
+function unitPartQuads(L) {
+  const g = geomOf(L), p = PKG[g.pkg], rp = resPkgOf(g.pkg);
+  const quad = (cx, cy, w, h, extra) =>
+    [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]
+      .map(([qx, qy]) => {
+        const [ox, oy] = extra ? rotOff(qx, qy, extra) : [qx, qy];
+        return unitPoint(L, cx + ox, cy + oy);
+      });
+  const lrot = g.ledRot || 0, rrot = g.resRot || 0;
+  const pw = p.drill ? Math.max(p.pw, p.body[0]) : p.pw;
+  const ph = p.drill ? Math.max(p.ph, p.body[1]) : p.ph;
+  // Named because the UI says which part is in the way; pcb.unit_part_quads
+  // is the same geometry in the same order, unlabelled (the server has no
+  // message to write).
+  const out = [
+    { n: "led", q: quad(g.ledK[0], g.ledK[1], pw + 1.0, ph + 1.0, lrot) },
+    { n: "led", q: quad(g.ledA[0], g.ledA[1], pw + 1.0, ph + 1.0, lrot) },
+    { n: "res", q: quad(g.resIn[0], g.resIn[1], rp.pw + 1.0, rp.ph + 1.0, rrot) },
+    { n: "res", q: quad(g.resOut[0], g.resOut[1], rp.pw + 1.0, rp.ph + 1.0, rrot) },
+  ];
+  const apts = unitTracePts(L, "a").pts;
+  for (let i = 0; i + 1 < apts.length; i++) {
+    out.push({ n: "trace", q: quadSegPts(apts[i], apts[i + 1], 1.1) });
+  }
+  const front = L.side !== "back";
+  // Only the via-less switch is consulted, not CLK: a back CLK unit's via is
+  // gone, but claiming the square it would have sat in costs nothing and
+  // keeps this identical to pcb.unit_part_quads, which has no CLK info to
+  // consult from the placement tests.
+  if (!L.novia) {
+    const vo = front ? g.viaF : g.viaB;
+    out.push({ n: "via", q: quad(vo[0], vo[1], 1.7, 1.7, 0) });
+    const vpts = unitTracePts(L, "v").pts;
+    for (let i = 0; i + 1 < vpts.length; i++) {
+      out.push({ n: "trace", q: quadSegPts(vpts[i], vpts[i + 1], 1.1) });
+    }
+  }
+  if (g.hole) out.push({ n: "hole", q: quad(0, 0, g.hole + 1.0, g.hole + 1.0, 0) });
+  return out;
+}
+// What the pieces are called in a message, with whether the name is plural.
+// A stock unit answers as one thing, so its warnings read exactly as they
+// always did.
+const PART_NAMES = { led: ["LED pads", true], res: ["resistor", false],
+                     via: ["power via", false], hole: ["mounting hole", false],
+                     trace: ["traces", true] };
+function partsPhrase(parts) {
+  // Every trace leaves a pad, so a part in the wrong place drags its traces
+  // in with it; naming both turns "its resistor" into a list nobody reads.
+  const solid = parts.filter(p => p.n !== "trace");
+  const named = (solid.length ? solid : parts)
+    .map(p => PART_NAMES[p.n]).filter(Boolean);
+  const names = [...new Set(named.map(n => n[0]))];
+  if (!names.length) return { what: "this unit", many: false };
+  const many = names.length > 1 || named.some(n => n[1]);
+  const last = names.pop();
+  return { what: "its " + (names.length ? names.join(", ") + " and " + last : last),
+           many };
+}
+// What placement tests may claim the unit occupies. A stock unit answers
+// with its rotated envelope, exactly as it always has, so no existing board
+// moves. Parts placed by hand can sit in opposite corners, and then most of
+// that envelope is empty board: asking the parts themselves is the only way
+// a free-placed unit is not refused for room it does not use.
+function unitFootprint(L) {
+  return L.adv ? unitPartQuads(L) : [{ n: "unit", q: unitPoly(L) }];
 }
 function expandedCornersOf(L, margin) {
   const bb = geomOf(L).bbox, out = [];
@@ -2035,16 +2119,16 @@ function routeRun(start, targets, net, bends, hazards, waypoints, termFlag) {
   if (bends.length) {
     const pad = targets[0];
     const raw = [start, ...bends.map(n => [+n[0], +n[1]]), pad];
-    let bad = false;
+    let bad = null; // the leg that failed, so a warning can point at it
     for (let i = 0; i + 1 < raw.length; i++) {
-      if (!clear(raw[i], raw[i + 1])) { bad = true; break; }
+      if (!clear(raw[i], raw[i + 1])) { bad = [raw[i], raw[i + 1]]; break; }
     }
     // The bends stay exactly where they were put; only the corners between
     // them are softened into 45s.
     const m = mitre45(raw, clear, raw.map((_p, i) => i));
     const out = { pts: m.pts, owners: m.owners, net, pad, manual: true };
     if (termFlag) out.term = true;
-    if (bad) out.tight = true;
+    if (bad) { out.tight = true; out.badSeg = bad; }
     return out;
   }
   const step = 1.5;
@@ -2088,7 +2172,10 @@ function routeRun(start, targets, net, bends, hazards, waypoints, termFlag) {
       return out;
     }
   }
-  const out = { pts: [start, targets[0]], net, pad: targets[0], tight: true };
+  // Nothing got through: the straight line to the pad is the run that has no
+  // room, so hand it over as the spot to mark.
+  const out = { pts: [start, targets[0]], net, pad: targets[0], tight: true,
+                badSeg: [start, targets[0]] };
   if (termFlag) out.term = true;
   return out;
 }
@@ -2418,8 +2505,10 @@ function clampAdvParts(L) {
     L.x = nx; L.y = ny;
   }
 }
+// Null when the hand-placed copper is legal; otherwise the point midway
+// between the two pieces that crowd each other, for the warning marker.
 function advConflict(L) {
-  if (!L.adv) return false;
+  if (!L.adv) return null;
   const g = geomOf(L), p = PKG[g.pkg], rp = resPkgOf(g.pkg);
   const front = L.side !== "back";
   const rrot = g.resRot || 0, lrot = g.ledRot || 0;
@@ -2463,10 +2552,15 @@ function advConflict(L) {
       const A = items[i], B = items[j];
       if (A.net === B.net) continue;
       if ((A.touches || []).includes(B.n) || (B.touches || []).includes(A.n)) continue;
-      if (!polysClear(A.q, B.q, 0.2)) return true;
+      if (!polysClear(A.q, B.q, 0.2)) {
+        const mid = q => [q.reduce((s, v) => s + v[0], 0) / q.length,
+                          q.reduce((s, v) => s + v[1], 0) / q.length];
+        const [ax, ay] = mid(A.q), [bx, by] = mid(B.q);
+        return [(ax + bx) / 2, (ay + by) / 2];
+      }
     }
   }
-  return false;
+  return null;
 }
 function unitCopperPieces(L, face) {
   const g = geomOf(L), p = PKG[g.pkg], rp = resPkgOf(g.pkg);
@@ -2748,10 +2842,10 @@ function segSegDist(ax, ay, bx, by, cx, cy, dx, dy) {
   return Math.min(ptSeg(ax, ay, cx, cy, dx, dy), ptSeg(bx, by, cx, cy, dx, dy),
                   ptSeg(cx, cy, ax, ay, bx, by), ptSeg(dx, dy, ax, ay, bx, by));
 }
-function pointInQuad(q, x, y) { // convex quad, consistent winding
+function pointInQuad(q, x, y) { // convex polygon, consistent winding
   let sign = 0;
-  for (let i = 0; i < 4; i++) {
-    const [x1, y1] = q[i], [x2, y2] = q[(i + 1) % 4];
+  for (let i = 0; i < q.length; i++) {
+    const [x1, y1] = q[i], [x2, y2] = q[(i + 1) % q.length];
     const c = (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1);
     if (c === 0) continue;
     if (!sign) sign = c > 0 ? 1 : -1;
@@ -2759,28 +2853,25 @@ function pointInQuad(q, x, y) { // convex quad, consistent winding
   }
   return true;
 }
-function unitInsideBoard(L) {
-  const s = state.shape;
-  if (!boardCarved() || !s.rings) return true; // server backstops
-  // EXACT mirror of the server's test: the unit's rotated rect must sit
-  // inside outline.buffer(-0.55). Equivalent formulation without polygon
-  // offsetting: corners inside the outline (and outside its holes), no
-  // outline vertex or edge inside/crossing the rect, and every rect edge
-  // at least 0.55 mm from every outline segment. Point sampling is gone:
-  // it accepted spots the generator then refused.
-  // 0.555 (5 µm stricter than the server's 0.55) absorbs shapely's
-  // chord-approximated erosion arcs at concave corners: the client may
-  // reject a spot the server would take, never the other way around.
+// EXACT mirror of the server's test for one convex piece: it must sit
+// inside outline.buffer(-0.55). Equivalent formulation without polygon
+// offsetting: corners inside the outline (and outside its holes), no
+// outline vertex or edge inside/crossing the piece, and every edge of it
+// at least 0.55 mm from every outline segment. Point sampling is gone:
+// it accepted spots the generator then refused.
+// 0.555 (5 µm stricter than the server's 0.55) absorbs shapely's
+// chord-approximated erosion arcs at concave corners: the client may
+// reject a spot the server would take, never the other way around.
+function pieceOnSolidBoard(poly, rings) {
   const CLR = 0.555;
-  const poly = unitPoly(L);
   for (const [x, y] of poly) {
-    if (!pipRings(s.rings, x, y)) return false;
+    if (!pipRings(rings, x, y)) return false;
   }
   const bx0 = Math.min(...poly.map(q => q[0])) - CLR;
   const bx1 = Math.max(...poly.map(q => q[0])) + CLR;
   const by0 = Math.min(...poly.map(q => q[1])) - CLR;
   const by1 = Math.max(...poly.map(q => q[1])) + CLR;
-  for (const ring of s.rings) {
+  for (const ring of rings) {
     const n = ring.length;
     for (let i = 0, j = n - 1; i < n; j = i++) {
       const [x1, y1] = ring[j], [x2, y2] = ring[i];
@@ -2788,24 +2879,43 @@ function unitInsideBoard(L) {
       if ((x1 < bx0 && x2 < bx0) || (x1 > bx1 && x2 > bx1)
           || (y1 < by0 && y2 < by0) || (y1 > by1 && y2 > by1)) continue;
       if (pointInQuad(poly, x1, y1)) return false; // boundary pokes inside
-      for (let k = 0; k < 4; k++) {
-        const [ax, ay] = poly[k], [bx, by] = poly[(k + 1) % 4];
+      for (let k = 0; k < poly.length; k++) {
+        const [ax, ay] = poly[k], [bx, by] = poly[(k + 1) % poly.length];
         if (segSegDist(ax, ay, bx, by, x1, y1, x2, y2) < CLR) return false;
       }
     }
   }
   return true;
 }
+function unitInsideBoard(L) {
+  const s = state.shape;
+  if (!boardCarved() || !s.rings) return true; // server backstops
+  return unitFootprint(L).every(p => pieceOnSolidBoard(p.q, s.rings));
+}
+// The pieces that are NOT on solid board. Placement scans call the boolean
+// above thousands of times and want its early exit; only the once-a-frame
+// warning pass pays for the full list, which is what the marker outlines.
+function strandedParts(L) {
+  const s = state.shape;
+  if (!boardCarved() || !s.rings) return [];
+  return unitFootprint(L).filter(p => !pieceOnSolidBoard(p.q, s.rings));
+}
 // A unit may not overlap a kept row's connector pad pairs (through-hole
 // copper on both layers), but the strip between the pairs is fair game.
 function padConflict(L) {
-  const poly = unitPoly(L);
-  for (const key of activePairs()) {
-    {
-      if (!polysClear(poly, rectPoly(PAD_PAIRS[key].keepout), 0)) return true;
+  for (const p of unitFootprint(L)) {
+    for (const key of activePairs()) {
+      if (!polysClear(p.q, rectPoly(PAD_PAIRS[key].keepout), 0)) return true;
     }
   }
   return false;
+}
+// Which pieces are on a pair (same rule, no early exit): the warning marks
+// exactly those, so a unit whose parts are spread across the board points at
+// the pad that is in the way and not at the empty box around all of them.
+function padConflictParts(L) {
+  return unitFootprint(L).filter(p => activePairs().some(
+    key => !polysClear(p.q, rectPoly(PAD_PAIRS[key].keepout), 0)));
 }
 // ---- CLK jumper placement (mirrors the server's backstop test) ----
 // The jumper's copper and labels must sit on solid board, clear of every
@@ -3940,15 +4050,6 @@ function drawJumper(c, mirror) {
     c.moveTo(px2, py2 - r2 * 0.45); c.lineTo(px2, py2 + r2 * 0.45);
     c.strokeStyle = "#6fb2ff"; c.stroke();
   }
-  if (jumperConflict()) {
-    // Dropped somewhere it cannot live (over a unit, a pad pair, off the
-    // board): same red halo as a stranded unit; the server would move it.
-    c.setLineDash([3, 3]);
-    c.strokeStyle = "#ff5147"; c.lineWidth = 2;
-    c.strokeRect(mm2px(jx - 3.7), mm2px(jy - (ci.via ? 2.0 : 1.05)),
-                 7.4 * SCALE, ((ci.via ? 2.0 : 1.05) + 1.05) * SCALE);
-    c.setLineDash([]);
-  }
 }
 function drawGhostUnit(c, led) {
   if (!(clkActive() && led.clk && led.side === "back")) {
@@ -3991,6 +4092,104 @@ function drawGhostUnit(c, led) {
   c.setLineDash([]);
 }
 
+// ---- problem markers ----
+// A message in the dock says what is wrong; these say WHERE. Every standing
+// warning that has a place on the board draws a dashed outline (or the exact
+// trace leg that has no room) plus a "!" badge, red for a problem that blocks
+// the download and amber for an advisory one. Hovering the message lights its
+// marker up and names it, which is what makes four warnings and twenty parts
+// map onto each other.
+let designWarnings = []; // rebuilt by draw(); see collectWarnings()
+let markHL = null;       // Set of warning keys currently lit, or null
+let markHLTimer = null;
+const MARK_HARD = "#ff5147", MARK_SOFT = "#e0a63f";
+function highlightWarnings(keys, ms) {
+  clearTimeout(markHLTimer);
+  const next = keys && keys.length ? new Set(keys) : null;
+  markHLTimer = null;
+  if (ms && next) markHLTimer = setTimeout(() => { markHL = null; repaint(); }, ms);
+  if (markHL === next) return;
+  markHL = next;
+  repaint();
+}
+// Repaint without touching the design: hovering a message must not mark the
+// board dirty or kick off an autosave, which a full draw() would.
+function repaint() {
+  drawView(cvF, "front");
+  drawView(cvB, "back");
+}
+function drawProblemMarks(c, canvas, tx, side) {
+  for (const w of designWarnings) {
+    const m = w.mark;
+    if (!m || (m.side && m.side !== side)) continue;
+    const hot = !!(markHL && markHL.has(w.key));
+    const col = m.hard ? MARK_HARD : MARK_SOFT;
+    let ax = Infinity, ay = Infinity; // top-left of the marker, on screen
+    const pt = ([x, y]) => {
+      const sx = tx(x), sy = mm2px(y);
+      if (sx < ax) ax = sx;
+      if (sy < ay) ay = sy;
+      return [sx, sy];
+    };
+    const trace = pts => {
+      c.beginPath();
+      pts.forEach((q, i) => {
+        const [sx, sy] = pt(q);
+        if (i) c.lineTo(sx, sy); else c.moveTo(sx, sy);
+      });
+    };
+    c.save();
+    c.strokeStyle = col;
+    c.setLineDash([4, 3]);
+    c.lineCap = "butt";
+    for (const poly of m.polys) {
+      c.lineWidth = hot ? 3 : 2;
+      trace(poly); c.closePath(); c.stroke();
+    }
+    for (const seg of m.segs) {
+      // Wider than the 0.3 mm track it covers, or it reads as copper rather
+      // than as a mark on it; slightly see-through so the copper still shows.
+      c.lineWidth = Math.max(hot ? 5 : 4, 0.45 * SCALE);
+      c.globalAlpha = 0.85;
+      trace(seg); c.stroke();
+      c.globalAlpha = 1;
+    }
+    for (const dot of m.dots) {
+      c.lineWidth = hot ? 3 : 2;
+      const [sx, sy] = pt(dot);
+      c.beginPath(); c.arc(sx, sy, 1.2 * SCALE, 0, 7); c.stroke();
+    }
+    c.setLineDash([]);
+    if (ax === Infinity) { c.restore(); continue; } // nothing to hang it on
+    // The badge sits just off the marker's corner, pulled back inside the
+    // canvas when the problem is at the very edge of the board.
+    const r = hot ? 9 : 7.5;
+    const bx = Math.min(Math.max(ax - r / 2, r + 1 - VIEW.tx),
+                        canvas.width - VIEW.tx - r - 1);
+    const by = Math.min(Math.max(ay - r / 2, r + 1 - VIEW.ty),
+                        canvas.height - VIEW.ty - r - 1);
+    c.beginPath(); c.arc(bx, by, r, 0, 7);
+    c.fillStyle = col; c.fill();
+    c.lineWidth = 1; c.strokeStyle = "rgba(0,0,0,.6)"; c.stroke();
+    c.fillStyle = "#12161d";
+    c.textAlign = "center"; c.textBaseline = "middle";
+    c.font = `bold ${Math.round(r * 1.5)}px sans-serif`;
+    c.fillText("!", bx, by + 0.5);
+    if (hot) { // name it while its message is under the cursor
+      c.font = "bold 11px sans-serif";
+      c.textAlign = "left";
+      const tw = c.measureText(w.label).width;
+      const lx = Math.min(bx + r + 3, canvas.width - VIEW.tx - tw - 9);
+      c.fillStyle = "rgba(10,16,24,.92)";
+      c.fillRect(lx, by - 9, tw + 8, 18);
+      c.strokeStyle = col; c.lineWidth = 1;
+      c.strokeRect(lx, by - 9, tw + 8, 18);
+      c.fillStyle = col;
+      c.fillText(w.label, lx + 4, by);
+    }
+    c.restore();
+  }
+}
 function drawView(canvas, side) {
   const c = canvas.getContext("2d");
   const mirror = side === "back";
@@ -4064,18 +4263,6 @@ function drawView(canvas, side) {
     if ((led.side === "back") === mirror) drawUnitGeometry(c, led, farled ? "res" : "all");
     else if (farled) drawUnitGeometry(c, led, "led");
     else drawGhostUnit(c, led);
-    if (!unitInsideBoard(led) || padConflict(led)) {
-      // Stranded: a shape edit or a Reverse/Size change left it with no
-      // solid board (or on the connector pads). Downloads will refuse it.
-      c.setLineDash([3, 3]);
-      c.strokeStyle = "#ff5147"; c.lineWidth = 2;
-      c.beginPath();
-      unitPoly(led).forEach(([x, y], i) =>
-        i ? c.lineTo(mm2px(x), mm2px(y)) : c.moveTo(mm2px(x), mm2px(y)));
-      c.closePath();
-      c.stroke();
-      c.setLineDash([]);
-    }
   }
   // selection outline + corner resize handles
   const si = selectionOnView(side, mirror) ? selectionInfo() : null;
@@ -4176,6 +4363,8 @@ function drawView(canvas, side) {
     if (clearOfPads(pg)) c.fillText("GND", tx(pg[0]), mm2px(pg[1]));
   }
 
+  drawProblemMarks(c, canvas, tx, mirror ? "back" : "front");
+
   c.restore(); // viewport translate
 }
 
@@ -4198,9 +4387,13 @@ function draw() {
   // here with an unchanged signature, so this cannot loop).
   syncArtCutOutline();
   updateView();
+  // One list, two consumers: drawView() marks each problem on the board and
+  // refreshWarnings() puts the words in the dock. Collected first so a
+  // marker is never a frame behind the message it belongs to.
+  designWarnings = collectWarnings();
   drawView(cvF, "front");
   drawView(cvB, "back");
-  refreshWarnings(); // standing problem toasts track the red halos
+  refreshWarnings();
   // Every edit funnels through here, so this is where the 3D view learns it
   // went stale (no-ops unless that tab is open; m3dLoad diffs the design).
   m3dSchedule();
@@ -4335,11 +4528,7 @@ function selectionInfo() {
   if (selected.kind === "jumper" && clkActive() && state.clk.jumper) {
     const ci = clkInfo();
     const [jx, jy, rot] = ci.jumper;
-    const q = [[-2.4, -1.05], [2.4, -1.05], [2.4, 1.05], [-2.4, 1.05]]
-      .map(([qx, qy]) => {
-        const [rx, ry] = rotOff(qx, qy, rot);
-        return [jx + rx, jy + ry];
-      });
+    const q = jumperQuad(ci);
     const xs = q.map(v => v[0]), ys = q.map(v => v[1]);
     const [sx, sy] = rotOff(0, -1.05, rot);
     const [kx, ky] = rotOff(0, -1.05 - 16 / SCALE, rot);
@@ -5550,20 +5739,61 @@ function blockingProblems() {
   }
   return out;
 }
-function refreshWarnings() {
-  const want = []; // [key, label, message, kind, index]
+// ---- where a warning is on the board ----
+// Every standing warning that has a place carries one of these. draw()
+// collects them once per frame and hands the same list to the message dock
+// and to drawView(), so the words and the marker on the board can never
+// disagree. `side` null draws the marker on both views; `hard` marks a
+// problem that blocks the download (red), the rest are advisory (amber).
+function mkMark(side, hard, more) {
+  return { side: side === "back" ? "back" : side === "front" ? "front" : null,
+           hard: !!hard, polys: [], segs: [], dots: [], ...more };
+}
+const markPoly = (poly, side, hard) => poly && poly.length
+  ? mkMark(side, hard, { polys: [poly] }) : null;
+const markPolys = (polys, side, hard) => polys && polys.length
+  ? mkMark(side, hard, { polys }) : null;
+const markRect = (b, side, hard) => b
+  ? mkMark(side, hard, { polys: [[[b[0], b[1]], [b[2], b[1]],
+                                  [b[2], b[3]], [b[0], b[3]]]] }) : null;
+const markSeg = (seg, side, hard) => seg ? mkMark(side, hard, { segs: [seg] }) : null;
+const markDots = (pts, side, hard) => pts && pts.length
+  ? mkMark(side, hard, { dots: pts }) : null;
+// A run that cannot be routed records the leg that failed (routeRun), so the
+// marker lands on the copper that is actually too tight instead of on the
+// part at one end of it.
+const markRoute = (r, side) => markSeg(r && r.badSeg, side, true);
+// The pads a dropped pin would have had: nothing is drawn there any more, so
+// the marker is the only thing that can point at it.
+const padSpots = pred => PADS.filter(pred).map(p => [p[0], p[1]]);
+const artBox = a => {
+  const d = artDims(a);
+  return d && isFinite(d.w) && isFinite(d.h)
+    ? [a.cx - d.w / 2, a.cy - d.h / 2, a.cx + d.w / 2, a.cy + d.h / 2] : null;
+};
+// The list draw() rebuilds each frame: {key, label, msg, kind, i, mark}.
+function collectWarnings() {
+  const want = []; // [key, label, message, kind, index, mark]
   state.leds.forEach((L, i) => {
     // Same red halo, two different causes; say which one it is now that
-    // the message is no longer sitting next to the unit's own card.
-    if (!unitInsideBoard(L)) {
+    // the message is no longer sitting next to the unit's own card. Both
+    // name (and outline) the pieces that are actually in trouble: with the
+    // parts placed by hand the box around them is mostly empty board, and
+    // "this unit" pointed at all of it.
+    const stray = strandedParts(L);
+    const onPads = stray.length ? [] : padConflictParts(L);
+    if (stray.length) {
       want.push([`w:led-fit-${i}`, `LED ${i + 1}`,
-        "no solid board under this unit (outlined red); drag it somewhere "
-        + "with room, or adjust the shape. Downloads will fail until it fits.",
-        "led", i]);
-    } else if (padConflict(L)) {
+        `no solid board under ${partsPhrase(stray).what} (outlined red); drag `
+        + "it somewhere with room, or adjust the shape. Downloads will fail "
+        + "until it fits.",
+        "led", i, markPolys(stray.map(p => p.q), null, true)]);
+    } else if (onPads.length) {
+      const on = partsPhrase(onPads);
       want.push([`w:led-fit-${i}`, `LED ${i + 1}`,
-        "this unit sits on a connector pad pair (outlined red); drag it clear. "
-        + "Downloads will fail until it does.", "led", i]);
+        `${on.what} ${on.many ? "sit" : "sits"} on a connector pad pair `
+        + "(outlined red); drag it clear. Downloads will fail until it does.",
+        "led", i, markPolys(onPads.map(p => p.q), null, true)]);
     }
     const backClk = clkActive() && L.clk && L.side === "back";
     if (L.novia && !backClk) {
@@ -5578,7 +5808,7 @@ function refreshWarnings() {
             + "pad. Downloads are blocked until it routes."
           : "can't reach its power without a via from here; move it, switch the "
             + "power via back on, or turn on the other connector row. Downloads are "
-            + "blocked until it can.", "led", i]);
+            + "blocked until it can.", "led", i, markRoute(r, null)]);
       }
     }
     if (clkActive() && L.clk) {
@@ -5591,25 +5821,29 @@ function refreshWarnings() {
             + (state.clk.jumper ? "the jumper; move the LED or the jumper"
                                 : "pin 9; move the LED")
             + ", or turn its blink option off. Downloads are blocked until "
-            + "it routes.", "led", i]);
+            + "it routes.", "led", i, markRoute(cr, null)]);
       }
     }
-    if (L.adv && advConflict(L)) {
+    const crowd = L.adv ? advConflict(L) : null;
+    if (crowd) {
       want.push([`w:led-adv-${i}`, `LED ${i + 1}`,
         "this placement puts copper on different nets too close together (or "
         + "over the hole); KiCad's DRC will fail. Pull the resistor, via, or "
-        + "traces apart.", "led", i]);
+        + "traces apart.", "led", i, markDots([crowd], null, false)]);
     }
   });
   state.texts.forEach((t, i) => {
     const msgs = textWarnings(t);
-    if (msgs.length) want.push([`w:text-${i}`, `Text ${i + 1}`, msgs.join(" "), "text", i]);
+    if (msgs.length) {
+      want.push([`w:text-${i}`, `Text ${i + 1}`, msgs.join(" "), "text", i,
+                 markRect(textBBox(t), t.side, !textOnSolidBoard(t))]);
+    }
   });
   state.art.forEach((a, i) => {
     if (a.empty) {
       want.push([`w:art-${i}`, `Layer ${i + 1}`,
         "nothing visible at these settings; try Invert or a different threshold.",
-        "art", i]);
+        "art", i, markRect(artBox(a), inkSide(a), false)]);
     }
   });
   // Outline parts that draw nothing, and the outline as a whole coming out
@@ -5622,15 +5856,17 @@ function refreshWarnings() {
     want.push(["w:pins", "Connector", `no ${rails.join(" or ")} pin left, so the `
       + `LED${state.leds.length > 1 ? "s have" : " has"} nothing to run on; `
       + "put one back, or remove the LEDs. Downloads are blocked until then.",
-      "pins", -1]);
+      "pins", -1, markDots(padSpots(p => rails.includes(p[2])), null, true)]);
   }
   if (state.leds.some(L => L.clk) && !pinOn("9")) {
     want.push(["w:clkpin", "Connector",
       "an LED is set to blink with CLK, but pin 9 (CLK) is dropped; put it "
       + "back or turn the blink option off. Downloads are blocked until then.",
-      "pins", -1]);
+      "pins", -1, markDots(padSpots(p => p[4] === "9"), null, true)]);
   }
   {
+    const ci = clkActive() && state.clk.jumper ? clkInfo() : null;
+    const jside = ci && ci.side === "back" ? "back" : "front";
     const lk = clkLink();
     if (lk && lk.tight) {
       want.push(["w:clklink", "CLK jumper", lk.manual
@@ -5639,7 +5875,7 @@ function refreshWarnings() {
           + "until it is."
         : "the jumper's CLK pad has no clear path to pin 9; drag the jumper "
           + "(or the LEDs in the way) clear. Downloads are blocked until it "
-          + "routes.", "jumper", -1]);
+          + "routes.", "jumper", -1, markRoute(lk, jside)]);
     }
     const v3l = clkV3Link();
     if (v3l && v3l.tight) {
@@ -5653,12 +5889,14 @@ function refreshWarnings() {
           + "blocked until it routes."
         : "the jumper's 3V3 pad has no clear path to a 3V3 pin; drag the "
           + "jumper clear, or switch it back to feeding 3V3 through a via. "
-          + "Downloads are blocked until it routes.", "jumper", -1]);
+          + "Downloads are blocked until it routes.", "jumper", -1,
+        markRoute(v3l, jside)]);
     }
     if (jumperConflict()) {
       want.push(["w:clkjump", "CLK jumper",
         "the jumper sits on a unit, a pad pair, or off the board (outlined "
-        + "red); drag it somewhere clear.", "jumper", -1]);
+        + "red); drag it somewhere clear.", "jumper", -1,
+        markPoly(ci && ci.jumper ? jumperQuad(ci) : null, jside, false)]);
     }
   }
   if (boardCarved()) {
@@ -5666,14 +5904,15 @@ function refreshWarnings() {
       if (el.kind === "image" && el.empty) {
         want.push([`w:el-${i}`, `Outline part ${i + 1}`,
           "no dark pixels at this threshold, so it adds nothing to the shape; "
-          + "try Invert or a different threshold.", "shapeel", i]);
+          + "try Invert or a different threshold.", "shapeel", i,
+          markRect(elBounds(el), null, false)]);
       }
     });
     if (state.shape.outlineEmpty) {
       want.push(["w:outline", "Board outline",
         "this custom outline is empty, so there is no board to make. Add a shape "
         + "or fix the parts above; downloads are blocked until it has one.",
-        "shapeel", -1]);
+        "shapeel", -1, null]); // nothing on the board to point at: there is no board
     }
   }
   if (artHasCut() && state.shape.cutIgnored) {
@@ -5682,18 +5921,24 @@ function refreshWarnings() {
     want.push(["w:artcut", "Cut artwork",
       "this cut-through layer isn't removing any board: it sits off the board, "
       + "or only where a connector pad keeps its tab of material. Move or "
-      + "enlarge it.", "art", i < 0 ? -1 : i]);
+      + "enlarge it.", "art", i < 0 ? -1 : i,
+      i < 0 ? null : markRect(artBox(state.art[i]), null, false)]);
   }
+  return want.map(([key, label, msg, kind, i, mark]) =>
+    ({ key, label, msg, kind, i, mark: mark || null }));
+}
+function refreshWarnings() {
   // Identical problems collapse into one toast ("LED 1, LED 2: no solid
   // board..."): four copies of the same warning bury the very board the
   // stack sits over without saying anything the first copy didn't.
   const groups = [];
   const byMsg = new Map();
-  for (const [key, label, msg, kind, i] of want) {
-    const g = byMsg.get(kind + "|" + msg);
-    if (g) { g.labels.push(label); continue; }
-    const ng = { key, labels: [label], msg, kind, i };
-    byMsg.set(kind + "|" + msg, ng);
+  for (const w of designWarnings) {
+    const g = byMsg.get(w.kind + "|" + w.msg);
+    if (g) { g.labels.push(w.label); g.keys.push(w.key); continue; }
+    const ng = { key: w.key, keys: [w.key], labels: [w.label], msg: w.msg,
+                 kind: w.kind, i: w.i };
+    byMsg.set(w.kind + "|" + w.msg, ng);
     groups.push(ng);
   }
   const shown = groups.slice(0, MAX_WARN_TOASTS);
@@ -5704,8 +5949,16 @@ function refreshWarnings() {
     if (key.startsWith("w:") && !keep.has(key)) dropToast(key);
   }
   for (const g of shown) {
-    putToast(g.key, `${g.labels.join(", ")}: ${g.msg}`, "warn",
-             () => revealItem(g.kind, g.i));
+    // Hovering the message lights up its marker on the board and names it;
+    // clicking still takes you to the part, and leaves the marker lit long
+    // enough to find it after the panel switch.
+    const el = putToast(g.key, `${g.labels.join(", ")}: ${g.msg}`, "warn",
+                        () => { revealItem(g.kind, g.i); highlightWarnings(g.keys, 5000); });
+    el.onmouseenter = () => highlightWarnings(g.keys);
+    // A click leaves the marker lit for a few seconds; moving off the message
+    // on the way to the board must not put it straight back out.
+    el.onmouseleave = () => { if (!markHLTimer) highlightWarnings(null); };
+    el.title = "Click to jump to it";
   }
   if (extra > 0) {
     putToast("w:more", `+${extra} more warning`

@@ -667,6 +667,77 @@ def unit_poly(led: Led, safe: tuple[float, float, float, float] | None = None):
     return Polygon([(x + px, y + py) for px, py in pts])
 
 
+def unit_part_quads(led: Led, safe=None) -> list[list[tuple[float, float]]]:
+    """The room a unit's own copper actually claims, as convex quads.
+
+    Its four pads, the anode trace, the power via with its stub, and a
+    through-hole unit's drilled hole -- each carrying the same 0.5 mm margin
+    per side that ``led_geometry``'s bbox is drawn around, so for a stock
+    unit the union of these IS ``unit_poly``. The routed power run is left
+    out on purpose: it ENDS on a connector pad by design, and the router
+    already holds it clear of everything else.
+
+    Mirrored by ``unitPartQuads`` in index.html; the two are held in parity
+    by tests/test_browser.py.
+    """
+    g = led_geometry(led)
+    p = PKG[g["pkg"]]
+    rp = PKG[res_pkg(g["pkg"])]
+    x, y = clamp_led_obj(led, safe)
+    lrot = g.get("led_rot", 0.0)
+    rrot = g.get("res_rot", 0.0)
+
+    def quad(cx, cy, w, h, extra=0.0):
+        out = []
+        for qx, qy in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)):
+            ox, oy = _r(qx, qy, extra) if extra else (qx, qy)
+            rx, ry = _r(cx + ox, cy + oy, led.rot)
+            out.append((x + rx, y + ry))
+        return out
+
+    pw = max(p["pw"], p["body"][0]) if "drill" in p else p["pw"]
+    ph = max(p["ph"], p["body"][1]) if "drill" in p else p["ph"]
+    quads = [
+        quad(*g["led_k"], pw + 1.0, ph + 1.0, lrot),
+        quad(*g["led_a"], pw + 1.0, ph + 1.0, lrot),
+        quad(*g["res_in"], rp["pw"] + 1.0, rp["ph"] + 1.0, rrot),
+        quad(*g["res_out"], rp["pw"] + 1.0, rp["ph"] + 1.0, rrot),
+    ]
+    apts = unit_trace_pts(led, "a", safe)
+    quads += [_quad_seg(a, b, 1.1) for a, b in zip(apts, apts[1:])]
+    # Only the via-less switch is consulted, not CLK: a back CLK unit's via
+    # is gone, but claiming the square it would have sat in costs nothing and
+    # keeps this callable from the placement tests, which have no CLK info.
+    if not led.novia:
+        vo = g["via_front"] if led.side != "back" else g["via_back"]
+        quads.append(quad(*vo, 1.7, 1.7))
+        vpts = unit_trace_pts(led, "v", safe)
+        quads += [_quad_seg(a, b, 1.1) for a, b in zip(vpts, vpts[1:])]
+    if g["hole"]:
+        quads.append(quad(0.0, 0.0, g["hole"] + 1.0, g["hole"] + 1.0))
+    return quads
+
+
+def unit_footprint(led: Led, safe=None):
+    """What the placement tests may claim the unit occupies (shapely).
+
+    A stock unit answers with its rotated envelope, exactly as it always
+    has, so no existing board moves.  Parts placed by hand can sit in
+    opposite corners, and then most of that envelope is empty board: asking
+    the parts themselves is the only way a free-placed unit is not refused
+    room it does not use.
+    """
+    if not led.adv:
+        return unit_poly(led, safe)
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    # unary_union, not MultiPolygon: the pieces overlap by design (a pad and
+    # the trace leaving it), and an overlapping MultiPolygon is invalid
+    # geometry -- GEOS predicates on one are not answerable.
+    return unary_union([Polygon(q) for q in unit_part_quads(led, safe)])
+
+
 ROWS_ALL = ("top", "bottom")   # legacy alias; pin lists are the truth now
 
 
@@ -2231,13 +2302,13 @@ def pad_conflict(
     led: Led, pins=ALL_PINS,
     safe: tuple[float, float, float, float] | None = None,
 ) -> bool:
-    """True if the unit's rotated footprint overlaps a kept pad pair.
+    """True if the unit's footprint overlaps a kept pad pair.
 
     Dropping every pin of a corner frees that corner for artwork or a unit.
     """
     from shapely.geometry import box as sbox
 
-    poly = unit_poly(led, safe)
+    poly = unit_footprint(led, safe)
     return any(poly.intersects(sbox(*PAD_PAIRS[k]["keepout"]))
                for k in active_pairs(pins))
 
