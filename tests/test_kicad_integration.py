@@ -146,6 +146,17 @@ SPECS = {
             pcb.Text(13.0, 8.0, "back", size=1.0, side="back"),
         ],
     ),
+    # Parts placed by hand, tucked as close to the header as the placement
+    # rule allows: its resistor and via are 12 mm from the LED, so the box
+    # around the unit covers a pad pair while its copper stops 0.02 mm short
+    # (pcb.unit_footprint). That is the placement the rule now permits and
+    # nothing else in this corpus builds, so DRC is the oracle that says the
+    # permission is safe rather than merely intended.
+    "free-placed": pcb.BadgeSpec(
+        name="drc-free",
+        leds=[pcb.Led(8.3, 4.1, "red",
+                      adv={"rx": 5.0, "ry": 12.0, "vx": 2.0, "vy": 10.0})],
+    ),
 }
 
 

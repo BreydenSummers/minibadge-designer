@@ -32,6 +32,7 @@ carries an explicit, short timeout (see the `*_TIMEOUT` constants).
 
 from __future__ import annotations
 
+import math
 import re
 import zipfile
 from pathlib import Path
@@ -844,6 +845,169 @@ def test_identical_standing_warnings_collapse_into_one_toast(ui):
     ui.assert_clean("warning grouping")
 
 
+# A marker is drawn from the same numbers the app routes and lays out with,
+# so it either lands on its item or it is somewhere else entirely; the
+# tolerance only absorbs the float arithmetic on the way through.
+_MARK_TOL_MM = 0.05
+
+
+def test_a_standing_warning_marks_the_part_its_message_names(ui):
+    """A message saying WHAT is wrong but not WHERE leaves the user dragging
+    parts at random across a 20 mm board.  Every standing warning about
+    something on the board carries a marker, and that marker sits on the part
+    the message names -- not on the one beside it."""
+    ui.show_panel("leds")
+    while len(ui.leds()) < 3 and ui.add_led():
+        pass
+    assert len(ui.leds()) == 3, "the case needs three units to tell apart"
+    ui.show_panel("text")
+    for _ in range(2):
+        ui.page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 2")
+    # Three problems at once, none of them on the first item of its kind, on
+    # the default face, or in the default package: an index, a side or a size
+    # taken from the wrong place puts the marker somewhere the user can see.
+    ui.js("""() => {
+      const bad = state.leds[2];
+      bad.size = '1206'; bad.rot = 30;
+      bad.x = PAD_PAIRS.tl.at[0]; bad.y = PAD_PAIRS.tl.at[1];
+      state.texts.forEach(t => { t.text = 'BADGE'; t.side = 'back'; });
+      state.texts[1].x = outlineBounds()[2];
+      state.pins = ALL_PINS.filter(
+        n => PADS.find(p => p[4] === n)[2] !== 'GND');
+      renderLedList(); renderTextList(); draw();
+    }""")
+    ui.wait_toast(r"no GND pin left")
+
+    warns = ui.js("""() => designWarnings.map(w => ({
+      key: w.key, kind: w.kind, i: w.i,
+      pts: w.mark ? [...w.mark.polys.flat(), ...w.mark.segs.flat(),
+                     ...w.mark.dots] : null}))""")
+    places = ui.js("""() => ({
+      led: state.leds.map(L => [L.x, L.y]),
+      text: state.texts.map(t => { const b = textBBox(t);
+        return [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]; })})""")
+    keys = {w["key"] for w in warns}
+    assert {"w:led-fit-2", "w:text-1", "w:pins"} <= keys, (
+        f"the case never provoked the three problems it is about: "
+        f"{sorted(keys)}"
+    )
+    for w in warns:
+        if w["kind"] not in places or w["i"] < 0:
+            continue
+        assert w["pts"], f"{w['key']} says what is wrong but marks nowhere"
+        cx = sum(p[0] for p in w["pts"]) / len(w["pts"])
+        cy = sum(p[1] for p in w["pts"]) / len(w["pts"])
+        here = places[w["kind"]]
+        near = min(range(len(here)),
+                   key=lambda j: math.dist((cx, cy), here[j]))
+        assert near == w["i"], (
+            f"{w['key']} is about {w['kind']} {w['i'] + 1} but its marker "
+            f"sits on {w['kind']} {near + 1}"
+        )
+
+    # The connector has no card and no outline to point at, so its marker has
+    # to stand on the pads that went missing -- not on the ones still there.
+    pads = ui.js("""() => PADS.map(p => ({x: p[0], y: p[1], label: p[2],
+                                          pin: p[4], kept: pinOn(p[4])}))""")
+    missing = ui.js("() => powerMissing()")
+    dots = next(w["pts"] for w in warns if w["key"] == "w:pins")
+    gone = [p for p in pads if not p["kept"] and p["label"] in missing]
+    assert len(dots) == len(gone), (
+        f"{len(gone)} {missing} pad(s) were dropped but the connector "
+        f"warning marks {len(dots)} of them"
+    )
+    for dot in dots:
+        pad = min(pads, key=lambda p: math.dist(dot, (p["x"], p["y"])))
+        assert not pad["kept"] and pad["label"] in missing, (
+            f"the connector marker stands on pin {pad['pin']} "
+            f"({pad['label']}), which the board still has; it must stand on "
+            f"the {missing} pad the design lost"
+        )
+    ui.assert_clean("warning markers")
+
+
+def test_a_free_placed_units_warning_marks_the_part_that_is_in_the_way(ui):
+    """With the parts dragged apart, the box around them is mostly empty
+    board.  Marking that box tells the user a quarter of their badge is
+    wrong and leaves them guessing which of five pieces to move -- so the
+    marker outlines the piece that is actually on the header, and the
+    message names it."""
+    from shapely.geometry import Point, Polygon
+
+    ui.show_panel("leds")
+    # Resistor dragged down onto the bottom-left pair, LED left where it is:
+    # the two ends of the unit are ~14 mm apart.
+    ui.js("""() => {
+      const L = state.leds[0];
+      L.side = 'front'; L.x = 3.5; L.y = 4.2; L.novia = false;
+      L.adv = {rx: -0.5, ry: 14.0, rrot: 0, lrot: 0, vx: 8.0, vy: 6.0};
+      renderLedList(); draw();
+    }""")
+    ui.wait_toast(r"connector pad pair")
+
+    got = ui.js("""() => {
+      const L = state.leds[0], w = designWarnings.find(x => x.key === 'w:led-fit-0');
+      return {polys: w && w.mark ? w.mark.polys : null, msg: w ? w.msg : null,
+              led: [L.x, L.y], res: [L.x + L.adv.rx, L.y + L.adv.ry],
+              envelope: unitPoly(L)};
+    }""")
+    assert got["polys"], "the unit is refused but nothing on the board says where"
+    marked = [Polygon(q) for q in got["polys"]]
+    assert Polygon(got["envelope"]).contains(Point(*got["led"])), (
+        "vacuous: the envelope no longer spans the LED end of this unit")
+    assert any(m.contains(Point(*got["res"])) for m in marked), (
+        f"the resistor is the part on the pads, and the marker misses it: "
+        f"{got['msg']}")
+    assert not any(m.contains(Point(*got["led"])) for m in marked), (
+        "the marker covers the LED end of the unit, 14 mm from the pads it "
+        "is complaining about: it is outlining the box, not the copper")
+    assert "resistor" in got["msg"], (
+        f"the message does not name the part that is in the way: {got['msg']}")
+    ui.assert_clean("free-placed marker")
+
+
+def test_the_marker_for_a_run_that_cannot_route_covers_the_leg_that_failed(ui):
+    """"a trace bend runs too close to other copper" is unactionable on a run
+    with several bends.  The marker has to cover the leg the router actually
+    rejected, so the user can see which bend to drag clear."""
+    ui.show_panel("leds")
+    # Via-less routing is off by default, and a hand-placed bend parked on the
+    # connector pads is the ordinary way one of these runs stops routing.
+    ui.js("""() => {
+      const L = state.leds[0];
+      L.novia = true;
+      L.nodes = [[PAD_PAIRS.tl.at[0], PAD_PAIRS.tl.at[1]]];
+      renderLedList(); draw();
+    }""")
+    ui.wait_toast(r"too close to other copper")
+
+    run = ui.js("""() => {
+      const L = state.leds[0], r = noviaRoute(L);
+      const w = designWarnings.find(x => x.key === 'w:led-novia-0');
+      return {tight: !!r.tight, start: r.pts[0], pad: r.pad,
+              bend: L.nodes[0], segs: w && w.mark ? w.mark.segs : null};
+    }""")
+    assert run["tight"], "the case never made a run that fails to route"
+    assert run["segs"] and len(run["segs"]) == 1, (
+        f"the run that cannot route marks {run['segs']} copper: the message "
+        "names a bend the board never points at"
+    )
+    ends = run["segs"][0]
+    assert len(ends) == 2, f"a marked leg is two points, not {ends}"
+    corners = [run["start"], run["bend"], run["pad"]]
+    for end in ends:
+        assert any(math.dist(end, c) <= _MARK_TOL_MM for c in corners), (
+            f"the marked leg runs to {end}, which is neither end of the run "
+            f"nor the bend on it: {corners}"
+        )
+    assert any(math.dist(end, run["bend"]) <= _MARK_TOL_MM for end in ends), (
+        "the marked leg does not touch the bend the user placed, so the "
+        "message and the marker are about different copper"
+    )
+    ui.assert_clean("route marker")
+
+
 # ===========================================================================
 # Selection: `selected` names a live object, or nothing
 # ===========================================================================
@@ -1430,7 +1594,11 @@ def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
     # between them, so both true and false answers are exercised everywhere.
     spots = [(x, y) for x in (1.2, 2.6, 4.2, 5.6, 10.0, 15.0, 17.8, 19.2)
              for y in (1.2, 2.6, 4.2, 10.0, 16.2, 17.6, 19.2)]
-    base = _unit_matrix(rots=(0, 90, 37), advs=(None,))[::3]
+    # Hand-placed parts are the case the rule now turns on: their envelope
+    # spans board neither the pads nor the copper occupy, so canvas and board
+    # have to agree about the copper, not about the box around it.
+    spread = {"rx": 5.5, "ry": 5.0, "rrot": 0, "lrot": 0, "vx": -4.0, "vy": -3.0}
+    base = _unit_matrix(rots=(0, 90, 37), advs=(None, _ADV[1], spread))[::3]
     disagree, said_yes = [], 0
     for pins in pinsets:
         leds = _clamped([dict(d, x=x, y=y) for d in base for x, y in spots])
@@ -2079,7 +2247,7 @@ def test_the_preview_never_offers_a_spot_the_board_would_move_the_unit_off(ui, r
     """Every spot the canvas accepts on a custom outline is one the board keeps.
 
     `unitInsideBoard` is the client's copy of the generator's containment test
-    (`outline.buffer(-0.55).contains(unit_poly)`, webapp.py).  It is
+    (`outline.buffer(-0.55).contains(unit_footprint)`, webapp.py).  It is
     deliberately one-directional (0.555 mm against the server's 0.55 mm), so
     the canvas may refuse a spot the generator would have taken, but must never
     accept one the generator refuses: that direction is a unit the user placed
@@ -2120,7 +2288,7 @@ def test_the_preview_never_offers_a_spot_the_board_would_move_the_unit_off(ui, r
                 continue   # the safe rect stopped it first; that is the clamp
                            # test's rule, not this one's
             probed += 1
-            if not solid.contains(pcb.unit_poly(_py_led(here), safe)):
+            if not solid.contains(pcb.unit_footprint(_py_led(here), safe)):
                 lies.append(f"{_describe(d)}: the canvas still accepts "
                             f"({spot[0]:.4f}, {spot[1]:.4f}), where the "
                             "generator relocates the unit")

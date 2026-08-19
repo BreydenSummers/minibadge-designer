@@ -31,6 +31,42 @@ EDGE_MARGIN = 0.5        # keep artwork off the board edge
 BOARD = (0.16, 0.16, 20.16, 20.16)
 MAX_PALETTE = 6
 
+#: Most pixels an upload may DECLARE before it is turned away unread.
+#:
+#: This is a memory guard, and it has to fire on the header because there is
+#: no other place to stand: decoding a PNG is all-or-nothing, so by the time
+#: any pixel is available the whole raster is already resident. Measured on
+#: this repo, a 20 KB / 13 000 x 13 000 PNG (169 Mpx, which Pillow's own bomb
+#: check only *warns* about) drove 3 736 MB of peak RSS through the rotate,
+#: and one request may carry 40 image fields inside the 24 MiB upload cap.
+#:
+#: 24 Mpx is ~6000 x 4000: a full-frame camera export, and about 50x more
+#: detail than a 20 mm badge can print (the grid below is at most 480 cells
+#: across). Anything larger is not artwork this pipeline can use.
+MAX_INPUT_PIXELS = 24_000_000
+
+#: Working size the decoded image is reduced to before the RGBA conversion
+#: and the rotate, whose intermediates are the expensive part (an expanded
+#: rotation is ~2.7x the source). At 4 Mpx those cost ~16 MB and ~48 MB
+#: instead of scaling with the upload; nothing under this is touched, so no
+#: image a person would actually upload for a badge changes shape here.
+WORK_MAX_PIXELS = 4_000_000
+
+# Pillow's own bomb check is stood down because `_open_rgba` replaces it, on
+# the same header bytes, with a stricter test: 24 Mpx against Pillow's 89.5,
+# and a refusal rather than a *warning* -- the tier that let the 169 Mpx case
+# through in the first place. Leaving both armed would be worse than either,
+# because Pillow's runs inside `Image.open` and would pre-empt ours: over
+# 179 Mpx with a DecompressionBombError that reaches the user as a generic
+# "could not process an artwork image", and in between with a warning that
+# this suite's `filterwarnings = error` turns into the same thing. One guard,
+# one message, one threshold.
+Image.MAX_IMAGE_PIXELS = None
+
+
+class ImageTooLarge(ValueError):
+    """An upload with more pixels than `MAX_INPUT_PIXELS` allows."""
+
 
 @dataclass
 class CircleKeepout:
@@ -66,10 +102,46 @@ class ClassifiedImage:
     grids: dict[str, list[bool]] = field(default_factory=dict)  # material -> row-major
 
 
-def _open_rgba(image_bytes: bytes) -> Image.Image:
+def _open_rgba(image_bytes: bytes, resample=Image.LANCZOS) -> Image.Image:
+    """Decode one upload to RGBA at a bounded working size.
+
+    The order of the three steps here is the whole point, because each one
+    would otherwise run at the upload's full resolution:
+
+    1. `Image.open` reads the header only, so `img.size` is known before a
+       single row is decoded. That is the one moment an oversized file can be
+       refused without paying for it (`MAX_INPUT_PIXELS`).
+    2. `draft` lets libjpeg decode a JPEG straight to a reduced scale, so an
+       over-`WORK_MAX_PIXELS` photo never has a full-size buffer at all. It
+       is a no-op for PNG, which is why step 1 has to carry the guard.
+    3. The reduction to `WORK_MAX_PIXELS` happens BEFORE the RGBA conversion
+       and before `_transpose`'s rotate. Both allocate a fresh buffer, and
+       the rotate's is ~2.7x the source, so shrinking first is what keeps
+       peak memory tracking the badge instead of the upload.
+
+    `resample` is the caller's final-resize filter, reused here so the two
+    reductions compose: palette mode passes NEAREST because it needs the
+    artwork's exact colors to survive to the snapping step, and a LANCZOS
+    pre-shrink would hand it a halo of blended ones.
+    """
     img = Image.open(io.BytesIO(image_bytes))
+    w, h = img.size
+    if w * h > MAX_INPUT_PIXELS:
+        raise ImageTooLarge(
+            f"this image is {w} x {h} pixels ({w * h / 1e6:.0f} megapixels), over "
+            f"the {MAX_INPUT_PIXELS / 1e6:.0f} megapixel limit. A badge is 20 mm "
+            "across and prints about 0.18 mm detail, so scale the image down "
+            "(2000 pixels on the long edge is already more than the board can "
+            "hold) and upload it again")
+    if w * h > WORK_MAX_PIXELS:
+        # JPEG only: asks the decoder for the nearest 1/2, 1/4, 1/8 scale.
+        img.draft(None, (max(1, w // 2), max(1, h // 2)))
+        w, h = img.size
     if img.mode != "RGBA":
         img = img.convert("RGBA")
+    if w * h > WORK_MAX_PIXELS:
+        s = (WORK_MAX_PIXELS / (w * h)) ** 0.5
+        img = img.resize((max(1, round(w * s)), max(1, round(h * s))), resample)
     return img
 
 
@@ -148,12 +220,13 @@ def classify_image(
     board: tuple[float, float, float, float] = BOARD,
     max_cols: int = MAX_COLS,
 ) -> ClassifiedImage:
-    img = _transpose(_open_rgba(image_bytes), rot, flip)
-    width_mm, height_mm, cols, rows = _fit(img, width_mm, board, max_cols)
     # Palette mode uses NEAREST: flat-color art must keep exact colors, or
     # anti-aliased boundary pixels snap to the wrong palette entry and leave
-    # a halo of the wrong material.
+    # a halo of the wrong material. The decode step reuses the same filter
+    # for its own bounding reduction, so pass it in before opening.
     resample = Image.NEAREST if mode == "palette" else Image.LANCZOS
+    img = _transpose(_open_rgba(image_bytes, resample), rot, flip)
+    width_mm, height_mm, cols, rows = _fit(img, width_mm, board, max_cols)
     resized = img.resize((cols, rows), resample)
     px = resized.load()
 
@@ -216,9 +289,19 @@ def classify_image(
         for idx in _flood(classes, cols, rows, seed):
             mats[idx] = "" if mat == "ignore" else mat
 
+    # `setdefault` is the wrong tool here: Python evaluates arguments before
+    # the call, so `setdefault(mat, [False] * n)` built and discarded a fresh
+    # n-element list on every SET pixel rather than once per material. That
+    # made this loop O(set_pixels x total_pixels) -- on the outline grid
+    # (n = 230 400) a half-filled image cost ~26 billion element writes, and
+    # a 2 KB checkerboard PNG turned into a 61-second request. Allocating on
+    # the miss instead takes the same loop from 16.90 s to 0.013 s.
     for idx, mat in enumerate(mats):
         if mat:
-            ci.grids.setdefault(mat, [False] * n)[idx] = True
+            grid = ci.grids.get(mat)
+            if grid is None:
+                grid = ci.grids[mat] = [False] * n
+            grid[idx] = True
     return ci
 
 
