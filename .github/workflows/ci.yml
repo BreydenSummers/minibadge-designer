@@ -1,20 +1,19 @@
-# CI for the working branch. Runs on the self-hosted `badge` runner, which is
-# also the deploy host, so the image this builds warms the layer cache that
-# deploy.yml later reuses.
+# CI for the working branch. Runs on a GitHub-hosted runner, deliberately not
+# on the self-hosted `badge` runner that serves the site.
 #
-# That convenience is also this file's main security constraint. A self-hosted
-# runner executes whatever the checked-out commit says to execute, on the box
-# that serves the site: the build step runs the commit's own Dockerfile, the
-# test step runs the commit's own test suite, and the runner user is in the
-# `docker` group, which is root-equivalent on the host. So the question this
-# workflow has to answer is "whose code is allowed to reach that", and the
-# answer is enforced by the `if:` on the job below -- same-repository commits
-# only, never a fork's pull request.
+# It used to run there, to share a Docker layer cache with deploy.yml. The
+# trade for that convenience was bad: a self-hosted runner executes whatever
+# the checked-out commit says to execute, the build step runs the commit's own
+# Dockerfile, the test step runs the commit's own test suite, and the runner
+# user is in the `docker` group -- which is root-equivalent on the host. Any
+# commit that reached CI therefore had a path to code execution on the
+# production box, without ever passing through deploy.yml. A throwaway VM
+# removes that path outright: the only thing that now runs on `badge` is
+# deploy.yml, on push to main.
 #
-# The repo is private today, which makes that condition redundant. It is here
-# for the day it is not: on a public repo, `pull_request` plus a self-hosted
-# runner is remote code execution for any GitHub account, and it would be
-# switched on by a repository setting rather than by a change to this file.
+# What was given up is the warm cache. Deploys still reuse the layers left by
+# the previous deploy, so this only costs time when a change lands early in the
+# Dockerfile (requirements.lock, the apt stages).
 name: CI
 
 on:
@@ -24,8 +23,8 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
-# There is one runner, so everything queues regardless; cancelling superseded
-# dev pushes keeps that queue short. Deploys use a different group and are
+# Hosted runners are not a shared queue, so this is only about not spending
+# minutes on a superseded dev push. Deploys use a different group and are
 # never cancelled.
 concurrency:
   group: ci-${{ github.ref }}
@@ -36,31 +35,44 @@ permissions:
 
 jobs:
   test:
-    # Fork pull requests are skipped rather than run untrusted. To test one,
-    # read the diff, then push it to a branch here and let that push build it.
+    # Fork pull requests are still skipped rather than run. On a hosted runner
+    # this is no longer load-bearing -- the VM is disposable, the token is
+    # read-only, and no secrets are exposed to it -- so it is now a choice
+    # rather than a necessity. Dropping this `if:` to let fork PRs build and
+    # test themselves would be a reasonable change; it is kept for now so that
+    # unreviewed code does not consume the account's runner minutes.
     if: >-
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
       IMAGE: minibadge-designer:ci-${{ github.sha }}
 
     steps:
-      # Pinned to the commit v4.4.0 points at, not to the `v4` tag: a tag is
-      # mutable, and on a self-hosted runner "whatever v4 means today" is a
-      # third party with shell access to the deploy host.
+      # Pinned to the commit v7.0.1 points at, not to the `v7` tag: a tag is
+      # mutable, so `v7` is a promise by a third party about what will run
+      # here. v4 declared node20, which the runner no longer ships; it was
+      # already being forced onto node24 and warning about it. node24 has been
+      # declared since v5, so any v5+ pin silences that -- v7 is simply the
+      # current major.
       #
-      # persist-credentials: false keeps the job's token out of the workspace's
-      # .git/config. The runner's working directory outlives the job, so a
-      # token left there is readable by the next thing that runs on this box.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # persist-credentials: false because nothing after this step talks to
+      # git: the build and the test suite only read the tree. No reason to
+      # leave a usable token sitting in the workspace the Dockerfile copies
+      # from.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       # Not just a build: the last stage exports a two-LED board and fails if
       # the 3D models did not resolve or lost their colours, which is the one
       # class of breakage that otherwise ships silently (see the Dockerfile).
+      #
+      # The models stage unpacks Debian's full kicad-packages3d tree (~5 GB) to
+      # copy half a megabyte out of it, so this build is disk-hungry by hosted
+      # runner standards. If it ever fails on space rather than on the code,
+      # that stage is why.
       - name: Build the image
         run: docker build -t "$IMAGE" .
 
@@ -73,8 +85,9 @@ jobs:
       # --user root is still needed (the editable install writes to /app and to
       # site-packages), so the container is given nothing else: every Linux
       # capability dropped, no way to regain privileges through setuid, and a
-      # process cap. Root inside a capability-less container is a much smaller
-      # thing than root on the runner.
+      # process cap. That containment mattered more when this ran beside the
+      # website; it is kept because the test suite should be run the same way
+      # everywhere, and because it costs nothing.
       - name: Test suite
         run: |
           docker run --rm --user root --workdir /app \
@@ -84,9 +97,3 @@ jobs:
             "$IMAGE" bash -c '
               pip install --quiet --no-cache-dir --break-system-packages -e ".[dev]" &&
               pytest --strict-tools -m "not visual and not browser" -q'
-
-      - name: Clean up the CI tag
-        if: always()
-        run: |
-          docker image rm -f "$IMAGE" >/dev/null 2>&1 || true
-          docker image prune -f >/dev/null 2>&1 || true

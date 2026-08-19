@@ -180,22 +180,28 @@ to `main` is what ships.
 | `.github/workflows/ci.yml` | push to `dev`, PRs into `dev`/`main` | Builds the image (whose last stage smoke-tests the 3D pipeline) and runs the test suite *inside* it, so tests see the same kicad-cli and build-time assets the container serves with. |
 | `.github/workflows/deploy.yml` | push to `main`, manual dispatch | On the deploy host: fast-forwards `/opt/minibadge-designer` to the pushed commit, `docker compose up -d --build --wait`, and fails the job if the healthcheck never passes. |
 
-Both run on the self-hosted runner `badge` (`self-hosted, Linux, X64`), which
-is also the server, so CI's build warms the layer cache the deploy reuses.
+The two run on different machines, on purpose. **CI runs on a GitHub-hosted
+runner (`ubuntu-latest`); only the deploy runs on the self-hosted runner `badge`
+(`self-hosted, Linux, X64`), which is also the server.**
 
-That sharing is convenient and it is also the sharpest edge in this setup, so it
-is worth stating plainly. A self-hosted runner executes whatever the commit it
-checked out says to execute, on the machine that serves the site, and the runner
-user is in the `docker` group — which is root-equivalent on the host. CI is
-therefore gated to **same-repository commits only**: a pull request from a fork
-is skipped, not built (see the `if:` on the job in `ci.yml`). The repository is
-private today, which makes that redundant; it is there for the day it is not,
-because on a public repo `pull_request` plus a self-hosted runner is remote code
-execution for any GitHub account, switched on by a repository setting rather
-than by a change to any file here.
+Both used to run on `badge`, so that CI's build warmed the layer cache the
+deploy reuses. That was the sharpest edge in the setup: a self-hosted runner
+executes whatever the commit it checked out says to execute, on the machine that
+serves the site, and the runner user is in the `docker` group — which is
+root-equivalent on the host. Every commit that reached CI therefore had a route
+to the production box that did not go through `deploy.yml` at all. Splitting CI
+onto a disposable VM closes that route: the only thing that runs on `badge` now
+is a push to `main`.
 
-**If you make this repository public, split CI off this host first.** Nothing in
-the app needs the two to be the same machine; only the layer cache does.
+The cost is the warm cache. Deploys still reuse the layers left by the previous
+deploy, so it is only felt when a change lands early in the `Dockerfile` —
+`requirements.lock`, or either apt stage.
+
+CI is still gated to **same-repository commits only**: a pull request from a
+fork is skipped, not built (see the `if:` on the job in `ci.yml`). On a hosted
+runner that is no longer a security boundary — the VM is disposable, the token
+is read-only, and no secrets reach it — so it is now just a guard on runner
+minutes, and it can be dropped if you want fork PRs to test themselves.
 
 Two things CI deliberately does not cover: the **browser tier** (no Chromium in
 the image; run `pytest -m browser` locally) and the **visual tier**, which
