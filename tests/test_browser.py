@@ -32,6 +32,10 @@ carries an explicit, short timeout (see the `*_TIMEOUT` constants).
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import io
+import json
 import math
 import re
 import zipfile
@@ -449,10 +453,9 @@ def test_flow_upload_assign_material_drag_add_led_and_download(ui, logo):
     assert ui.blocking() == [], ui.toast_texts()
 
     # --- download and inspect what the user actually receives -----------
-    with page.expect_download(timeout=GENERATE_TIMEOUT) as dl:
-        page.click("#download", timeout=ELEMENT_TIMEOUT)
+    dl = _download(page, kicad=True)
     path = ui.downloads_dir / "project.zip"
-    dl.value.save_as(path)
+    dl.save_as(path)
     with zipfile.ZipFile(path) as zf:
         names = zf.namelist()
         pcb = next(n for n in names if n.endswith(".kicad_pcb"))
@@ -2357,13 +2360,19 @@ def test_art_is_kept_off_the_pin_captions_the_same_way_in_both(ui):
 @pytest.mark.kicad
 @pytest.mark.needs("kicad")
 def test_fab_download_waits_for_the_authors_warning_to_be_acknowledged(ui):
-    """The Gerbers button opens the author's caveat as a gate: declining it
-    downloads nothing, and only "I understand" releases the fab package.
+    """Ticking the fab package opens the author's caveat as a gate: declining it
+    downloads nothing, and only "I understand" releases the package.
 
     That zip goes straight to a board house, so this is the one moment the
     app can say "give it a once-over in KiCad first" before real money is
     spent.  A notice that appears next to an already-started download warns
     nobody; the acknowledgement has to come first.
+
+    The gate used to hang off a Gerbers button of its own.  There is one Download
+    button now and the fab package is a tick inside it, which is exactly the kind
+    of rearrangement that quietly drops a gate: the warning has to fire for the
+    tick, and it has to fire whether the fab package is downloaded alone or
+    alongside the KiCad project.
     """
     page = ui.page
     ui.show_panel("leds")
@@ -2386,8 +2395,19 @@ def test_fab_download_waits_for_the_authors_warning_to_be_acknowledged(ui):
     page.on("download", lambda d: downloads.append(d))
     gerber_posts = []
     page.on("request", lambda r: gerber_posts.append(r.url)
-            if r.url.endswith("/gerbers") else None)
+            if r.url.endswith("/gerbers") or r.url.endswith("/bundle") else None)
     dialog_open = "document.getElementById('fabwarn').classList.contains('open')"
+
+    def ask_for_gerbers(*, with_kicad):
+        """Open the picker, tick the fab package, press Download."""
+        page.click("#download", timeout=ELEMENT_TIMEOUT)
+        page.wait_for_selector("#dlbox.open", timeout=CONTROL_TIMEOUT)
+        for key, want in (("kicad", with_kicad), ("gerbers", True),
+                          ("design", False)):
+            box = page.locator(f"#dl-{key}")
+            if box.is_checked() != want:
+                box.click(timeout=CONTROL_TIMEOUT)
+        page.click("#dlgo", timeout=ELEMENT_TIMEOUT)
 
     def expect_dialog(should_be_open, why):
         # Give the UI its beat, then assert, so a missing (or lingering)
@@ -2400,8 +2420,8 @@ def test_fab_download_waits_for_the_authors_warning_to_be_acknowledged(ui):
         assert ui.js(f"() => {dialog_open}") is should_be_open, why
 
     # --- declining the warning downloads nothing -------------------------
-    page.click("#gerberbtn", timeout=ELEMENT_TIMEOUT)
-    expect_dialog(True, "the Gerbers button skipped the author's warning")
+    ask_for_gerbers(with_kicad=False)
+    expect_dialog(True, "ticking the fab package skipped the author's warning")
     assert downloads == [], (
         "the fab zip started downloading before the warning was answered")
     page.click("#fabcancel", timeout=ELEMENT_TIMEOUT)
@@ -2413,8 +2433,19 @@ def test_fab_download_waits_for_the_authors_warning_to_be_acknowledged(ui):
         "declining the author's warning still started the fab export; the "
         "gate is decoration")
 
+    # --- and again with the board alongside it, since that is a second path --
+    ask_for_gerbers(with_kicad=True)
+    expect_dialog(True, "the warning is skipped when the fab package rides along "
+                        "with the KiCad project")
+    page.click("#fabcancel", timeout=ELEMENT_TIMEOUT)
+    expect_dialog(False, "declining the warning left the dialog up")
+    page.wait_for_timeout(500)
+    assert gerber_posts == [] and downloads == [], (
+        "declining the warning still started the download when the fab package "
+        "was one piece of several")
+
     # --- acknowledging it releases the fab package ------------------------
-    page.click("#gerberbtn", timeout=ELEMENT_TIMEOUT)
+    ask_for_gerbers(with_kicad=False)
     expect_dialog(True, "the warning must gate every fab download, not one")
     with page.expect_download(timeout=GENERATE_TIMEOUT) as dl:
         page.click("#fabok", timeout=ELEMENT_TIMEOUT)
@@ -2792,3 +2823,1246 @@ def test_every_fabrication_choice_shows_its_longest_option(ui, width):
         f"at {width}px these fabrication dropdowns clip their longest "
         f"option: {clipped}")
     ui.assert_clean(f"fab row at {width}px")
+
+
+# ---------------------------------------------------------------------------
+# text metrics: the preview's box versus the ink the board actually gets
+# ---------------------------------------------------------------------------
+#: How far the editor's box may sit OUTSIDE the ink the board prints, mm.  The
+#: editor no longer estimates: it lays the string out from the per-character
+#: metrics the server ships for that face (textpoly.char_metrics, served at
+#: /fonts/<key>.metrics.json) using text_geometry's own rules, so the only
+#: residue is text_geometry's closing `simplify(0.005)`, which can drop the one
+#: vertex that reached furthest, plus the 0.01-font-unit outward rounding the
+#: table is shipped with (1.7 um at the largest text the UI offers).  That
+#: bounds the disagreement at ~0.0085 mm; measured worst case over the sweep
+#: below is 0.0057 mm in Python and 0.0045 mm through the browser.  0.015 mm is
+#: under a thirteenth of the 0.2 mm silk-to-edge budget it feeds, so a box that
+#: passes here cannot cost the user a millimetre of usable board.
+#:
+#: It used to be a FRACTION of the string width, 0.08, because the editor
+#: measured strings with the browser's own rasteriser and the two disagreed by
+#: up to 6.1% of the width (Pacifico "gjpqy", whose "g" and "o" the browser
+#: draws from that face's default alternates while textpoly takes the plain cmap
+#: glyph).  On a 17 mm string that tolerance was 1.36 mm per side, and the app
+#: padded its fit check by the same amount: it refused a text that had
+#: millimetres of real clearance.  A tolerance that scales with the string is
+#: the wrong shape for a box that is now exact.
+TEXT_BOX_TOL_MM = 0.015
+#: How far the board's ink may fall outside the editor's box, mm.  This is the
+#: direction that ships a design the user never saw -- silk clipped away at the
+#: fab while the preview looked fine -- and it is structurally zero: every ink
+#: extent in the table is rounded OUTWARD, and the editor walks the string with
+#: the same advances text_geometry does.  Measured 0.000000 mm over 1442 Python
+#: cases and 624 browser cases, so this is float noise money, not tolerance:
+#: 1e-3 mm is twelve orders of magnitude above double-precision residue on
+#: millimetre coordinates and still a fiftieth of the smallest thing a fab
+#: prints.
+TEXT_INK_ESCAPE_MM = 0.001
+
+#: Strings chosen for what they stress: digits (no descenders, and Press Start
+#: 2P raises them off the baseline), a mixed-case phrase with descenders, one
+#: wide cap, a run of pure descenders, all caps, near-zero-width glyphs, a kern
+#: pair, punctuation whose advance dwarfs its ink, a pair the browser would
+#: happily draw as one ligature glyph, blanks at both ends (the ink is centred
+#: on the INK, not the advance), and a character no bundled face has, which
+#: text_geometry skips with a half-em gap while the browser draws it from a
+#: fallback face.
+_METRIC_STRINGS = ["418", "made by half", "W", "gjpqy", "MINIBADGE", "iIl1",
+                   "Wg", ".", "fi ffl", " g ", "\u0416\u0416", "A\u0416B"]
+#: Both ends of the size range the UI offers plus the ordinary middle.  Nothing
+#: here should depend on size -- every metric scales linearly -- so a case that
+#: fails at one size and passes at another is the finding, not the noise.
+_METRIC_SIZES = [0.6, 1.5, 12.0, 119.0]
+
+
+@pytest.mark.browser
+def test_the_editors_text_box_is_the_ink_the_board_will_actually_get(ui):
+    """What the editor measures a string as, and what the fab prints, are the
+    same box in every bundled typeface.
+
+    The editor sizes a face by CSS pixels, which the browser scales by the EM;
+    the board sizes it by CAP HEIGHT (`textpoly.text_geometry`).  The ratio
+    between the two is a property of the individual font -- the bundled faces
+    run 0.348 to 1.000 -- and the editor assumed 0.700 for all of them.  So it
+    drew Press Start 2P 43% oversized and Special Elite at half size, and then
+    decided whether the text fitted the board from that wrong width: a real
+    design was refused for "hanging over the board edge" with four millimetres
+    of clearance on both sides, and no test in the suite could see it.
+
+    The same class of error hides in the vertical band (a baseline off by a
+    fraction of the cap height), in kerning and ligatures (the server applies
+    neither, walking the string one glyph at a time) and in centring (the
+    server centres the ink, not the advance).  All of it shows up as this one
+    box disagreeing, so this is where it is measured -- against the server's
+    own geometry, per face, not against a recorded number.
+
+    The editor closes that gap by not guessing: the server ships each face's
+    per-character ink extents (`textpoly.char_metrics`) and the editor lays the
+    string out from those, by text_geometry's own rules.  So this test now holds
+    it to an ABSOLUTE tolerance a hundredth of the old one, and to a far tighter
+    one in the direction that ships clipped ink.  Loosening either constant back
+    to a fraction of the string width would restore the 1.36 mm phantom margin
+    that refused the design this test was written for.
+    """
+    from minibadge_designer import textpoly
+
+    fonts = list(textpoly.FONTS)
+    assert len(fonts) > 1, (
+        "one bundled face cannot show a per-face scale error; the defect this "
+        "test exists for was invisible in the two faces whose cap ratio "
+        "happens to be 0.700")
+
+    # Load every face into the page and wait for the real outlines to arrive.
+    # Measured against a fallback face every comparison below is meaningless,
+    # and NOT stable: `document.fonts.check()` is the obvious wait and the wrong
+    # one -- it answers "can this be rendered without loading anything new",
+    # which a fallback satisfies, so it returns true before a single .ttf has
+    # arrived. It passed alone and failed 83 of 384 cases in a full-file run,
+    # on whichever two faces the server was slowest to serve. Ask the font set
+    # what it actually holds instead.
+    # Two arrivals per face, and the box depends on the SECOND one: ensureFont
+    # fetches the outlines for the canvas and, separately, the per-character
+    # metrics the box is computed from.  Waiting only for the outlines measures
+    # the browser's own rasteriser through measuredRun100 -- the fallback path,
+    # padded by 8% -- and calls it exact.
+    ui.js("(keys) => keys.forEach(k => ensureFont(k))", fonts)
+    ui.page.wait_for_function(
+        """(keys) => keys.every(k => {
+               if (!FONT_INK[k] || !FONT_INK[k].chars) return false;
+               for (const f of document.fonts) {
+                   if (f.family === `bm-${k}` && f.status === 'loaded') return true;
+               }
+               return false;
+           })""",
+        arg=fonts, timeout=UPLOAD_TIMEOUT)
+
+    cases = [[s, size, f] for f in fonts
+             for s in _METRIC_STRINGS for size in _METRIC_SIZES]
+    # One round trip: 528 separate evaluate() calls would dominate the runtime.
+    # `exact` comes back with each box because it decides how much the app pads
+    # its own fit check by, and a box that is only as good as the browser's
+    # rasteriser must not be measured as though it were the server's own.
+    boxes = ui.js(
+        """(cs) => cs.map(([text, size, font]) => {
+               const t = {text, size, font, x: 0, y: 0, rot: 0};
+               return [textLocalBox(t), textInk(t).run.exact];
+           })""", cases)
+
+    # The comparison is a loop, and a loop over nothing passes: if the page
+    # answers with fewer boxes than cases (an exception inside the map, a
+    # renamed textLocalBox) the sweep silently covers zero strings.
+    pairs = list(zip(cases, boxes))
+    assert len(boxes) == len(cases), (
+        f"asked the editor to measure {len(cases)} strings and got "
+        f"{len(boxes)} answers; an exception inside the map leaves every check "
+        "below sweeping a shorter list than it says it does")
+    assert all(exact for _box, exact in boxes), (
+        "the editor measured "
+        f"{sum(1 for _b, e in boxes if not e)} of {len(boxes)} strings with the "
+        "browser's own rasteriser instead of the metrics the server shipped for "
+        "that face. Every comparison below then measures the fallback path, "
+        "which is allowed to be 6% out and is padded to match -- the exact path "
+        "is the one the user's fit check runs on")
+    assert len(pairs) > 100, (
+        f"asked the editor to measure {len(cases)} strings across "
+        f"{len(fonts)} faces and got {len(boxes)} boxes back; a sweep this "
+        "short is not sweeping the parameter the defect hid in")
+
+    bad, inked = [], 0
+    for (text, size, font), (box, _exact) in pairs:
+        geom = textpoly.text_geometry(text, font, size)
+        if geom is None:
+            # Nothing in the string is in this face (the Cyrillic pair, in ten
+            # of the twelve).  The board gets no ink, so the editor must claim
+            # none either: a box drawn round glyphs a fallback face supplied is
+            # a box round ink that will not exist.
+            assert box[2] - box[0] == 0, (
+                f"{font} prints nothing at all for {text!r}, yet the editor "
+                f"gives it a {box[2] - box[0]:.3f} mm wide box; it is measuring "
+                "a face the board will not use")
+            continue
+        inked += 1
+        sx0, sy0, sx1, sy1 = geom.bounds
+        # The server's baseline sits at +size/2 from the text's centre and its
+        # ink is centred on x=0, which is the frame textLocalBox reports in.
+        # Each entry is how far the INK reaches past that edge of the box, so
+        # positive is ink the editor did not know about and negative is box the
+        # ink never fills.  The two are not symmetric: an oversized box costs
+        # the user usable board, an undersized one ships silk the fab clips off
+        # a design whose preview looked perfect, and only the second is a board
+        # nobody previewed.
+        off = {
+            "left": box[0] - sx0, "right": sx1 - box[2],
+            "top": box[1] - sy0, "bottom": sy1 - box[3],
+        }
+        for edge, v in off.items():
+            room = TEXT_INK_ESCAPE_MM if v > 0 else TEXT_BOX_TOL_MM
+            if abs(v) > room:
+                bad.append({"font": font, "text": text, "size": size,
+                            "side": edge, "off_mm": round(v, 5),
+                            "allowed_mm": room,
+                            "editor": [round(c, 3) for c in box],
+                            "board": [round(c, 3) for c in (sx0, sy0, sx1, sy1)]})
+
+    assert inked > 100, (
+        f"only {inked} of {len(cases)} strings put ink on the board at all; the "
+        "edge comparison below covers those and nothing else")
+    assert not bad, (
+        f"{len(bad)} of {inked * 4} string edges measure differently in the "
+        f"editor than they print on the board. Positive off_mm means the ink "
+        f"reaches OUTSIDE the editor's box (text ships clipped while the "
+        f"preview looks fine); negative means the box is bigger than the ink "
+        f"(good designs get refused as overhanging). Worst first: "
+        f"{sorted(bad, key=lambda d: -abs(d['off_mm']))[:4]}")
+    ui.assert_clean("text metrics sweep")
+
+
+#: How far the ink on the board may differ from the box the editor drew, mm,
+#: end to end: through the metrics fetch, the fit check, /generate and the art
+#: clip.  Every stage in that chain is exact to ~0.005 mm (text_geometry's
+#: closing simplify) and the board file is written to four decimals, so 0.02 mm
+#: is four times the residue and still a tenth of the 0.2 mm silk-to-edge
+#: budget -- far too tight for a whole clip margin to hide in.
+TEXT_ROUNDTRIP_MM = 0.02
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("text,font,key", [
+    # A string wider than the pad rows, nudged sideways: the horizontal limit.
+    ("MINIBADGE", "pressstart", "ArrowLeft"),
+    # Pacifico is the face whose default alternates the old measured box got
+    # wrong, and "g" hangs a descender below the baseline, so nudging this one
+    # upward tests the vertical limit against the ink's TOP edge.
+    ("Wg", "pacifico", "ArrowUp"),
+])
+def test_a_text_the_editor_accepts_arrives_with_all_of_its_ink(ui, text, font, key):
+    """Text the editor says fits comes back from /generate whole.
+
+    The editor and the server each decide, separately, how close to the board
+    edge a string's ink may go: the editor to refuse the download, the server to
+    clip the polygons it writes.  When those two numbers disagree the user is
+    told one thing and sent another -- and they did.  The editor allowed ink
+    0.2 mm from the edge while the art pipeline clipped text at the 0.5 mm
+    ARTWORK frame, so a text pushed outward lost a 0.3 mm strip off every glyph
+    that reached the edge, in the file that went to the fab, with nothing
+    anywhere saying so.  No check on either side alone can see that: the box can
+    be exactly right and the download still short.
+
+    The text is walked to the edge the way a user walks it there -- arrow-key
+    nudges until the editor objects, then one step back -- so it ends up inside
+    the last 0.2 mm of what the editor allows, which is exactly the band a
+    too-tight server clip eats.
+    """
+    ui.show_panel("text")
+    ui.page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    card = ui.page.locator("#textlist .item").first
+    card.locator("input.tx").fill(text)
+    card.locator("select.fnt").select_option(font)
+    # 2.1 mm caps: big enough that this string's ink reaches the board edge
+    # while still fitting between them, so the edge rule is what stops it. The
+    # UI default of 1.5 mm clears the edge from every position and would test
+    # nothing at all.
+    card.locator("input.szn").fill("2.1")
+    card.locator("input.szn").dispatch_event("change")
+    # The box is computed from the face's per-character metrics; before those
+    # arrive the editor measures the browser's own glyphs and pads 8%, which is
+    # a different rule than the one under test.
+    ui.page.wait_for_function(
+        "(f) => FONT_INK[f] && FONT_INK[f].chars", arg=font, timeout=UPLOAD_TIMEOUT)
+
+    # Select on the canvas, which also takes focus off the text field: arrow
+    # keys move a caret in there and a text layer out here.
+    where = ui.js("() => [state.texts[0].x, state.texts[0].y]")
+    ui.click_mm(where[0], where[1], side="front")
+    ui.wait_state("selected && selected.kind === 'text'")
+    fits = "() => textOnSolidBoard(state.texts[0])"
+    assert ui.js(fits), (
+        f"a {font} {text!r} at 2.1 mm does not fit the board where the app put "
+        "it, so there is nothing to walk to the edge")
+    for _ in range(60):
+        ui.page.keyboard.press(key)
+        if not ui.js(fits):
+            break
+    else:
+        raise AssertionError(
+            f"60 nudges of {key} never reached a position the editor refuses; "
+            "this text never got near the edge, so the clip under test never "
+            "applied")
+    ui.page.keyboard.press({"ArrowLeft": "ArrowRight", "ArrowUp": "ArrowDown"}[key])
+    assert not ui.blocking(), (
+        f"one step back from the edge the editor still refuses to build its own "
+        f"text at {ui.js('() => [state.texts[0].x, state.texts[0].y]')}: "
+        f"{ui.blocking()}")
+    box = ui.js("() => textBBox(state.texts[0])")
+
+    path = ui.downloads_dir / "roundtrip.zip"
+    _download(ui.page, kicad=True).save_as(path)
+    with zipfile.ZipFile(path) as zf:
+        name = next(n for n in zf.namelist() if n.endswith(".kicad_pcb"))
+        board = zf.read(name).decode()
+
+    from minibadge_designer import pcb
+
+    pts = [(float(x) - pcb.ORIGIN, float(y) - pcb.ORIGIN)
+           for blk in re.findall(
+               r"\(gr_poly \(pts (.*?)\) \(stroke[^\n]*?\(layer \"F\.SilkS\"\)",
+               board)
+           for x, y in re.findall(r"\(xy ([-\d.]+) ([-\d.]+)\)", blk)]
+    assert len(pts) > 20, (
+        f"the download carries only {len(pts)} silk vertices for {text!r}, so "
+        "the comparison below has almost no ink to compare")
+    ink = (min(x for x, _y in pts), min(y for _x, y in pts),
+           max(x for x, _y in pts), max(y for _x, y in pts))
+
+    # Two guarantees at once, and they pull against each other: the ink has to
+    # stay off the routed edge (silk touching Edge.Cuts is a violation KiCad
+    # fails the board for) and it has to be ALL there (a clip tighter than the
+    # editor's own rule is a slice taken out of the user's string).
+    edge = pcb.OUTLINE
+    inside = min(ink[0] - edge[0], ink[1] - edge[1],
+                 edge[2] - ink[2], edge[3] - ink[3])
+    assert inside > 0, (
+        f"silk ink reaches {-inside:.4f} mm past the board outline; KiCad fails "
+        f"that as silkscreen clipped by board edge. ink={ink}")
+    lost = max(ink[0] - box[0], ink[1] - box[1], box[2] - ink[2], box[3] - ink[3])
+    assert lost < TEXT_ROUNDTRIP_MM, (
+        f"the board's silk stops {lost:.4f} mm inside the box the editor drew, "
+        f"so that much of every glyph at the edge was clipped out of the "
+        f"download the user sends to the fab. editor box={box}, board ink={ink}")
+    ui.assert_clean("text round trip")
+
+
+# ---------------------------------------------------------------------------
+# restoring a saved design: the autosave has to hand back what it took
+# ---------------------------------------------------------------------------
+@pytest.mark.browser
+@pytest.mark.parametrize("kind", ["png", "svg"])
+def test_a_saved_design_with_artwork_restores_the_artwork(ui, logo_png, logo_svg,
+                                                          kind):
+    """A design that went into the autosave with a picture comes back with it.
+
+    `designJSON()` stores an uploaded image as a `data:` URL and `dataUrlFile()`
+    turns it back into a File on the way in.  It did that with
+    `fetch(dataUrl)` -- and this app serves `connect-src 'self' blob:`, which
+    makes that fetch a blocked request.  So restoring ANY design containing a
+    picture threw `TypeError: Failed to fetch` and dropped every artwork layer:
+    the user pressed Restore, the bar went away, and their work did not come
+    back.  It shipped for four days because `dataUrlFile` predates the policy
+    and nothing tied the two together.
+
+    What let it ship was a coverage hole, not a missing instrument.  The restore
+    runs inside a `try/catch`, so no exception reached `window.onerror` and
+    nothing looked like a crash -- but the browser logs the policy refusal as a
+    console error, which the `page` fixture here does collect and does fail on.
+    So `ui.assert_clean()` would have caught this the first time any test
+    restored a design holding a picture.  None ever did.  That is the hole this
+    test fills, and it is why the assertions below are functional: a test that
+    leaned only on the error capture would pass again the moment the failure
+    became quiet.  Relatedly, the policy's own test
+    (`test_resource_limits.py::test_the_content_policy_still_allows_what_the_page
+    _actually_loads`) enumerates the directives by hand, and a list of what
+    someone remembered is not a check on what the page does.
+
+    Both upload kinds run because they take different paths back in: a PNG is
+    decoded straight to a raster, while an SVG is re-rasterised through an
+    object URL, so a decoder that only handled one would still lose half the
+    designs.
+    """
+    upload = ({"name": "logo.png", "mimeType": "image/png", "buffer": logo_png}
+              if kind == "png" else
+              {"name": "logo.svg", "mimeType": "image/svg+xml", "buffer": logo_svg})
+
+    ui.show_panel("art")
+    ui.page.set_input_files("#artfile", files=[upload], timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+    saved = ui.js("() => JSON.parse(JSON.stringify(designJSON()))")
+    assert saved["art"] and saved["art"][0].get("srcData"), (
+        "the design was saved without the picture's bytes, so this test would "
+        "be asserting that nothing comes back from nothing")
+
+    outcome = ui.page.evaluate(
+        """async (d) => {
+            try { await restoreDesign(d); return {ok: true}; }
+            catch (e) { return {ok: false, err: String(e)}; }
+        }""", saved)
+
+    # Asserted before any wait on the restored state: a wait first turns a clean
+    # "the restore threw" into a timeout on an unrelated predicate, which is a
+    # slower failure that names the wrong thing.
+    assert outcome["ok"], (
+        f"restoring a design that holds one {kind.upper()} threw "
+        f"{outcome.get('err')!r}; every artwork layer in it is gone and the "
+        "user is looking at an empty board")
+    ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+    # The layer has to arrive usable, not merely counted: the drawing and the
+    # download both read `img`, so a layer without one is a layer in name only.
+    assert ui.js("() => !!(state.art[0].img && state.art[0].img.width > 0)"), (
+        "the artwork layer came back with no decoded image behind it")
+    after = ui.js("() => JSON.parse(JSON.stringify(designJSON()))")
+    assert after["art"][0]["srcData"] == saved["art"][0]["srcData"], (
+        "the restored layer carries different bytes than were saved, so the "
+        "next save would drift further from the picture the user uploaded")
+    ui.assert_clean(f"restore a design holding one {kind}")
+
+
+# ---------------------------------------------------------------------------
+# design files: saving work to a file and opening it again
+# ---------------------------------------------------------------------------
+#: What a design file must announce about itself before the loader trusts a byte
+#: of it. Stated here, not imported from the page: a check that reads the same
+#: constants the code reads cannot notice them changing, and a file written by
+#: today's build has to stay readable by tomorrow's.
+DESIGN_FILE_FORMAT = "minibadge-design"
+DESIGN_FILE_VERSION = 2
+
+
+def _design_file(pg) -> str:
+    """The text `⬇ Save design` would write, without going near the filesystem."""
+    return pg.evaluate("() => designFileText()")
+
+
+def _download(page, *, kicad=False, gerbers=False, design=False):
+    """Open the one Download button's picker, tick exactly these, download.
+
+    Every test that used to click Download and get a zip comes through here: the
+    button opens a picker now, and the default ticks (board + design file) would
+    otherwise hand the test a bundle under a different name.
+    """
+    page.click("#download", timeout=ELEMENT_TIMEOUT)
+    page.wait_for_selector("#dlbox.open", timeout=CONTROL_TIMEOUT)
+    for key, want in (("kicad", kicad), ("gerbers", gerbers), ("design", design)):
+        box = page.locator(f"#dl-{key}")
+        if box.is_checked() != want:
+            box.click(timeout=CONTROL_TIMEOUT)
+    with page.expect_download(timeout=GENERATE_TIMEOUT) as caught:
+        page.click("#dlgo", timeout=ELEMENT_TIMEOUT)
+    return caught.value
+
+
+def _save_design(page, *, kicad=False, gerbers=False):
+    """Download through the picker with the design file ticked; return the file.
+
+    Saving is no longer a button of its own -- it is a tick inside the one
+    Download button -- so every test that used to click Save comes through here.
+    """
+    return _download(page, kicad=kicad, gerbers=gerbers, design=True)
+
+
+def _open_design(pg, text, name="d.minibadge.json", *, clean=True):
+    """Hand `loadDesignFile` a file and return its outcome, never hanging.
+
+    `clean` clears `dirty` first, the way saving does. A load with unsaved work
+    on screen stops to ask, and a test that did not expect the question would
+    wait on a dialog nobody clicks -- which is the one thing this file forbids
+    (see the module docstring). The question has its own test.
+
+    The in-page race is the second half of that promise: if a load ever fails to
+    settle again, this fails in five seconds with a message, instead of stopping
+    the suite for as long as pytest is willing to wait.
+    """
+    return pg.evaluate(
+        """async (arg) => {
+            if (arg.clean) dirty = false;
+            const f = new File([arg.text], arg.name, {type: 'application/json'});
+            return await Promise.race([
+                loadDesignFile(f),
+                new Promise(r => setTimeout(
+                    () => r({error: 'HUNG: loadDesignFile never settled'}), 5000)),
+            ]);
+        }""",
+        {"text": text if isinstance(text, str) else json.dumps(text),
+         "name": name, "clean": clean})
+
+
+def _write_design(tmp_path, doc, name="d.minibadge.json"):
+    path = tmp_path / name
+    path.write_text(json.dumps(doc))
+    return str(path)
+
+
+_UPLOADS_AND_BOARD = """async () => {
+    const fd = designFormData();
+    const files = [];
+    for (const [k, v] of fd.entries()) {
+        if (!(v instanceof File)) continue;
+        const d = await crypto.subtle.digest('SHA-256', await v.arrayBuffer());
+        files.push([k, v.name, v.size, [...new Uint8Array(d)]
+            .map(b => b.toString(16).padStart(2, '0')).join('')]);
+    }
+    const r = await fetch('/generate', {method: 'POST', body: designFormData()});
+    if (!r.ok) return {files, error: (await r.json()).error};
+    const raw = new Uint8Array(await r.arrayBuffer());
+    let b64 = '';
+    for (let i = 0; i < raw.length; i += 0x8000) {
+        b64 += String.fromCharCode(...raw.subarray(i, i + 0x8000));
+    }
+    return {files, zip: btoa(b64)};
+}"""
+
+
+def _uploads_and_board(pg):
+    """What the user is actually handed: every uploaded byte, and the board.
+
+    Not a comparison of two JSON blobs -- a design file is allowed to be
+    canonicalised on the way through (absent fields becoming their defaults),
+    and a test that failed on that would be measuring the format's tidiness
+    rather than the promise.  The promise is that the BOARD does not change, so
+    the zip is compared entry by entry.  Entry contents rather than the zip's
+    own bytes, because the archive carries mtimes.
+    """
+    got = pg.evaluate(_UPLOADS_AND_BOARD)
+    assert "error" not in got, (
+        f"the design would not build, so this test cannot compare boards: "
+        f"{got.get('error')}")
+    zf = zipfile.ZipFile(io.BytesIO(base64.b64decode(got["zip"])))
+    return {
+        "files": got["files"],
+        "board": {n: hashlib.sha256(zf.read(n)).hexdigest()
+                  for n in sorted(zf.namelist()) if not n.endswith("/")},
+    }
+
+
+@pytest.mark.browser
+def test_a_saved_design_file_reopens_as_the_same_board(ui, logo, tmp_path):
+    """Work saved to a file and opened later builds the same board.
+
+    Before this existed the only way to keep a design was the browser's own
+    autosave, which one tab can hold at a time and any cleared site data
+    removes; the KiCad zip the app offers is a board, not a design -- no art
+    layers, no text objects, no uploaded pictures -- so it cannot be reopened
+    to keep working, and the app told users it could.
+
+    The assertion is deliberately not "the two files match".  A file is free to
+    be canonicalised on the way through; what the user is promised is that the
+    BOARD does not change, so what is compared is the generator's whole input:
+    the params string and a digest of every uploaded byte.  Measured on this
+    design, the zip that comes out is identical file for file.
+    """
+    ui.show_panel("art")
+    ui.page.set_input_files("#artfile", files=[logo], timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+    ui.js("""() => {
+        $('name').value = 'keepsake';
+        state.mask = 'purple'; $('mask').value = 'purple';
+        state.finish = 'hasl'; $('finish').value = 'hasl';
+        state.pins = ['2', '7', '9', '15'];
+        state.texts = [{x: 10.16, y: 16.4, text: 'made by half', size: 1.6,
+                        side: 'back', font: 'blackops', material: 'copper', rot: 14}];
+        ensureFont('blackops');
+        renderPinGrid(); renderTextList(); renderArtList(); draw();
+    }""")
+    ui.page.wait_for_timeout(400)
+    before = _uploads_and_board(ui.page)
+
+    download = _save_design(ui.page)
+    assert download.suggested_filename == "keepsake.minibadge.json", (
+        f"the design saved as {download.suggested_filename!r}; a design and the "
+        "board zip beside it have to arrive under the same name or a folder of "
+        "them cannot be told apart")
+    saved = tmp_path / download.suggested_filename
+    download.save_as(str(saved))
+    doc = json.loads(saved.read_text())
+    assert doc.get("$format") == DESIGN_FILE_FORMAT, (
+        "the file does not identify itself, so no loader can tell it from any "
+        f"other JSON: {list(doc)[:6]}")
+    assert doc.get("formatVersion") == DESIGN_FILE_VERSION, (
+        f"saved as format {doc.get('formatVersion')!r}, expected "
+        f"{DESIGN_FILE_VERSION}; a file with no version it can be migrated from "
+        "is a file that stops opening the next time the schema moves")
+
+    fresh = ui.page.context.new_page()
+    try:
+        fresh.goto(ui.page.url, timeout=LOAD_TIMEOUT)
+        fresh.wait_for_function("() => ready === true", timeout=LOAD_TIMEOUT)
+        fresh.evaluate("""() => {
+            const bar = document.getElementById('restorebar');
+            if (bar) bar.remove(); // the autosave's offer is not what is under test
+        }""")
+        fresh.set_input_files("#designfile", str(saved), timeout=ELEMENT_TIMEOUT)
+        fresh.wait_for_function("() => state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+        fresh.wait_for_timeout(600)
+        after = _uploads_and_board(fresh)
+    finally:
+        fresh.close()
+
+    assert after["files"] == before["files"], (
+        "the pictures the board is built from changed across a save and open:\n"
+        f"  before {before['files']}\n  after  {after['files']}")
+    changed = [n for n in set(before["board"]) | set(after["board"])
+               if before["board"].get(n) != after["board"].get(n)]
+    assert not changed, (
+        f"reopening the saved design builds a different board: {changed} differ "
+        "inside the zip. What the user gets back is not what they saved")
+    ui.assert_clean("save a design file and open it again")
+
+
+@pytest.mark.browser
+def test_a_saved_design_file_reopens_byte_for_byte(ui, tmp_path):
+    """A design that has been opened once saves the same bytes every time after.
+
+    A format that drifts on every trip through the app cannot be trusted with a
+    year-old file: each open would add or lose a little and nobody could tell a
+    real change from the format breathing.
+
+    The comparison starts at the SECOND save on purpose.  The first one is
+    written straight from the editor, where a field the user never touched is
+    simply absent; the loader fills those in with the defaults the app was
+    already behaving as if they had (`clk: false`, `nodes: []`).  So the first
+    save canonicalises, and every save after it is a fixed point -- which is the
+    property that matters, because from then on any difference is a real one.
+    """
+    ui.show_panel("text")
+    ui.page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    ui.page.locator("#textlist .item input.tx").first.fill("fixed point")
+    ui.js("""() => {
+        state.leds.push({x: 13.5, y: 12.5, color: 'green', side: 'back', rot: 270,
+                         layout: 'stacked', size: '0603', reverse: false,
+                         novia: false, farled: false, clk: false, adv: null});
+        state.art.push({kind: 'star', material: 'glow', side: 'front',
+                        fname: 'Star', cx: 6, cy: 6, wmm: 4, h: 4, rot: 30,
+                        sides: 5, mode: 'threshold', threshold: 128,
+                        invert: false, flip: false, palette: [], overrides: [],
+                        caches: null, empty: false});
+        renderLedList(); renderArtList(); draw();
+    }""")
+    ui.page.wait_for_timeout(300)
+
+    # one pass through the loader to canonicalise, then the two saves compared
+    assert _open_design(ui.page, _design_file(ui.page), "fp.minibadge.json").get("ok"), (
+        "the app would not reopen the file it had just written")
+    ui.wait_state("state.texts.length === 1", timeout=UPLOAD_TIMEOUT)
+    ui.page.wait_for_timeout(400)
+    second = _design_file(ui.page)
+    assert _open_design(ui.page, second, "fp2.minibadge.json").get("ok"), (
+        "a canonical design file would not reopen")
+    ui.page.wait_for_timeout(400)
+    third = _design_file(ui.page)
+
+    # savedAt differs by design; the design itself must not.
+    a, b = json.loads(second)["design"], json.loads(third)["design"]
+    drift = [k for k in set(a) | set(b) if a.get(k) != b.get(k)]
+    assert not drift, (
+        f"a design changed just by being opened and saved again: {drift}. "
+        f"before={ {k: a.get(k) for k in drift} } after={ {k: b.get(k) for k in drift} }")
+    ui.assert_clean("open and re-save a design file")
+
+
+#: Files that are not designs, or are designs with something unusable in them.
+#: Every one of these used to do damage: the first four silently wiped the open
+#: design and reported success, the null members wedged the editor permanently
+#: (`draw()` threw on `t.text.trim()` from then on, so the canvas stopped
+#: updating and only a reload recovered), and the unreadable-picture cases hung
+#: forever because the image loader's error path never called its callback.
+_BAD_FILES = [
+    ("truncated-json", '{"$format": "minibadge-design", "formatVersion": 2, "des'),
+    ("bare-number", "42"),
+    ("bare-array", "[]"),
+    ("bare-string", '"hello"'),
+    ("empty-object", "{}"),
+    ("no-format-tag", '{"formatVersion": 2, "design": {"name": "x"}}'),
+    ("wrong-format-tag", '{"$format": "something-else", "formatVersion": 2, "design": {}}'),
+    ("design-not-an-object", '{"$format": "minibadge-design", "formatVersion": 2, "design": 5}'),
+    ("no-version", '{"$format": "minibadge-design", "design": {"name": "x"}}'),
+    ("picture-is-not-a-picture", '{"$format": "minibadge-design", "formatVersion": 2,'
+     ' "design": {"art": [{"kind": "image", "fname": "bad.png",'
+     ' "srcData": "data:image/png;base64,bm90IGFuIGltYWdlIGF0IGFsbA=="}]}}'),
+    ("data-url-with-no-comma", '{"$format": "minibadge-design", "formatVersion": 2,'
+     ' "design": {"art": [{"kind": "image", "fname": "x.png",'
+     ' "srcData": "data:image/png;base64"}]}}'),
+]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("label,text", _BAD_FILES, ids=[c[0] for c in _BAD_FILES])
+def test_a_design_file_that_cannot_be_opened_leaves_the_open_design_alone(
+        ui, tmp_path, label, text):
+    """Trying a file is safe: if it cannot be opened, nothing on screen moves.
+
+    That is the whole reason a load is worth having.  Without it the only way to
+    find out whether a file is a design is to lose the design you already had --
+    and losing it was silent: a file that parsed as `42` cleared the board and
+    the status line said the load had succeeded.
+
+    Four things are asserted, and the last is the one that catches the worst of
+    them: the editor still WORKS afterwards.  A design carrying `text: null` used
+    to leave every later `draw()` throwing, so the canvas froze mid-session with
+    no message and no way back but a reload.
+    """
+    ui.show_panel("text")
+    ui.page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    ui.page.locator("#textlist .item input.tx").first.fill("KEEP ME")
+    ui.page.wait_for_timeout(250)
+    before = ui.js("() => JSON.stringify(designJSON())")
+
+    outcome = _open_design(ui.page, text, "bad.minibadge.json")
+
+    assert not outcome.get("ok"), (
+        f"{label}: the app accepted a file that is not a design it can open")
+    assert outcome.get("error"), (
+        f"{label}: the load failed and said nothing; the user is left looking at "
+        "a board that did not change with no idea why")
+    assert ui.js("() => JSON.stringify(designJSON())") == before, (
+        f"{label}: the open design changed even though the file was refused. "
+        "Trying a file must never cost the user the work they already had")
+    still_works = ui.js("""() => {
+        try {
+            draw(); renderTextList(); renderArtList(); renderLedList();
+            renderShapeOpts(); blockingProblems(); designFormData();
+            return true;
+        } catch (e) { return String(e); }
+    }""")
+    assert still_works is True, (
+        f"{label}: the editor is wedged after the refusal -- {still_works}. "
+        "Every later frame throws, so the canvas stops updating and only a "
+        "reload recovers")
+    ui.assert_clean(f"refuse a {label} design file")
+
+
+@pytest.mark.browser
+def test_a_design_file_from_a_newer_designer_is_refused_by_name(ui, tmp_path):
+    """A file from a build we do not understand is refused whole, and says so.
+
+    Loading the parts today's build happens to recognise would silently discard
+    whatever the newer one added: the user would be editing a partial copy of
+    their own design without being told which parts survived.
+    """
+    doc = {"$format": DESIGN_FILE_FORMAT, "formatVersion": DESIGN_FILE_VERSION + 1,
+           "design": {"name": "from-the-future", "texts": []}}
+    before = ui.js("() => JSON.stringify(designJSON())")
+    outcome = _open_design(ui.page, doc, "future.minibadge.json")
+    assert not outcome.get("ok"), "a design from a newer build was opened anyway"
+    assert re.search(r"newer version", outcome["error"]), (
+        f"the refusal does not say the file is from a newer build: {outcome['error']!r}")
+    assert str(DESIGN_FILE_VERSION + 1) in outcome["error"], (
+        f"the refusal does not name the format it could not read: {outcome['error']!r}")
+    assert ui.js("() => JSON.stringify(designJSON())") == before
+    ui.assert_clean("refuse a design file from a newer build")
+
+
+#: Designs as three earlier builds of this app wrote them, and what each one has
+#: to become. Expectations are stated here, independently of MIGRATIONS: a check
+#: that read the migration table could not notice the table being wrong.
+_OLD_SCHEMAS = [
+    # Before per-pin control, a design stored which ROWS were kept; a row means
+    # both of its corner pairs.
+    ("rows-not-pins", {"rows": {"top": True, "bottom": False}},
+     lambda ui: ui.js("() => state.pins") == ["1", "2", "7", "8"]),
+    # "reverse" used to be a layout; it is now a flag on top of "stacked", and it
+    # forces the 1206 footprint because the hole needs that pad spacing.
+    ("reverse-as-a-layout",
+     {"leds": [{"x": 10.16, "y": 10.16, "color": "red", "layout": "reverse",
+                "size": "1206"}]},
+     lambda ui: ui.js("() => [state.leds[0].layout, state.leds[0].reverse]")
+                == ["stacked", True]),
+    # The square/custom dropdown is gone. A design set to "square" could still be
+    # carrying outline parts that were invisible on screen; honour what the save
+    # showed, not what it stored.
+    ("square-with-stranded-parts",
+     {"shape": {"mode": "square", "smooth": 0.12,
+                "elements": [{"kind": "circle", "op": "add", "cx": 10, "cy": 10,
+                              "w": 8, "h": 8, "rot": 0}]}},
+     lambda ui: ui.js("() => state.shape.elements.length") == 0),
+]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("label,design,check", _OLD_SCHEMAS,
+                         ids=[c[0] for c in _OLD_SCHEMAS])
+def test_a_design_saved_by_an_older_build_opens_the_way_it_looked(
+        ui, label, design, check):
+    """A design from an earlier schema opens as the board it was, not as junk.
+
+    Three schema changes have already happened, and every one of them was
+    handled by sniffing the saved shape -- with the version field stamped `1`
+    throughout, so `1` in the wild means any of three layouts.  That cannot be
+    undone; what it can be is the last time.  These cases pin the three
+    migrations to the boards they produce, so the ladder that replaced the
+    sniffing is checked against outcomes rather than against itself.
+    """
+    doc = {"$format": DESIGN_FILE_FORMAT, "formatVersion": 1, "design": design}
+    outcome = _open_design(ui.page, doc, "old.minibadge.json")
+    assert outcome.get("ok"), (
+        f"{label}: a design from an older build would not open: {outcome}")
+    assert check(ui), (
+        f"{label}: it opened, but not as the board it was. state now: "
+        f"pins={ui.js('() => state.pins')} "
+        f"leds={ui.js('() => state.leds.map(L => [L.layout, L.reverse])')} "
+        f"parts={ui.js('() => state.shape.elements.length')}")
+    ui.assert_clean(f"open an old-schema design ({label})")
+
+
+#: Real designs carrying something the editor cannot use. These are NOT refused:
+#: a file is usually mostly good, and refusing all of it over one bad member
+#: costs the user everything. They load with what fits and say what was left out.
+#: Each one used to do damage: a null text field wedged the editor permanently,
+#: because `draw()` called `t.text.trim()` on every frame from then on.
+_SALVAGEABLE = [
+    ("texts-not-a-list", {"texts": "nope"}, "text layers"),
+    ("text-field-null", {"texts": [{"text": None, "x": 5, "y": 5}]}, None),
+    ("null-text-member", {"texts": [None, {"text": "kept", "x": 5, "y": 5}]},
+     "text layers"),
+    ("null-art-member", {"art": [None]}, "artwork layers"),
+    ("led-list-is-a-number", {"leds": 7}, "LED units"),
+]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("label,design,noted", _SALVAGEABLE,
+                         ids=[c[0] for c in _SALVAGEABLE])
+def test_a_design_file_with_an_unusable_part_loads_the_rest_and_says_so(
+        ui, label, design, noted):
+    """One bad layer costs the user that layer, not the whole file, and never
+    silence.
+
+    Silence is the failure being fixed: a file whose text list had become a
+    string used to load as a design with no text at all, reporting success, so
+    the user's only clue was the absence of something they had written.  And a
+    null in the wrong place did worse than vanish -- it left every later frame
+    throwing, so the canvas froze with no message at all.
+    """
+    doc = {"$format": DESIGN_FILE_FORMAT, "formatVersion": DESIGN_FILE_VERSION,
+           "design": design}
+    outcome = _open_design(ui.page, doc, "partial.minibadge.json")
+
+    assert outcome.get("ok"), (
+        f"{label}: a design with one unusable part was refused whole, which "
+        f"costs the user everything else in the file: {outcome}")
+    if noted:
+        assert any(noted in n for n in outcome.get("notes") or []), (
+            f"{label}: the {noted} that could not be loaded were dropped without "
+            f"a word about it; notes were {outcome.get('notes')!r}")
+    still_works = ui.js("""() => {
+        try {
+            draw(); renderTextList(); renderArtList(); renderLedList();
+            renderShapeOpts(); blockingProblems(); designFormData();
+            return true;
+        } catch (e) { return String(e); }
+    }""")
+    assert still_works is True, (
+        f"{label}: the editor is wedged after loading it -- {still_works}. Every "
+        "later frame throws, so the canvas stops updating and only a reload "
+        "recovers")
+    # And the design has to be shippable, not merely on screen.
+    assert isinstance(ui.js("() => designFormData().get('params')"), str), (
+        f"{label}: the loaded design cannot even be serialised for download")
+    ui.assert_clean(f"load a design with an unusable {label}")
+
+
+#: The app's own limits, restated. Mirrors of webapp.MAX_ART / MAX_TEXTS /
+#: MAX_LEDS and index.html's MAX_SHAPE_ELS: written literally so that raising one
+#: on either side without the other goes red here rather than shipping a preview
+#: that promises more than the zip contains.
+CAPS = {"art": 8, "texts": 24, "leds": 64, "elements": 12}
+
+
+@pytest.mark.browser
+def test_a_design_file_cannot_ask_for_more_layers_than_the_board_gets(ui):
+    """A file over the limits loads at the limits, and says what it dropped.
+
+    The server keeps the first MAX_* of each list and silently discards the rest,
+    so a file with forty artwork layers used to put forty on the canvas and eight
+    on the board: the preview promised artwork the zip never contained, which is
+    exactly the failure the "+ Image…" button refuses an over-cap layer to
+    prevent.  The load path went straight past that guard.
+    """
+    design = {
+        "art": [{"kind": "circle", "material": "silk", "cx": 5, "cy": 5, "wmm": 3}
+                for _ in range(CAPS["art"] + 32)],
+        "texts": [{"text": f"t{i}", "x": 5, "y": 5} for i in range(CAPS["texts"] + 176)],
+        "leds": [{"x": 5, "y": 5, "color": "red"} for _ in range(CAPS["leds"] + 236)],
+        "shape": {"mode": "custom", "smooth": 0.12,
+                  "elements": [{"kind": "circle", "op": "add", "cx": 10, "cy": 10,
+                                "w": 4, "h": 4} for _ in range(CAPS["elements"] + 48)]},
+    }
+    doc = {"$format": DESIGN_FILE_FORMAT, "formatVersion": DESIGN_FILE_VERSION,
+           "design": design}
+    outcome = _open_design(ui.page, doc, "greedy.minibadge.json")
+    assert outcome.get("ok"), f"an over-large design would not open at all: {outcome}"
+
+    got = ui.js("""() => ({art: state.art.length, texts: state.texts.length,
+                          leds: state.leds.length,
+                          elements: state.shape.elements.length})""")
+    assert got == CAPS, (
+        f"the editor is holding {got}, the board can carry {CAPS}. Whatever is "
+        "over the limit is dropped from the download, so the preview would be "
+        "showing work the fab never receives")
+    # The download has to agree with the canvas, which is the actual promise.
+    shipped = ui.js("""() => {
+        const p = JSON.parse(designFormData().get('params'));
+        return {art: (p.art || []).length, texts: (p.texts || []).length,
+                leds: (p.leds || []).length,
+                elements: ((p.shape || {}).elements || []).length};
+    }""")
+    assert shipped == got, (
+        f"the canvas shows {got} but the download would carry {shipped}")
+    for what in ("artwork layers", "text layers", "LED units", "board-shape parts"):
+        assert any(what in n for n in outcome["notes"]), (
+            f"nothing told the user their {what} were dropped; notes were "
+            f"{outcome['notes']!r}")
+    ui.assert_clean("load an over-large design file")
+
+
+@pytest.mark.browser
+def test_opening_a_second_design_while_the_first_is_still_loading_keeps_only_the_second(
+        ui, logo):
+    """Two loads at once end as the second design, not a mixture of both.
+
+    Measured before the loader was split in two: the final design carried the
+    second file's name and mask with FOUR artwork layers -- one from it and three
+    from the first -- in scrambled order, and both loads reported success.  The
+    old restore mutated `state` between its awaits, so any two runs interleaved.
+    Nobody would author that on purpose, but a double-click on Open is enough.
+    """
+    ui.show_panel("art")
+    ui.page.set_input_files("#artfile", files=[logo], timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+    heavy = json.loads(_design_file(ui.page))          # carries a real picture
+    heavy["design"]["name"] = "FIRST"
+    light = {"$format": DESIGN_FILE_FORMAT, "formatVersion": DESIGN_FILE_VERSION,
+             "design": {"name": "SECOND", "mask": "red", "art": [],
+                        "texts": [{"text": "second", "x": 5, "y": 5}]}}
+
+    result = ui.page.evaluate(
+        """async (arg) => {
+            dirty = false;
+            const mk = d => new File([JSON.stringify(d)], 'x.minibadge.json',
+                                     {type: 'application/json'});
+            // deliberately not awaited in order: both in flight at once
+            const a = loadDesignFile(mk(arg.first));
+            const b = loadDesignFile(mk(arg.second));
+            const [ra, rb] = await Promise.all([a, b]);
+            return {first: ra, second: rb, name: $('name').value,
+                    mask: state.mask, art: state.art.length,
+                    texts: state.texts.map(t => t.text)};
+        }""", {"first": heavy, "second": light})
+
+    assert result["name"] == "SECOND" and result["mask"] == "red", (
+        f"the design that won is {result['name']}/{result['mask']}, not the one "
+        "opened last")
+    assert result["art"] == 0 and result["texts"] == ["second"], (
+        f"the two files merged: {result['art']} artwork layers and texts "
+        f"{result['texts']} is neither file on its own")
+    assert not result["first"].get("ok"), (
+        "both loads reported success, so nothing in the app knows which design "
+        "is on screen")
+    ui.assert_clean("two design files opened at once")
+
+
+@pytest.mark.browser
+def test_a_crafted_colour_in_a_design_file_cannot_reach_the_art_panel_as_markup(
+        ui, logo):
+    """A palette colour out of a design file is three numbers, never markup.
+
+    Those numbers are interpolated into a `style` attribute inside an innerHTML
+    template, and `cssRGB`'s own comment says why it clamps them: "the first
+    'load a design file' or share-link feature would make a crafted rgb entry
+    able to close the attribute and add an event handler."  This is that feature.
+    The guard was written in advance; this is the test it asked for.
+    """
+    ui.show_panel("art")
+    ui.page.set_input_files("#artfile", files=[logo], timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+    doc = json.loads(_design_file(ui.page))
+    doc["design"]["art"][0]["mode"] = "palette"
+    doc["design"]["art"][0]["palette"] = [
+        {"rgb": ['255); background:url("javascript:alert(1)"', 0, 0], "material": "silk"},
+        {"rgb": ['0,0,0)" onmouseover="alert(1)', 1, 2], "material": "copper"},
+    ]
+    assert _open_design(ui.page, doc, "xss.minibadge.json").get("ok"), (
+        "the crafted design would not open, so this test proves nothing about "
+        "what happens when it does")
+
+    checked = ui.js("""() => {
+        renderArtList();
+        const panel = document.getElementById('artlist');
+        const chips = [...panel.querySelectorAll('.chip')];
+        return {
+            rgb: state.art[0].palette.map(q => q.rgb),
+            styles: chips.map(c => c.getAttribute('style')),
+            handlers: chips.filter(c => c.getAttributeNames()
+                .some(n => n.startsWith('on'))).length,
+            markup: /onmouseover|javascript:/i.test(panel.innerHTML),
+        };
+    }""")
+    # Both crafted entries have to still be there: a palette that was dropped
+    # entirely would satisfy every check below without proving anything, and
+    # "the swatches vanished" is not the guarantee being tested.
+    assert len(checked["rgb"]) == 2 and len(checked["styles"]) == 2, (
+        f"expected the two crafted swatches to load and render; got "
+        f"{len(checked['rgb'])} colours and {len(checked['styles'])} swatches, so "
+        "the clamp below was never exercised")
+    assert all(all(isinstance(v, int) and 0 <= v <= 255 for v in rgb)
+               for rgb in checked["rgb"]), (
+        f"a palette colour survived as something other than three bytes: {checked['rgb']}")
+    for style in checked["styles"]:
+        assert re.fullmatch(r"background:rgb\(\d{1,3},\d{1,3},\d{1,3}\)", style or ""), (
+            f"a swatch's style attribute is not a plain colour: {style!r}")
+    assert checked["handlers"] == 0, "a swatch came out of the file with an event handler"
+    assert not checked["markup"], (
+        "the art panel's markup contains script the design file put there")
+    ui.assert_clean("open a design file with a crafted palette colour")
+
+
+@pytest.mark.browser
+def test_the_zip_download_no_longer_claims_to_have_saved_the_design(ui):
+    """Only saving a design file clears the unsaved-work warning.
+
+    The KiCad zip holds a board: no art layers, no text objects, no uploaded
+    pictures.  It cannot be reopened to keep working, so treating a zip download
+    as "saved" armed the close-tab prompt to stay quiet on work that only existed
+    on screen.  A design file really does hold the design, so that is what clears
+    it.
+    """
+    ui.show_panel("text")
+    ui.page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    ui.page.locator("#textlist .item input.tx").first.fill("unsaved")
+    ui.page.wait_for_timeout(250)
+    assert ui.js("() => dirty") is True, (
+        "typing into a text layer did not mark the design unsaved, so the rest "
+        "of this test would prove nothing")
+
+    zipped = ui.page.evaluate(
+        """async () => {
+            const r = await fetch('/generate', {method: 'POST', body: designFormData()});
+            if (r.ok) await r.arrayBuffer();
+            return r.ok;
+        }""")
+    assert zipped, "the board would not generate, so the zip half is untested"
+    assert ui.js("() => dirty") is True, (
+        "generating the board cleared the unsaved-work flag. The zip contains no "
+        "design, so the next close would discard the user's work without asking")
+
+    _save_design(ui.page)
+    assert ui.js("() => dirty") is False, (
+        "saving a design file left the design marked unsaved, so the app now "
+        "warns about work that is safely in a file")
+    ui.assert_clean("zip versus design-file save")
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("answer", ["cancel", "continue"])
+def test_opening_a_file_over_unsaved_work_asks_first(ui, answer):
+    """Unsaved work is not replaced without being asked about.
+
+    Opening a design replaces the one on screen, and there is no undo for that.
+    The question only appears when there is something to lose -- work that is not
+    in a file yet -- and Cancel has to leave the board exactly as it was, because
+    a dialog whose safe answer still costs you something is worse than no dialog.
+    """
+    ui.show_panel("text")
+    ui.page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    ui.page.locator("#textlist .item input.tx").first.fill("MINE")
+    ui.page.wait_for_timeout(250)
+    assert ui.js("() => dirty") is True, "nothing unsaved, so nothing to ask about"
+    before = ui.js("() => JSON.stringify(designJSON())")
+
+    doc = {"$format": DESIGN_FILE_FORMAT, "formatVersion": DESIGN_FILE_VERSION,
+           "design": {"name": "THEIRS", "mask": "red",
+                      "texts": [{"text": "theirs", "x": 5, "y": 5}]}}
+    # Not awaited: the load is parked on the dialog until it is answered.
+    ui.page.evaluate(
+        """(doc) => {
+            window.__load = loadDesignFile(
+                new File([JSON.stringify(doc)], 'theirs.minibadge.json',
+                         {type: 'application/json'}));
+        }""", doc)
+    ui.page.wait_for_selector("#askbox.open", timeout=CONTROL_TIMEOUT)
+
+    if answer == "cancel":
+        ui.page.click("#askno", timeout=CONTROL_TIMEOUT)
+        outcome = ui.page.evaluate("() => window.__load")
+        assert outcome.get("cancelled"), f"Cancel did not cancel the load: {outcome}"
+        assert ui.js("() => JSON.stringify(designJSON())") == before, (
+            "declining the question still replaced the design; there is no undo "
+            "for that and the user said no")
+        assert ui.js("() => dirty") is True, (
+            "the work is still only on screen, so it is still unsaved")
+    else:
+        ui.page.click("#askyes", timeout=CONTROL_TIMEOUT)
+        outcome = ui.page.evaluate("() => window.__load")
+        assert outcome.get("ok"), f"accepting the question did not load the file: {outcome}"
+        assert ui.js("() => [$('name').value, state.mask, state.texts.map(t => t.text)]") \
+            == ["THEIRS", "red", ["theirs"]], "the file was accepted but not applied"
+    assert ui.page.locator("#askbox.open").count() == 0, (
+        "the dialog is still open after being answered")
+    ui.assert_clean(f"answer the replace question with {answer}")
+
+
+# ---------------------------------------------------------------------------
+# one Download button, with the pieces ticked
+# ---------------------------------------------------------------------------
+#: (ticks, what arrives). The names matter as much as the contents: a folder of
+#: these has to be tellable apart, and the fab package has to stay uploadable
+#: without being repacked, which is why it nests as its own zip rather than as a
+#: subfolder inside the bundle.
+_DOWNLOAD_CASES = [
+    ("board only", dict(kicad=True), "keeper.zip",
+     ["keeper/BOM.csv", "keeper/README.txt", "keeper/keeper.kicad_pcb",
+      "keeper/keeper.kicad_pro"]),
+    ("design only", dict(design=True), "keeper.minibadge.json", None),
+    ("board and design", dict(kicad=True, design=True), "keeper-bundle.zip",
+     ["keeper.minibadge.json", "keeper/BOM.csv", "keeper/README.txt",
+      "keeper/keeper.kicad_pcb", "keeper/keeper.kicad_pro"]),
+]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("label,ticks,fname,contents", _DOWNLOAD_CASES,
+                         ids=[c[0] for c in _DOWNLOAD_CASES])
+def test_the_download_button_delivers_exactly_what_was_ticked(
+        ui, label, ticks, fname, contents):
+    """One button, and you get the pieces you asked for -- no more, no less.
+
+    Three buttons used to live in that corner (KiCad project, Gerbers, Save
+    design) and a user had to already know which of them kept their work; two of
+    the three could not be reopened at all.  One button with three ticks says it
+    instead.  What is asserted here is the part a rearrangement breaks quietly:
+    that a tick actually changes what lands, and that one tick still gets the
+    plain artifact rather than a zip wrapped around a zip.
+    """
+    ui.js("() => { $('name').value = 'keeper'; draw(); }")
+    ui.page.wait_for_timeout(200)
+    download = _download(ui.page, **ticks)
+    assert download.suggested_filename == fname, (
+        f"{label}: arrived as {download.suggested_filename!r}, expected {fname!r}")
+    path = ui.downloads_dir / download.suggested_filename
+    download.save_as(path)
+    if contents is None:
+        doc = json.loads(path.read_text())
+        assert doc.get("$format") == DESIGN_FILE_FORMAT, (
+            f"{label}: a design file was asked for and something else arrived")
+    else:
+        with zipfile.ZipFile(path) as zf:
+            assert sorted(zf.namelist()) == contents, (
+                f"{label}: the zip holds {sorted(zf.namelist())}")
+    ui.assert_clean(f"download {label}")
+
+
+@pytest.mark.browser
+def test_the_download_picker_refuses_to_download_nothing(ui):
+    """With no piece ticked there is nothing to download, and the button says so.
+
+    Better than a click that appears to work and produces an empty zip, or a
+    request the server answers with an error the user never asked for.
+    """
+    ui.page.click("#download", timeout=ELEMENT_TIMEOUT)
+    ui.page.wait_for_selector("#dlbox.open", timeout=CONTROL_TIMEOUT)
+    for key in ("kicad", "gerbers", "design"):
+        box = ui.page.locator(f"#dl-{key}")
+        if box.is_checked():
+            box.click(timeout=CONTROL_TIMEOUT)
+    assert ui.page.locator("#dlgo").is_disabled(), (
+        "Download is still clickable with nothing selected")
+    assert "Nothing selected" in ui.page.inner_text("#dlnote"), (
+        f"the dialog does not say why: {ui.page.inner_text('#dlnote')!r}")
+    ui.page.click("#dlcancel", timeout=CONTROL_TIMEOUT)
+    assert ui.page.locator("#dlbox.open").count() == 0
+    ui.assert_clean("download picker with nothing ticked")
+
+
+@pytest.mark.browser
+def test_the_download_picker_remembers_what_was_ticked_last_time(ui):
+    """The ticks survive a reload.
+
+    Someone ordering five badges picks the same combination five times; a picker
+    that resets every visit is a picker that gets in the way. Kept in
+    localStorage, so it is per-browser and costs nothing if it is missing.
+    """
+    ui.page.click("#download", timeout=ELEMENT_TIMEOUT)
+    ui.page.wait_for_selector("#dlbox.open", timeout=CONTROL_TIMEOUT)
+    for key, want in (("kicad", False), ("gerbers", True), ("design", True)):
+        box = ui.page.locator(f"#dl-{key}")
+        if box.is_checked() != want:
+            box.click(timeout=CONTROL_TIMEOUT)
+    ui.page.click("#dlcancel", timeout=CONTROL_TIMEOUT)
+
+    ui.page.reload(timeout=LOAD_TIMEOUT)
+    ui.page.wait_for_function("() => ready === true", timeout=LOAD_TIMEOUT)
+    ui.dismiss_restore_bar()
+    ui.page.click("#download", timeout=ELEMENT_TIMEOUT)
+    ui.page.wait_for_selector("#dlbox.open", timeout=CONTROL_TIMEOUT)
+    ticked = ui.js("() => ['kicad','gerbers','design'].filter(k => $('dl-'+k).checked)")
+    assert ticked == ["gerbers", "design"], (
+        f"the picker came back with {ticked} ticked, not what was chosen last time")
+    ui.page.click("#dlcancel", timeout=CONTROL_TIMEOUT)
+    ui.assert_clean("download picker across a reload")
+
+
+@pytest.mark.browser
+def test_dropping_a_design_file_on_the_page_opens_it(ui):
+    """A design file dragged anywhere onto the page opens it.
+
+    The Open button is a small target for something the whole window can accept,
+    and dropping a file is what anyone who has used a design tool before tries
+    first. The overlay has to appear while the file is over the window and go
+    away again whether the drop happens or the drag leaves, because an overlay
+    that stays covers the app it is inviting you to use.
+    """
+    doc = {"$format": DESIGN_FILE_FORMAT, "formatVersion": DESIGN_FILE_VERSION,
+           "design": {"name": "dropped-in", "mask": "red",
+                      "texts": [{"text": "dropped", "x": 10.16, "y": 10.16}]}}
+    handle = ui.page.evaluate_handle(
+        """(arg) => {
+            const dt = new DataTransfer();
+            dt.items.add(new File([JSON.stringify(arg)], 'dropped.minibadge.json',
+                                  {type: 'application/json'}));
+            return dt;
+        }""", doc)
+    ui.page.dispatch_event("body", "dragenter", {"dataTransfer": handle})
+    assert ui.page.locator("#dropzone.on").count() == 1, (
+        "nothing showed that the page would take the file")
+    ui.page.dispatch_event("body", "dragleave", {"dataTransfer": handle})
+    assert ui.page.locator("#dropzone.on").count() == 0, (
+        "dragging the file away left the overlay covering the app")
+
+    ui.page.dispatch_event("body", "dragenter", {"dataTransfer": handle})
+    ui.page.dispatch_event("body", "drop", {"dataTransfer": handle})
+    # Waited for, then asserted: a bare wait on the state would report a drop
+    # that did nothing as a timeout on a predicate, which names the symptom
+    # rather than the failure.
+    try:
+        ui.wait_state("state.texts.length === 1 && state.texts[0].text === 'dropped'",
+                      timeout=UPLOAD_TIMEOUT)
+    except PWTimeout:
+        pass
+    assert ui.js("() => state.texts.map(t => t.text)") == ["dropped"], (
+        "dropping a design file on the page did not open it; the design on "
+        f"screen is {ui.js('() => state.texts.map(t => t.text)')}")
+    assert ui.page.locator("#dropzone.on").count() == 0, (
+        "the overlay stayed up after the drop")
+    assert ui.js("() => [$('name').value, state.mask]") == ["dropped-in", "red"], (
+        "the dropped design did not fully apply")
+    ui.assert_clean("drop a design file")
+
+
+@pytest.mark.browser
+def test_dropping_a_picture_says_where_pictures_go(ui):
+    """An image dropped on the page is not silently refused as "not a design".
+
+    Someone with a logo in hand will drop it here, and "that is not a design
+    file" would be technically true and useless: artwork and board outlines are
+    both one click away, so the refusal names them.
+    """
+    handle = ui.page.evaluate_handle(
+        """() => {
+            const dt = new DataTransfer();
+            dt.items.add(new File(['\\x89PNG not really'], 'logo.png',
+                                  {type: 'image/png'}));
+            return dt;
+        }""")
+    before = ui.js("() => JSON.stringify(designJSON())")
+    ui.page.dispatch_event("body", "dragenter", {"dataTransfer": handle})
+    ui.page.dispatch_event("body", "drop", {"dataTransfer": handle})
+    ui.wait_toast(r"is a picture, not a design file")
+    told = [t for t in ui.toast_texts() if "picture" in t][0]
+    assert "Art" in told and "Shape" in told, (
+        f"the message does not say where a picture should go: {told!r}")
+    assert ui.js("() => JSON.stringify(designJSON())") == before, (
+        "dropping a picture changed the design")
+    ui.assert_clean("drop a picture")

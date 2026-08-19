@@ -112,6 +112,15 @@ CORPUS = [
         texts=[pcb.Text(10.0, 15.0, "MINIBADGE", size=1.5),
                pcb.Text(10.0, 5.0, "back", size=1.2, side="back",
                         material="copper")])),
+    # The bottom of the size range the UI offers (webapp.TEXT_SIZE_MM), which
+    # nothing else here reaches: every other row's text is >= 1.2 mm, where the
+    # proportional stroke width is comfortably over the board rules' pen floor.
+    # 0.66 mm is the break-even -- 0.15 * 0.66 rounds to 0.099 -- so it is the
+    # size a pen that follows the height alone gets wrong first.
+    ("text-at-the-smallest-size-offered", _spec(
+        leds=[pcb.Led(6.0, 6.0, "red")], art=[],
+        texts=[pcb.Text(10.16, 15.5, "floor", size=0.6),
+               pcb.Text(10.16, 16.5, "break even", size=0.66, side="back")])),
     ("custom-outline", _spec(leds=[pcb.Led(10.0, 10.0, "red")], art=[],
                              outline=_octagon_outline())),
     # --- CLK drive: units running off the badge's blink clock ---------------
