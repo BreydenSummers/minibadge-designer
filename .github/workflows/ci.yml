@@ -69,10 +69,11 @@ jobs:
       # the 3D models did not resolve or lost their colours, which is the one
       # class of breakage that otherwise ships silently (see the Dockerfile).
       #
-      # The models stage unpacks Debian's full kicad-packages3d tree (~5 GB) to
-      # copy half a megabyte out of it, so this build is disk-hungry by hosted
-      # runner standards. If it ever fails on space rather than on the code,
-      # that stage is why.
+      # Cold every time now that the cache is not shared with the deploy host.
+      # Measured at ~80s on ubuntu-24.04, because the expensive part -- the
+      # models stage unpacking Debian's full kicad-packages3d tree to keep half
+      # a megabyte of it -- is bounded by that runner's apt mirror and disk,
+      # both of which are fast.
       - name: Build the image
         run: docker build -t "$IMAGE" .
 
@@ -82,18 +83,26 @@ jobs:
       # a green run full of skips. The browser tier is excluded: no Chromium in
       # this image, and installing one per run costs more than it is worth.
       #
-      # --user root is still needed (the editable install writes to /app and to
-      # site-packages), so the container is given nothing else: every Linux
-      # capability dropped, no way to regain privileges through setuid, and a
-      # process cap. That containment mattered more when this ran beside the
-      # website; it is kept because the test suite should be run the same way
-      # everywhere, and because it costs nothing.
+      # Runs as `badge`, the image's own unprivileged user, not as root. This
+      # used to be --user root on the theory that the editable install needs to
+      # write to /app and to site-packages -- but --cap-drop ALL takes
+      # CAP_DAC_OVERRIDE, which is the only reason uid 0 could write into a
+      # badge-owned /app in the first place, so root got a plain "Permission
+      # denied" on minibadge_designer.egg-info and the step never ran a test.
+      #
+      # As badge the two writes land where badge already has permission: /app
+      # is badge-owned (so .egg-info, .pytest_cache and .hypothesis are fine),
+      # and --user sends the dev tooling to ~/.local instead of system
+      # site-packages. That needs no capability back, so ALL stays dropped. The
+      # tooling is invoked as `python3 -m pytest` because ~/.local/bin is not
+      # on PATH.
       - name: Test suite
         run: |
-          docker run --rm --user root --workdir /app \
+          docker run --rm --user badge --workdir /app \
             --cap-drop ALL --security-opt no-new-privileges \
             --pids-limit 512 --memory 4g \
-            -e HOME=/root -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
+            -e HOME=/home/badge -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
             "$IMAGE" bash -c '
-              pip install --quiet --no-cache-dir --break-system-packages -e ".[dev]" &&
-              pytest --strict-tools -m "not visual and not browser" -q'
+              pip install --quiet --no-cache-dir --break-system-packages \
+                --user --no-warn-script-location -e ".[dev]" &&
+              python3 -m pytest --strict-tools -m "not visual and not browser" -q'
