@@ -6,6 +6,7 @@ import invariants
 import pytest
 from PIL import Image, ImageDraw
 
+from minibadge_designer import pcb as pcb_mod
 from minibadge_designer.webapp import app
 
 
@@ -956,6 +957,16 @@ def test_font_file_served_and_unknown_404(client):
     resp = client.get("/fonts/archivo.ttf")
     assert resp.status_code == 200
     assert resp.data[:4] in (b"\x00\x01\x00\x00", b"OTTO", b"true")
+    # The metrics ride beside the outlines and the editor needs BOTH: the
+    # outlines to draw with, the metrics to decide whether the text fits. A
+    # missing metrics file is not a missing decoration -- the fit check falls
+    # back to measuring the browser's own rasteriser and pads 8% per side.
+    met = client.get("/fonts/archivo.metrics.json")
+    assert met.status_code == 200
+    assert met.get_json()["chars"]["M"][0] > 0, (
+        "the served table has no advance for a capital M, so every string "
+        "measured from it collapses to nothing")
+    assert client.get("/fonts/nope.metrics.json").status_code == 404
     # send_file hands back a lazily-consumed FileWrapper. A PEP 3333 server
     # closes the WSGI iterable for you; the werkzeug test client does not, so
     # without this the TTF descriptor is finalised at some later GC point and
@@ -968,6 +979,127 @@ def test_font_file_served_and_unknown_404(client):
 def test_index_lists_fonts(client):
     page = client.get("/").data.decode()
     assert "Archivo Black" in page and "Creepster" in page
+
+
+#: How far the metrics table's box may exceed the ink text_geometry actually
+#: produces, mm.  Stated here, not imported: text_geometry ends on
+#: `simplify(0.005)`, which can drop the very vertex that reached furthest, and
+#: char_metrics rounds each extent outward by up to 0.01 font unit (1.7 um at
+#: the largest text the UI offers).  That bounds it at ~0.0085 mm and the worst
+#: case measured over the sweep below is 0.0057 mm.
+_INK_BOX_SLOP_MM = 0.015
+#: How far the ink may reach OUTSIDE that box, mm -- the direction that ships a
+#: board nobody previewed.  Structurally zero (every extent is rounded outward
+#: and the walk uses the same advances), measured 0.000000, so this is float
+#: noise money and nothing else.
+_INK_ESCAPE_MM = 0.001
+#: Strings that stress the layout rules the table has to reproduce: descenders,
+#: a face-raised digit run, blanks at both ends (the ink is centred on the INK,
+#: not the advance), a pair a rasteriser would gladly turn into one ligature
+#: glyph, and characters no bundled face carries -- text_geometry skips those
+#: with a half-em gap, which is a rule the table has to ship rather than a
+#: rule the reader of the table can guess.
+_INK_STRINGS = ["418", "gjpqy", " g ", "fi ffl", "MINIBADGE 2026!",
+                "\u0416\u0416", "A\u0416B"]
+
+
+@pytest.mark.slow  # ~2.3 s: flattens every glyph of all 12 bundled faces once
+def test_shipped_font_metrics_predict_the_ink_the_board_prints():
+    """The per-character metrics the editor is handed describe the same ink
+    text_geometry puts on the board, in every bundled face.
+
+    This is the editor's whole basis for deciding whether a text fits: it lays
+    the string out from this table and refuses the download when the box lands
+    off the board.  If the table and text_geometry disagree, the user is either
+    refused a text that had room (the 8%-of-the-width pad this replaced cost a
+    17 mm string 1.36 mm of phantom margin per side) or handed a board whose
+    silk the fab clips off while the preview looked perfect.
+
+    Bounds, not coordinates: the table's box must CONTAIN the ink and must not
+    be meaningfully bigger than it.  Both directions are checked because they
+    are different failures, and the tolerances are stated above independently of
+    anything the production code reads.
+    """
+    from minibadge_designer import textpoly
+
+    faces = sorted(textpoly.FONTS)
+    assert len(faces) > 1, (
+        "one face cannot show a per-face disagreement: the defect this guards "
+        "against was invisible in the faces whose cap ratio happens to be 0.7")
+    # Both ends of the size range the UI offers plus the ordinary middle.  Every
+    # metric here scales linearly with size, so a case that fails at one size
+    # and passes at another is the finding, not the noise.
+    cases = [(f, t, size) for f in faces for t in _INK_STRINGS
+             for size in (0.6, 1.5, 119.0)]
+    assert len(cases) > 100, (
+        f"only {len(cases)} face/string/size combinations to check; the sweep "
+        "below is the whole test, and a short one covers whichever face the "
+        "next disagreement hides in")
+    generous, escaped, inked = [], [], 0
+    for face, text, size in cases:
+        m = textpoly.char_metrics(face)
+        geom = textpoly.text_geometry(text, face, size)
+        box = _predict_ink_box(m, text, size)
+        if geom is None:
+            assert box is None, (
+                f"{face} prints nothing at all for {text!r}, yet its metrics "
+                f"claim ink at {box}; the editor would reserve board for a "
+                "glyph that never arrives")
+            continue
+        assert box is not None, (
+            f"{face} puts ink on the board for {text!r} but its metrics claim "
+            "none, so the editor sizes that text as empty and lets it sit "
+            "anywhere, including off the edge")
+        inked += 1
+        for edge, gap in zip(("left", "top", "right", "bottom"),
+                             (box[0] - geom.bounds[0], box[1] - geom.bounds[1],
+                              geom.bounds[2] - box[2], geom.bounds[3] - box[3])):
+            # gap > 0: ink outside the box.  gap < 0: box outside the ink.
+            if gap > _INK_ESCAPE_MM:
+                escaped.append((face, text, size, edge, round(gap, 6)))
+            elif -gap > _INK_BOX_SLOP_MM:
+                generous.append((face, text, size, edge, round(gap, 6)))
+
+    assert inked > 30, (
+        f"only {inked} of {len(cases)} cases put ink on the board, so the edge "
+        "comparisons above covered almost nothing")
+    assert not escaped, (
+        f"{len(escaped)} edges have ink OUTSIDE the box the editor is given, so "
+        f"that much silk is clipped away from a board whose preview looked "
+        f"right: {sorted(escaped, key=lambda r: -r[4])[:4]}")
+    assert not generous, (
+        f"{len(generous)} edges reserve board the ink never fills, which is how "
+        f"a text with room to spare gets refused: "
+        f"{sorted(generous, key=lambda r: r[4])[:4]}")
+
+
+def _predict_ink_box(metrics: dict, text: str, size_mm: float):
+    """The ink box the editor computes from a face's metrics, in mm.
+
+    A deliberate second implementation of index.html's inkRun100, kept in the
+    test so the two cannot drift silently in the same edit: it walks the string
+    one character at a time by that glyph's own advance, gives a character the
+    face cannot draw the half-em gap text_geometry gives it, and centres the
+    result on the INK.  Returns None when nothing in the string leaves ink.
+    """
+    x, x0, x1, up, down = 0.0, None, None, None, None
+    for ch in text:
+        entry = metrics["chars"].get(ch)
+        if entry is None:
+            x += metrics["miss"]
+            continue
+        if len(entry) > 1:
+            _adv, gx0, gx1, gup, gdown = entry
+            x0 = x + gx0 if x0 is None else min(x0, x + gx0)
+            x1 = x + gx1 if x1 is None else max(x1, x + gx1)
+            up = gup if up is None else max(up, gup)
+            down = gdown if down is None else max(down, gdown)
+        x += entry[0]
+    if x0 is None or not x1 > x0:
+        return None
+    k = size_mm / metrics["cap"]
+    half = (x1 - x0) * k / 2
+    return (-half, size_mm / 2 - up * k, half, size_mm / 2 + down * k)
 
 
 def test_ttf_texts_all_materials(client):
@@ -1018,6 +1150,90 @@ def test_ttf_texts_all_materials(client):
 
     g = textpoly.text_geometry("GLOW", "vt323", 2.0)
     assert g is not None
+
+
+#: The silk-to-edge budget the app holds hand-placed text to, mm, stated here
+#: independently of pcb.TEXT_EDGE_CLEAR so an edit to that constant is visible
+#: as a failure rather than absorbed silently.  It is measured, not borrowed:
+#: KiCad's own silk_edge_clearance only fires on CONTACT with Edge.Cuts (a
+#: filled silk polygon 0.001 mm inside the outline is DRC-clean under this
+#: project's rules, the same polygon touching it is not), so the number that
+#: matters is the fab's published silk-to-edge capability, 0.2-0.25 mm -- which
+#: is also the edge budget generate_project() already gives copper, the more
+#: critical of the two layers.
+_SILK_EDGE_MM = 0.2
+#: Uploaded artwork keeps a wider frame (logo.EDGE_MARGIN, 0.5 mm), because the
+#: app sizes and frames an image rather than letting the user push it about by
+#: the millimetre.  Text used to be clipped to that same frame while the editor
+#: told the user 0.2 mm was fine, so 0.3 mm of their string was quietly cut off
+#: the download.  This is the number the text clip must NOT be.
+_ART_FRAME_MM = 0.5
+
+
+@pytest.mark.parametrize("material,layer,font", [
+    ("silk", "F.SilkS", "pressstart"),
+    ("copper", "F.Mask", "pacifico"),
+])
+@pytest.mark.parametrize("side", ["front", "back"])
+def test_text_pushed_at_the_edge_keeps_the_ink_the_silk_limit_allows(
+        client, material, layer, font, side):
+    """A text placed hard against the board edge arrives clipped to the
+    silk-to-edge limit -- not to the artwork frame, and not overhanging.
+
+    Two failures live at this edge and they pull opposite ways.  Clip further in
+    than the editor's own rule and the user's string loses a slice they were
+    told would print, silently, in the file they send to the fab.  Clip further
+    out and the ink reaches the routed edge, which is the one thing KiCad's
+    silk_edge_clearance does fail the board for.
+
+    So the test brackets it: ink strictly inside the outline, and reaching the
+    stated silk-to-edge budget rather than stopping at the artwork frame.
+    """
+    import re
+
+    if side == "back":
+        layer = layer.replace("F.", "B.")
+    # 19 mm of Press Start 2P shoved 6 mm off-centre: whichever direction the
+    # face reads, this string's ink runs well past the left edge of the board.
+    params = _params(
+        name="edgy", art=[], leds=[],
+        texts=[{"x": 4.0, "y": 10.16, "text": "MINIBADGE", "size": 2.7,
+                "side": side, "font": font, "material": material}])
+    resp = client.post("/generate", data={"params": json.dumps(params)},
+                       content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.data[:200]
+    board = zipfile.ZipFile(io.BytesIO(resp.data)).read("edgy/edgy.kicad_pcb").decode()
+
+    xs = [float(m) - pcb_mod.ORIGIN
+          for blk in re.findall(
+              r"\(gr_poly \(pts (.*?)\) \(stroke[^\n]*?\(layer \"" + re.escape(layer)
+              + r"\"\)", board)
+          for m in re.findall(r"\(xy ([-\d.]+) [-\d.]+\)", blk)]
+    assert len(xs) > 20, (
+        f"only {len(xs)} vertices of {material} text landed on {layer}; there is "
+        "no clipped edge here to measure, so everything below passes vacuously")
+
+    # Bracket, not a coordinate: the surviving ink has to start inside the
+    # silk-to-edge budget (the editor refuses the user at exactly that line, so
+    # anything closer is ink the editor never promised and DRC may fail), and it
+    # has to start OUTSIDE the artwork frame (ink between the two is the slice
+    # the old clip removed without telling anyone).  Where in that 0.3 mm band a
+    # particular glyph's leftmost surviving vertex lands is up to the glyph:
+    # clipping a letter to a hairline leaves slivers the emitter drops.
+    gap = min(xs) - pcb_mod.OUTLINE[0]
+    assert gap >= _SILK_EDGE_MM - 0.001, (
+        f"{material} text ink comes within {gap:.4f} mm of the board edge on "
+        f"{layer}, inside the {_SILK_EDGE_MM} mm the editor refuses the user "
+        "at; the download is closer to the routed edge than the preview said, "
+        "and silk that touches the outline fails DRC outright")
+    # Midway between the two, so the comparison cannot be won by float noise:
+    # 0.66 - 0.16 lands a hair BELOW 0.5 in binary, which let a clip at the
+    # artwork frame pass a `gap < 0.5` written the obvious way.
+    assert gap < (_SILK_EDGE_MM + _ART_FRAME_MM) / 2, (
+        f"{material} text ink stops {gap:.4f} mm from the board edge, nearer "
+        f"the {_ART_FRAME_MM} mm artwork frame than the {_SILK_EDGE_MM} mm silk "
+        "limit the editor holds the user to: every text they push outward loses "
+        "that slice from the file they send to the fab, silently")
 
 
 def test_unknown_font_key_falls_back_to_stroke(client):
@@ -1483,7 +1699,7 @@ def test_the_via_keeps_its_mask_cap_only_while_the_board_is_tented(client, tenti
 def test_texts_pass_through_and_sanitize(client):
     texts = [
         {"x": 10, "y": 4, "text": "front text", "size": 2.0},
-        {"x": 10, "y": 15, "text": "back\x00 text", "size": 99, "side": "back"},
+        {"x": 10, "y": 15, "text": "back\x00 text", "size": 5000, "side": "back"},
         {"x": 10, "y": 10, "text": "   "},
     ]
     resp = client.post(
@@ -1495,7 +1711,7 @@ def test_texts_pass_through_and_sanitize(client):
     board = zf.read("texty/texty.kicad_pcb").decode()
     assert '(gr_text "front text"' in board
     assert '(gr_text "back text"' in board  # control char stripped
-    assert "(size 6 6)" in board            # size clamped to 6 mm
+    assert "(size 119 119)" in board        # size clamped to TEXT_SIZE_MM's ceiling
     assert board.count("gr_text") == 2      # whitespace-only text dropped
 
 

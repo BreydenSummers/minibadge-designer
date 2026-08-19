@@ -9,7 +9,7 @@ import re
 import time
 import zipfile
 
-from flask import Flask, render_template, request, send_file
+from flask import Flask, jsonify, render_template, request, send_file
 from PIL import Image
 from shapely.errors import ShapelyError
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -29,6 +29,15 @@ MAX_UPLOAD = 24 * 1024 * 1024
 MAX_LEDS = 64   # generous: custom outlines can reach ~120 mm across
 MAX_TEXTS = 24
 MAX_ART = 8
+
+#: Cap height a text layer may ask for, in mm. The floor is the board rules'
+#: own ``min_text_height`` (see pcb.generate_project): the stroke font's
+#: printed pin captions already live there, and anything shorter would fail
+#: the DRC the downloads promise to pass. The ceiling matches an art layer's
+#: width -- absurd on a 20 mm square, but a custom outline can be ~120 mm
+#: across, and text that hangs off the board is already caught (and blocked)
+#: as a fab-clip problem rather than silently shrunk here.
+TEXT_SIZE_MM = (0.6, 119.0)
 
 #: Soldermask colors the fabs (and the UI's picker) actually offer. The value
 #: is interpolated straight into the KiCad stackup, so anything outside this
@@ -646,20 +655,28 @@ class _OutsideKeepout:
         return not self._prep.contains(Point(px, py))
 
 
-def _clip_art_geom(geom, keepouts: list, board: tuple[float, float, float, float]):
+def _clip_art_geom(geom, keepouts: list, board: tuple[float, float, float, float],
+                   margin: float = EDGE_MARGIN):
     """Apply the pixel keepouts to exact vector art as true set operations.
 
     The raster path drops pixels whose centers land in a keepout; here the
     same regions are subtracted geometrically, so SVG art is carved with
     exact edges instead of pixel bites.
+
+    `margin` is how far inside `board` the geometry is allowed to reach.
+    Uploaded artwork keeps EDGE_MARGIN, the frame the app sizes it into; text
+    is hand-placed and asks for pcb.TEXT_EDGE_CLEAR instead, which is the real
+    silk-to-edge limit rather than an artwork frame. Whatever is clipped here
+    is ink the board never gets, so the editor's own fits-on-the-board check
+    has to use the same number (index.html: textEdgeClear).
     """
     from shapely.geometry import Point
     from shapely.geometry import box as sbox
     from shapely.ops import unary_union
 
     g = geom.intersection(
-        sbox(board[0] + EDGE_MARGIN, board[1] + EDGE_MARGIN,
-             board[2] - EDGE_MARGIN, board[3] - EDGE_MARGIN)
+        sbox(board[0] + margin, board[1] + margin,
+             board[2] - margin, board[3] - margin)
     )
     cuts = []
     for k in keepouts:
@@ -1268,8 +1285,15 @@ def _shape_uploads() -> tuple[dict, dict]:
 
 @app.get("/")
 def index():
-    fonts = [{"key": k, "label": v[0]} for k, v in textpoly.FONTS.items()]
-    return render_template("index.html", fonts=fonts)
+    # `cap` rides along so the canvas preview can size each face the way the
+    # board does; without it the preview picks its own scale per font and both
+    # what the user sees and the fits-on-the-board check are wrong.
+    fonts = [{"key": k, "label": v[0], "cap": round(textpoly.cap_ratio(k), 5)}
+             for k, v in textpoly.FONTS.items()]
+    # The app's own version rides into every saved design file, so a bug report
+    # can say which build wrote it.
+    from . import __version__
+    return render_template("index.html", fonts=fonts, app_version=__version__)
 
 
 @app.get("/fonts/<key>.ttf")
@@ -1278,6 +1302,23 @@ def font_file(key: str):
     if not meta:
         return {"error": "unknown font"}, 404
     return send_file(textpoly.FONT_DIR / meta[1], mimetype="font/ttf", max_age=86400)
+
+
+@app.get("/fonts/<key>.metrics.json")
+def font_metrics(key: str):
+    """Per-character ink metrics for one face (see textpoly.char_metrics).
+
+    Fetched beside the .ttf, by the same lazy ensureFont() that loads the face
+    for the canvas, and cached as long: it is derived from a file that only
+    changes when the app is redeployed. With it the editor computes the exact
+    ink box text_geometry will produce, instead of measuring the browser's own
+    rasteriser and padding 8% per side to cover the two disagreeing.
+    """
+    if key not in textpoly.FONTS:
+        return {"error": "unknown font"}, 404
+    resp = jsonify(textpoly.char_metrics(key))
+    resp.cache_control.max_age = 86400
+    return resp
 
 
 @app.post("/outline")
@@ -1589,6 +1630,13 @@ def gerbers():
     return _generate_impl(render="gerbers")
 
 
+# POST /bundle is what the editor's one Download button asks for: the same board
+# generation as /generate, packaged according to the `include` field.
+@app.post("/bundle")
+def bundle():
+    return _generate_impl(render="bundle")
+
+
 _FAB_LAYERS = "F.Cu,B.Cu,F.Paste,B.Paste,F.SilkS,B.SilkS,F.Mask,B.Mask,Edge.Cuts"
 
 # One file per plotted layer plus the drill file. Presence is judged by
@@ -1600,6 +1648,31 @@ _FAB_EXTENSIONS = {"gtl", "gbl", "gtp", "gbp", "gto", "gbo", "gts", "gbs",
 
 
 def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
+    """The fab package as its own download: flat, ready to upload as-is."""
+    plotted = _plot_gerbers(spec, slug)
+    if isinstance(plotted, tuple):
+        return plotted  # (error dict, status)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in plotted.items():
+            # Flat, no folder: board-house upload forms expect the layers
+            # at the top of the archive.
+            zf.writestr(name, data)
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{slug}-gerbers.zip",
+    )
+
+
+def _plot_gerbers(spec: "pcb.BadgeSpec", slug: str):
+    """{filename: bytes} for the whole fab package, or (error, status).
+
+    Split out from the download so a combined download can carry the same
+    package without plotting it twice or re-parsing a zip it just built.
+    """
     import pathlib
     import subprocess
     import tempfile
@@ -1654,19 +1727,9 @@ def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
             note = note.strip().splitlines()
             return {"error": "KiCad could not plot this board"
                              + (f": {note[-1][:200]}" if note else "")}, 500
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for p in files:
-                # Flat, no folder: board-house upload forms expect the layers
-                # at the top of the archive.
-                zf.writestr(p.name, p.read_bytes())
-    buf.seek(0)
-    return send_file(
-        buf,
-        mimetype="application/zip",
-        as_attachment=True,
-        download_name=f"{slug}-gerbers.zip",
-    )
+        # Read inside the TemporaryDirectory: the caller gets bytes, not paths
+        # into a directory that is about to be removed.
+        return {p.name: p.read_bytes() for p in files}
 
 
 def _generate_impl(render: bool):
@@ -2036,7 +2099,8 @@ def _generate_impl(render: bool):
             content = re.sub(r"[\x00-\x1f\x7f]", "", str(raw.get("text", "")))[:60]
             if not content.strip():
                 continue
-            size = min(max(float(raw.get("size", 1.5)), 0.6), 6.0)
+            size = min(max(float(raw.get("size", 1.5)), TEXT_SIZE_MM[0]),
+                       TEXT_SIZE_MM[1])
             side = "back" if raw.get("side") == "back" else "front"
             font = str(raw.get("font", "kicad"))
             if font != "kicad" and font not in textpoly.FONTS:
@@ -2249,13 +2313,13 @@ def _generate_impl(render: bool):
         parts: dict[int, list[pcb.ArtLayer]] = {}
 
         def emit(i, source, material, keepouts, board, side="front",
-                 window="through") -> object | None:
+                 window="through", margin=EDGE_MARGIN) -> object | None:
             """One material layer -> ArtLayer (+ its geometry for carving)."""
             if isinstance(source, dict):  # exact vector geometry
                 g = source.get(material)
                 if g is None:
                     return None
-                g = _clip_art_geom(g, keepouts, board)
+                g = _clip_art_geom(g, keepouts, board, margin)
                 polys = [
                     svgart.polygon_rings(p)
                     for p in svgart.geom_polygons(g)
@@ -2331,7 +2395,8 @@ def _generate_impl(render: bool):
                     emit_window(key, src, material, "through", side,
                                 carve_text=False)
                 else:
-                    made = emit(key, src, material, decor_base[side], art_board, side)
+                    made = emit(key, src, material, decor_base[side], art_board,
+                                side, margin=pcb.TEXT_EDGE_CLEAR)
                     note_opening(material, side, made)
 
         def silk_carve(base: list, side: str) -> list:
@@ -2348,7 +2413,12 @@ def _generate_impl(render: bool):
                  art_board, side=art_side)
         for key, src, side in text_entries:
             if "silk" in src:
-                emit(key, src, "silk", silk_carve(decor_base[side], side), art_board, side)
+                # Hand-placed ink gets the silk-to-edge limit, not the artwork
+                # frame: 0.5 mm used to be shaved off every text the user
+                # pushed toward the edge, silently, while the editor told them
+                # 0.2 mm was fine.
+                emit(key, src, "silk", silk_carve(decor_base[side], side), art_board,
+                     side, margin=pcb.TEXT_EDGE_CLEAR)
     except _UPLOAD_REFUSALS as exc:
         return {"error": f"artwork: {exc}"}, 400
     except _GEOMETRY_ERRORS:
@@ -2474,17 +2544,116 @@ def _generate_impl(render: bool):
         return _model_glb(spec, slug)
     if render == "gerbers":
         return _fab_gerbers(spec, slug)
+    if render == "bundle":
+        return _bundle(spec, slug)
 
+    return _kicad_zip(spec, slug)
+
+
+def _kicad_zip(spec: "pcb.BadgeSpec", slug: str):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{slug}/{slug}.kicad_pcb", pcb.generate_pcb(spec))
-        zf.writestr(f"{slug}/{slug}.kicad_pro", pcb.generate_project(slug))
-        zf.writestr(f"{slug}/BOM.csv", pcb.generate_bom(spec))
-        zf.writestr(f"{slug}/README.txt", pcb.generate_readme(spec, slug=slug))
+        for name, data in _kicad_files(spec, slug).items():
+            zf.writestr(name, data)
     buf.seek(0)
     return send_file(
         buf,
         mimetype="application/zip",
         as_attachment=True,
         download_name=f"{slug}.zip",
+    )
+
+
+def _kicad_files(spec: "pcb.BadgeSpec", slug: str) -> dict:
+    return {
+        f"{slug}/{slug}.kicad_pcb": pcb.generate_pcb(spec),
+        f"{slug}/{slug}.kicad_pro": pcb.generate_project(slug),
+        f"{slug}/BOM.csv": pcb.generate_bom(spec),
+        f"{slug}/README.txt": pcb.generate_readme(spec, slug=slug),
+    }
+
+
+#: What a single download may be asked to carry. The design file is included
+#: here rather than rebuilt: the server cannot write one, because `params` is a
+#: different shape from the editor's own design JSON and carries no picture
+#: bytes at all (they arrive as separate uploads). So the editor sends the file
+#: it would otherwise have saved and this only files it away.
+BUNDLE_PARTS = ("kicad", "gerbers", "design")
+#: A design file is JSON with pictures inlined as data URLs, so it runs about
+#: 1.4x the size of the uploads it describes. Capped separately from
+#: MAX_UPLOAD so a design file cannot be the thing that fills the request.
+MAX_DESIGN_FILE = 20 * 1024 * 1024
+
+
+def _requested_parts() -> list:
+    asked = str(request.form.get("include", "kicad")).split(",")
+    return [p for p in BUNDLE_PARTS if p in asked]
+
+
+def _bundle(spec: "pcb.BadgeSpec", slug: str):
+    """One download with every ticked piece in it.
+
+    A single tick still gets the plain artifact -- the fab package especially,
+    which board houses want flat at the top of the archive they are handed. Two
+    or more get one zip, with the fab package nested as its own zip inside so it
+    is still uploadable without being repacked.
+    """
+    parts = _requested_parts()
+    if not parts:
+        return {"error": "nothing was selected to download"}, 400
+
+    design = None
+    if "design" in parts:
+        up = request.files.get("designfile")
+        if up is None:
+            return {"error": "the design file was selected but not sent"}, 400
+        design = up.read(MAX_DESIGN_FILE + 1)
+        if len(design) > MAX_DESIGN_FILE:
+            return {"error": "that design file is too large to include; save it "
+                             "on its own instead"}, 413
+        # Never parsed for meaning and never executed -- it goes into the zip
+        # verbatim -- but it must at least BE a design file, so a bundle cannot
+        # be used to wrap arbitrary bytes in this app's name.
+        try:
+            doc = json.loads(design.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            return {"error": "the design file sent was not valid JSON"}, 400
+        if not isinstance(doc, dict) or doc.get("$format") != "minibadge-design":
+            return {"error": "the design file sent is not a minibadge design"}, 400
+
+    if len(parts) == 1:
+        if parts == ["kicad"]:
+            return _kicad_zip(spec, slug)
+        if parts == ["gerbers"]:
+            return _fab_gerbers(spec, slug)
+        return send_file(
+            io.BytesIO(design), mimetype="application/json", as_attachment=True,
+            download_name=f"{slug}.minibadge.json",
+        )
+
+    entries = {}
+    if "kicad" in parts:
+        entries.update(_kicad_files(spec, slug))
+    if "gerbers" in parts:
+        plotted = _plot_gerbers(spec, slug)
+        if isinstance(plotted, tuple):
+            return plotted
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as zf:
+            for name, data in plotted.items():
+                zf.writestr(name, data)
+        entries[f"{slug}-gerbers.zip"] = inner.getvalue()
+    if design is not None:
+        entries[f"{slug}.minibadge.json"] = design
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, data in entries.items():
+            zf.writestr(name, data)
+    buf.seek(0)
+    return send_file(
+        buf,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{slug}-bundle.zip",
     )

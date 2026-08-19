@@ -169,6 +169,40 @@
   }
   .row { display: flex; gap: 8px; }
   .row > div { flex: 1; }
+  /* Rotation dial. Angles wrap, so a slider that dead-ends at 359 is the
+     wrong shape for one: this is a circle to drag round as many turns as you
+     like, with the needle pointing where the object does (0 = up, clockwise,
+     like every angle on the board). The needle is a child rotated by --a, so
+     a drag only ever writes one custom property. */
+  .dialrow { align-items: center; gap: 10px; margin-top: 4px; }
+  .dialrow > .dial { flex: 0 0 auto; }
+  .dial {
+    width: 54px; height: 54px; border-radius: 50%; position: relative;
+    border: 1px solid var(--edge); cursor: grab; touch-action: none;
+    /* ticks at 12/3/6/9 o'clock; the one at 0 is brighter */
+    background:
+      linear-gradient(var(--dim), var(--dim)) center top / 1px 6px no-repeat,
+      linear-gradient(var(--edge), var(--edge)) center bottom / 1px 5px no-repeat,
+      linear-gradient(var(--edge), var(--edge)) left center / 5px 1px no-repeat,
+      linear-gradient(var(--edge), var(--edge)) right center / 5px 1px no-repeat,
+      var(--panel);
+  }
+  .dial:focus-visible { outline: none; border-color: var(--accent); }
+  .dial:hover { border-color: var(--accent); }
+  .dial.turning { cursor: grabbing; border-color: var(--accent); }
+  .dial::after {
+    content: ""; position: absolute; left: 50%; top: 50%; width: 5px; height: 5px;
+    margin: -2.5px 0 0 -2.5px; border-radius: 50%; background: var(--dim);
+  }
+  .dial i { position: absolute; inset: 0; transform: rotate(var(--a, 0deg)); }
+  .dial i::before {
+    content: ""; position: absolute; left: 50%; top: 9px; width: 2px; height: 18px;
+    margin-left: -1px; border-radius: 1px; background: var(--accent);
+  }
+  .dial i::after {
+    content: ""; position: absolute; left: 50%; top: 4px; width: 10px; height: 10px;
+    margin-left: -5px; border-radius: 50%; background: var(--accent);
+  }
   /* Mask/Finish/Vias: weight the columns by their longest value so the
      chosen option is never clipped mid-word (equal thirds cut "Silver
      HASL" and "Tented" off at the panel's width). */
@@ -231,18 +265,18 @@
     width: auto; padding: 0 2px; font-size: 11px; border-radius: 4px;
     background: var(--bg); color: var(--text); border: 1px solid var(--edge);
   }
-  button#download, button#gerberbtn {
+  button#download, button#openbtn {
     border: 0; border-radius: 4px; padding: 9px 18px; white-space: nowrap;
     background: var(--hot); color: var(--hot-ink); font-size: 13px; font-weight: 800;
     cursor: pointer; letter-spacing: .02em;
   }
   /* The fab package is the secondary action: same shape, quiet outline. */
-  button#gerberbtn {
+  button#openbtn {
     background: none; color: var(--text); border: 1px solid var(--edge);
     padding: 8px 14px; font-weight: 700;
   }
-  button#gerberbtn:hover { color: var(--accent); border-color: var(--accent); }
-  button#download:disabled, button#gerberbtn:disabled { opacity: .5; cursor: default; }
+  button#openbtn:hover { color: var(--accent); border-color: var(--accent); }
+  button#download:disabled, button#openbtn:disabled { opacity: .5; cursor: default; }
   /* The author's caveat, as a gate: the fab zip goes straight to a board
      house, so nothing downloads until "I understand" is clicked. z-index
      outranks the help popover (50); this is the one thing that may never
@@ -273,6 +307,79 @@
   #fabwarn #fabok { border: 0; background: var(--hot); color: var(--hot-ink); font-weight: 800; }
   #fabwarn #fabcancel { background: none; border: 1px solid var(--edge); color: var(--text); }
   #fabwarn #fabcancel:hover { color: var(--accent); border-color: var(--accent); }
+  /* Plain yes/no question, same card as the fab warning so a dialog in this app
+     always looks like one. Accent-edged rather than amber: it asks, it does not
+     warn about shipping something. */
+  #askbox { display: none; position: fixed; inset: 0; z-index: 60;
+            background: rgba(4, 9, 18, .6); align-items: center; justify-content: center; }
+  #askbox.open { display: flex; }
+  #askbox .card {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--edge); border-left: 3px solid var(--accent);
+    border-radius: 8px; max-width: 420px; margin: 16px; padding: 16px 18px;
+    box-shadow: var(--shadow); font-size: 13px; line-height: 1.5;
+  }
+  #askbox h4 {
+    margin: 0 0 8px; font-size: 12px; font-weight: 800;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--accent);
+  }
+  #askbox p { margin: 0; }
+  #askbox .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+  #askbox button { cursor: pointer; border-radius: 4px; padding: 8px 16px;
+                   font-size: 13px; font-weight: 700; }
+  #askbox #askyes { border: 0; background: var(--accent); color: var(--panel); font-weight: 800; }
+  #askbox #askno { background: none; border: 1px solid var(--edge); color: var(--text); }
+  #askbox #askno:hover { color: var(--accent); border-color: var(--accent); }
+  /* The download picker: the same card again, with rows that are big enough to
+     hit and that say what each piece is FOR, since "KiCad project" and "Gerbers"
+     mean nothing to someone who has not ordered a board before. */
+  #dlbox { display: none; position: fixed; inset: 0; z-index: 60;
+           background: rgba(4, 9, 18, .6); align-items: center; justify-content: center; }
+  #dlbox.open { display: flex; }
+  #dlbox .card {
+    background: var(--panel); color: var(--text);
+    border: 1px solid var(--edge); border-left: 3px solid var(--accent);
+    border-radius: 8px; max-width: 440px; margin: 16px; padding: 16px 18px;
+    box-shadow: var(--shadow); font-size: 13px; line-height: 1.5;
+  }
+  #dlbox h4 {
+    margin: 0 0 10px; font-size: 12px; font-weight: 800;
+    letter-spacing: .08em; text-transform: uppercase; color: var(--accent);
+  }
+  .dlopt {
+    display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+    padding: 8px 10px; border: 1px solid transparent; border-radius: 6px;
+  }
+  .dlopt:hover { background: var(--bg); border-color: var(--edge); }
+  .dlopt input { margin-top: 2px; flex: 0 0 auto; }
+  .dlopt b { display: block; font-weight: 700; }
+  .dlopt em { display: block; font-style: normal; color: var(--dim); font-size: 12px; }
+  #dlnote { margin: 10px 2px 0; font-size: 12px; color: var(--dim); min-height: 1.5em; }
+  #dlbox .btns { display: flex; gap: 10px; justify-content: flex-end; margin-top: 12px; }
+  #dlbox button { cursor: pointer; border-radius: 4px; padding: 8px 16px;
+                  font-size: 13px; font-weight: 700; }
+  #dlbox #dlgo { border: 0; background: var(--hot); color: var(--hot-ink); font-weight: 800; }
+  #dlbox #dlgo:disabled { opacity: .45; cursor: default; }
+  #dlbox #dlcancel { background: none; border: 1px solid var(--edge); color: var(--text); }
+  #dlbox #dlcancel:hover { color: var(--accent); border-color: var(--accent); }
+  /* Drop target for a design file, over the whole window: a file dragged in has
+     to land somewhere obvious, and "somewhere" is easier to aim at than a
+     button. pointer-events stay off until a drag is actually in progress, or
+     this would eat every click on the app. */
+  #dropzone {
+    position: fixed; inset: 0; z-index: 70; display: none;
+    background: rgba(4, 9, 18, .72); pointer-events: none;
+    align-items: center; justify-content: center;
+  }
+  #dropzone.on { display: flex; }
+  #dropzone > div {
+    border: 2px dashed var(--accent); border-radius: 12px;
+    padding: 34px 54px; color: var(--accent);
+    font: 700 15px/1.4 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: .06em; text-align: center; background: var(--panel);
+    box-shadow: var(--shadow);
+  }
+  #dropzone span { display: block; font-size: 30px; margin-bottom: 8px; }
   /* Message stack at the top-left of the work area: transient status
      messages and the standing warnings about problems with the design (a
      part off the board, text over a pad, ...). An earlier overlay version
@@ -437,7 +544,7 @@
   @media (max-width: 1120px) {
     #shell { grid-template-columns: 54px 280px 1fr; }
     #topbar input#name { width: 120px; }
-    #download .dlx, #gerberbtn .dlx { display: none; }
+    #download .dlx, #openbtn .dlx { display: none; }
     #topbar { gap: 8px; }
   }
   /* The floating legend only works while the gap beside the centred view
@@ -499,9 +606,40 @@
   <input type="text" id="name" value="my-minibadge" maxlength="40" title="Project name (used for the zip and its files)">
   <button class="qm" tabindex="-1" data-tip="basics" title="Getting around">?</button>
   <button id="themebtn" title="Toggle light/dark">◐</button>
-  <button id="gerberbtn" title="Plot the Gerber fab package: a zip you upload straight to JLCPCB or PCBWay">⬇ Gerbers<span class="dlx"> for fab</span></button>
-  <button id="download">⬇ Download<span class="dlx"> KiCad project</span></button>
+  <button id="openbtn" title="Open a design file saved earlier (or drop one anywhere on the page)">⬆ Open<span class="dlx"> design</span></button>
+  <input type="file" id="designfile" accept=".json,application/json" hidden>
+  <button id="download" title="Choose what to download: the KiCad project, the Gerber fab package, the design file, or any combination">⬇ Download<span class="dlx">…</span></button>
   <button class="qm" tabindex="-1" data-tip="download" title="What you get">?</button>
+</div>
+<div id="dlbox" role="dialog" aria-modal="true" aria-labelledby="dlboxh">
+  <div class="card">
+    <h4 id="dlboxh">What should the download include?</h4>
+    <label class="dlopt"><input type="checkbox" id="dl-kicad">
+      <span><b>KiCad project</b><em>The board, its BOM and a README. Open the
+      .kicad_pro, press B to fill zones, plot from there.</em></span></label>
+    <label class="dlopt"><input type="checkbox" id="dl-gerbers">
+      <span><b>Gerber fab package</b><em>Plotted here and ready to upload
+      as-is to JLCPCB or PCBWay.</em></span></label>
+    <label class="dlopt"><input type="checkbox" id="dl-design">
+      <span><b>Design file</b><em>The only one you can open here again to keep
+      editing — the other two are boards, not designs.</em></span></label>
+    <p id="dlnote"></p>
+    <div class="btns">
+      <button id="dlcancel">Cancel</button>
+      <button id="dlgo">Download</button>
+    </div>
+  </div>
+</div>
+<div id="dropzone"><div><span>⬆</span>Drop a design file to open it</div></div>
+<div id="askbox" role="dialog" aria-modal="true" aria-labelledby="askboxh">
+  <div class="card">
+    <h4 id="askboxh"></h4>
+    <p id="askboxbody"></p>
+    <div class="btns">
+      <button id="askno">Cancel</button>
+      <button id="askyes" class="primary">Continue</button>
+    </div>
+  </div>
 </div>
 <div id="fabwarn" role="dialog" aria-modal="true" aria-labelledby="fabwarnh">
   <div class="card">
@@ -644,9 +782,32 @@ const OUT = [0.16, 0.16, 20.16, 20.16];
 // no-surcharge drill everywhere badge people order, with a 0.2 mm annular
 // ring to spare.
 const VIA_SIZE = 0.7, VIA_DRILL = 0.3;
-// Silk this close to the board edge trips KiCad's silk_edge_clearance check;
-// matches min_copper_edge_clearance in generate_project().
+// How close to the board edge a text's ink may sit, mm. Mirrors
+// pcb.TEXT_EDGE_CLEAR, which is what the server clips text to -- the two have
+// to agree or the editor is promising ink the board will not carry. That
+// number is measured (see pcb.TEXT_EDGE_CLEAR): KiCad's silk_edge_clearance
+// only fires on CONTACT with Edge.Cuts, so 0.2 mm is the fab's silk-to-edge
+// capability and the same edge budget this board gives copper, not a DRC
+// threshold.
 const SILK_EDGE_CLEAR = 0.2;
+// A window-material text (glow/bare) cuts the copper pours instead of printing
+// ink, and windows stay 1.6 mm off the board edge so the pours keep a
+// continuous perimeter ring: webapp's window_board is the board box inset
+// 1.1 mm and then clipped a further EDGE_MARGIN, and a custom outline gets the
+// same 1.6 mm as outline_poly.buffer(-1.6). Ink outside that is not clipped
+// tighter than silk -- it is dropped from the window altogether.
+const WINDOW_EDGE_CLEAR = 1.6;
+// Text on a CUSTOM outline is clipped to outline_poly.buffer(-0.35) (webapp's
+// `outside` keepout), which is stricter than SILK_EDGE_CLEAR. That buffer is
+// the artwork pipeline's, shared with every decorated layer; text does not get
+// its own, so the editor has to hold text to it rather than pretend 0.2 mm is
+// enough and let the server shave the difference off.
+const OUTLINE_ART_CLEAR = 0.35;
+// A reverse-mount unit's routed hole penetrates both faces, and the server
+// keeps decor hole/2 + 0.5 mm away from it (webapp._reverse_hole_keepout), so
+// that is how close a text's ink may come before the server starts eating it.
+// It was 0.2 mm here while the 8% pad happened to cover the difference.
+const REVERSE_HOLE_CLEAR = 0.5;
 const PADS = [ // x, y, label, row, pad number
   [1.27,1.27,"VBAT","top","1"],[3.81,1.27,"GND","top","2"],
   [16.51,1.27,"3V3","top","7"],[19.05,1.27,"GND","top","8"],
@@ -682,6 +843,15 @@ const UNIT_SAFE = [0.7, 0.7, 19.62, 19.62]; // standard square, inset from edge
 // Units may use the rest of the strip, including between the two pairs.
 
 const MAX_LEDS = 64, MAX_TEXTS = 24, MAX_ART = 8, MAX_PAL = 6;
+// Cap height a text layer may ask for, in mm (mirrors webapp.TEXT_SIZE_MM).
+// 0.6 is the board rules' min_text_height -- the floor where a download still
+// passes DRC. 119 is an art layer's width: silly on the 20 mm square, but a
+// custom outline reaches ~120 mm, and text that overhangs the board is
+// already a blocking fab-clip problem rather than something to forbid here.
+const TEXT_MM = [0.6, 119];
+// Below this the ink is finer than a fab's silkscreen resolves; the size
+// still goes lower (it is legal, and it renders), the card just says so.
+const TEXT_MM_FINE = 1;
 // Package parameters: mirrors pcb.PKG exactly. The through-hole entries
 // (2.54 mm pitch, round 1.8 mm pads, 0.9 mm drill) are the sizes badgelife
 // folks actually use: 1.8/3 mm domes and the 5x2 mm rectangular bar; their
@@ -792,13 +962,53 @@ const MATERIALS = { silk: "Silkscreen", copper: "Exposed copper", glow: "Glow wi
 // under lead-free HASL: a board-wide fab choice, so it's one picker.
 const FINISH_PAD = { enig: "#cfa435", hasl: "#c6ccd6" };
 const padCol = () => FINISH_PAD[state.finish] || FINISH_PAD.enig;
+const APP_VERSION = {{ app_version|tojson }}; // stamped into saved design files
 const FONTS = {{ fonts|tojson }}; // bundled TTFs the server renders to exact polygons
+// Cap height as a fraction of the em, per face (textpoly.cap_ratio). The board
+// sizes text by its cap height; the browser sizes a face by its em, so every
+// conversion between the two goes through this. It is NOT a constant across
+// faces -- the bundled ones run 0.348 to 1.000 -- and assuming one value drew
+// Press Start 2P 43% oversized and Special Elite at half size, then judged
+// whether they fitted the board from those wrong widths.
+const FONT_CAP = Object.fromEntries(FONTS.map(f => [f.key, f.cap]));
+const capOf = key => FONT_CAP[key] || 0.7;
+// Per-character ink metrics for one bundled face, exactly as
+// textpoly.char_metrics ships them: this face's own font units, keyed by
+// character, plus its em (`upm`), cap height (`cap`) and the advance
+// text_geometry gives a character the face has no glyph for (`miss`).
+//
+// This is what makes the editor's ink box the board's ink box instead of an
+// approximation of it. Measuring the string in the browser instead cannot get
+// there: the browser kerns, forms ligatures and swaps in a face's default
+// alternates, and text_geometry does none of that, so the two disagreed by up
+// to 6.1% of the string width (Pacifico "gjpqy") and the fit check had to pad
+// every face by 8% per side to cover it -- 1.36 mm of phantom margin on a
+// 17 mm string, which refused text that had real millimetres to spare.
+// A face has no entry until /fonts/<key>.metrics.json arrives; until then
+// textRun100 falls back to measuring, and the pad comes back with it.
+const FONT_INK = {};
 const loadedFonts = new Set();
-function ensureFont(key) { // lazy @font-face for the canvas preview
+function ensureFont(key) { // lazy @font-face + ink metrics for the preview
   if (!key || key === "kicad" || loadedFonts.has(key)) return;
   loadedFonts.add(key);
   const face = new FontFace("bm-" + key, `url(/fonts/${key}.ttf)`);
-  face.load().then(f => { document.fonts.add(f); draw(); }).catch(() => {});
+  face.load().then(f => {
+    document.fonts.add(f);
+    clearTextRuns(); // anything measured before this used the fallback face
+    redraw(); // a face arriving is not an edit; it must not mark the design unsaved
+  }).catch(() => {});
+  // Separate fetch, separate .then: the outlines are what the canvas DRAWS
+  // with and the metrics are what the fit check MEASURES with, and neither
+  // waiting on the other is what anyone wants. Both clear the run cache and
+  // redraw when they land, so a text refused while its face was in flight is
+  // re-judged the moment the real numbers arrive.
+  fetch(`/fonts/${key}.metrics.json`).then(r => r.ok ? r.json() : null)
+    .then(m => {
+      if (!m || !m.chars) return;
+      FONT_INK[key] = m;
+      clearTextRuns();
+      redraw();
+    }).catch(() => {});
 }
 // Basic-shape artwork layers (windows, accents) share the shape-part math.
 const isShapeArt = a => a.kind && a.kind !== "image";
@@ -1148,9 +1358,15 @@ function requestOutline(immediate) {
       s.cutIgnored = false;
       s.ringsRev = (s.ringsRev || 0) + 1;
     }
-    relocateStrandedLeds();
+    const moved = relocateStrandedLeds();
     renderTextList(); // edge/hole warnings track the new outline
-    draw();
+    // The server answering /outline is not an edit. draw() is where the design
+    // gets marked unsaved, so drawing on a reply used to mark a design dirty
+    // that nobody had touched -- including the reply to the refetch that a load
+    // itself kicks off, which is how an opened file came back "unsaved" a
+    // quarter-second after it opened. Relocating a stranded LED IS an edit, so
+    // that case still counts.
+    if (moved) draw(); else redraw();
   }, immediate ? 0 : 250);
   draw();
 }
@@ -3063,6 +3279,7 @@ function relocateStrandedLeds() {
   // over a board with nothing wrong for the 15 s until the status expired,
   // through every edit that had already fixed it.
   if (moved && !stuck) setStatus("Moved LED(s) onto solid board.");
+  return moved; // the caller decides whether the redraw counts as an edit
 }
 function textOverParts(t) {
   const b = textBBox(t);
@@ -3093,11 +3310,131 @@ function strokeWidthMM(t) {
   hitCtx.font = STROKE_FONT;
   return hitCtx.measureText(strokePrintable(t.text)).width / 100 * t.size * STROKE_W;
 }
+// A TTF string's real ink box, in mm, measured off the loaded face at the
+// scale the board uses: {w, up, down}, where up/down are the ink's reach above
+// and below the baseline. The server puts the baseline at +size/2 from the
+// text's centre (text_geometry centres the cap band), so the ink spans
+// y = size/2 - up .. size/2 + down about that centre.
+// One text run, laid out the way textpoly.text_geometry lays it out: character
+// by character, each advanced by its own glyph width. That matters because the
+// browser, handed a whole string, also kerns it, forms ligatures and swaps in
+// contextual alternates -- none of which the server does -- so a string
+// measured or drawn in one call is not the string the board gets. Pacifico's
+// "Wg" disagreed by 6% of its width that way, and the preview drew connected
+// script forms the board never receives.
+//
+// Everything is computed in cap-height units (cap = 100) and cached per
+// font+string, because it scales linearly with size: `up`/`down` are the ink's
+// reach above and below the baseline, and the server puts that baseline at
+// +size/2 from the text's centre (text_geometry centres the cap band), with the
+// ink centred horizontally on it.
+//
+// Two sources answer that, and which one answered matters to the fit check:
+// inkRun100 reads the server's own per-glyph metrics and is exact, while
+// measuredRun100 asks the browser and is only close. `run.exact` says which.
+const _runCache = new Map();
+const clearTextRuns = () => _runCache.clear();
+function textRun100(font, text) {
+  const key = font + "\u0000" + text;
+  const hit = _runCache.get(key);
+  if (hit) return hit;
+  const run = FONT_INK[font] ? inkRun100(FONT_INK[font], text)
+                             : measuredRun100(font, text);
+  _runCache.set(key, run);
+  return run;
+}
+// The server's layout from the server's own numbers, so this box IS the ink
+// the board gets: text_geometry walks the string one cmap glyph at a time,
+// advancing by that glyph's own width, taking no part in kerning, ligatures or
+// alternates, and a character the face cannot draw advances half an em and
+// leaves nothing behind. Checked against text_geometry over 12 faces x 19
+// strings x 7 sizes: the board's ink never reached outside this box (worst
+// case 0.000000 mm) and the box was at most 0.0057 mm larger than the ink,
+// which is text_geometry's own closing simplify(0.005). That is why the fit
+// check pads an exact run by nothing at all.
+//
+// Characters the face cannot draw stay in `chars` so the preview still shows
+// the user what they typed (in the fallback face, at the server's advance),
+// but they are not counted as ink, because the board will not carry any.
+function inkRun100(m, text) {
+  const s = 100 / m.cap;   // font units -> cap-height-100 units
+  let x = 0, x0 = Infinity, x1 = -Infinity, up = -Infinity, down = -Infinity;
+  const chars = [];
+  for (const ch of text) {
+    chars.push({ ch, x: x * s });
+    const e = m.chars[ch];
+    if (!e) { x += m.miss; continue; }
+    if (e.length > 1) { // has ink; blank glyphs ship their advance alone
+      x0 = Math.min(x0, x + e[1]); x1 = Math.max(x1, x + e[2]);
+      up = Math.max(up, e[3]); down = Math.max(down, e[4]);
+    }
+    x += e[0];
+  }
+  return x1 > x0
+    ? { chars, w: (x1 - x0) * s, dx: -(x0 + x1) / 2 * s,
+        up: up * s, down: down * s, exact: true }
+    : { chars, w: 0, dx: 0, up: 0, down: 0, exact: true };
+}
+// Fallback for the moment before a face's metrics land: measure the string in
+// the browser, character by character at the server's offsets. Same shape of
+// answer, but the browser's own glyphs, so it is only as close as the two
+// rasterisers happen to agree -- runs from here are marked inexact and the fit
+// check pads them by TEXT_BOX_SLACK.
+function measuredRun100(font, text) {
+  hitCtx.font = `${100 / capOf(font)}px "bm-${font}", monospace`;
+  let x = 0, x0 = Infinity, x1 = -Infinity;
+  // Seeded from -Infinity, not 0: both are SIGNED distances from the baseline,
+  // and a face whose digits sit above it (Press Start 2P) reports a negative
+  // descent. Clamping that to 0 claimed ink down to the baseline the glyphs
+  // never reach, and made the box an eighth of the cap height too tall.
+  let up = -Infinity, down = -Infinity;
+  const chars = [];
+  for (const ch of text) {
+    const m = hitCtx.measureText(ch);
+    chars.push({ ch, x });
+    if (m.actualBoundingBoxRight > -m.actualBoundingBoxLeft) { // has ink
+      x0 = Math.min(x0, x - m.actualBoundingBoxLeft);
+      x1 = Math.max(x1, x + m.actualBoundingBoxRight);
+      up = Math.max(up, m.actualBoundingBoxAscent);
+      down = Math.max(down, m.actualBoundingBoxDescent);
+    }
+    x += m.width;
+  }
+  return x1 > x0
+    ? { chars, w: x1 - x0, dx: -(x0 + x1) / 2, up, down, exact: false }
+    : { chars, w: 0, dx: 0, up: 0, down: 0, exact: false };
+}
+function textInk(t) {
+  const run = textRun100(t.font, t.text);
+  const k = t.size / 100;
+  return { w: run.w * k, dx: run.dx * k, up: run.up * k, down: run.down * k,
+           run };
+}
 function textWidthMM(t) { // ink width; TTF texts measure their real font
-  if (!t.text) return 2;
-  if (!t.font || t.font === "kicad") return Math.max(2, strokeWidthMM(t));
-  hitCtx.font = `${100 / 0.7}px ${textFontCSS(t)}`; // 100 units ≈ cap height
-  return Math.max(2, hitCtx.measureText(t.text).width * t.size / 100);
+  if (!t.text) return 0;
+  return t.font && t.font !== "kicad" ? textInk(t).w : strokeWidthMM(t);
+}
+// The smallest box a text presents to the POINTER. A 0.6 mm "i" is real ink and
+// a brand-new layer has none at all; neither is something anyone can click, so
+// selection and hit-testing pad up to this. The checks below do not: judging
+// whether ink fits the board from a grab-sized box is what blocked downloads
+// for text with millimetres to spare.
+const TEXT_GRAB_MM = 2;
+// How far the board's ink may fall outside a MEASURED box (measuredRun100), as
+// a fraction of the string width. Measured, not chosen: over 12 faces x 9
+// strings x 7 sizes the worst case was 0.061 -- Pacifico "gjpqy", whose "g" and
+// "o" the browser draws from that face's default alternates while textpoly
+// takes the plain cmap glyph. Only the seconds before a face's ink metrics
+// arrive are measured that way; an exact run (inkRun100) is padded by nothing,
+// which is the whole point of shipping the metrics. On a 17 mm string this pad
+// is 1.36 mm per side, and it used to be charged to every face and every
+// string: that is what refused text with millimetres of real clearance.
+const TEXT_BOX_SLACK = 0.08;
+function textGrabBox(t) {
+  const b = textBBox(t);
+  const gx = Math.max(0, (TEXT_GRAB_MM - (b[2] - b[0])) / 2);
+  const gy = Math.max(0, (TEXT_GRAB_MM - (b[3] - b[1])) / 2);
+  return [b[0] - gx, b[1] - gy, b[2] + gx, b[3] + gy];
 }
 // The rectangle carved out of art/windows under a text (mirrors the server:
 // stroke-font estimate for KiCad text, real ink bounds + 0.4 mm for TTFs).
@@ -3105,32 +3442,88 @@ function textCarveMM(t) {
   if (!t.font || t.font === "kicad") return strokeWidthMM(t) + 0.6;
   return textWidthMM(t) + 0.8;
 }
-function textBBox(t) {
+// The text's own box before rotation, as offsets from (t.x, t.y): a TTF face
+// reports its real ink band, so a string of digits gets a box the height of
+// digits and one with descenders gets room for them. The stroke font has no
+// such metrics here (it is drawn with a stand-in face), so it keeps the
+// symmetric 1.5x estimate that STROKE_W was calibrated alongside.
+function textLocalBox(t) {
   const w = textWidthMM(t);
-  const h = t.size * 1.5;
-  if (!t.rot) return [t.x - w / 2, t.y - h / 2, t.x + w / 2, t.y + h / 2];
+  if (!t.font || t.font === "kicad" || !t.text) {
+    const h = t.text ? t.size * 0.75 : 0;
+    return [-w / 2, -h, w / 2, h];
+  }
+  const ink = textInk(t);
+  return [-w / 2, t.size / 2 - ink.up, w / 2, t.size / 2 + ink.down];
+}
+function textBBox(t) {
+  const [lx0, ly0, lx1, ly1] = textLocalBox(t);
+  if (!t.rot) return [t.x + lx0, t.y + ly0, t.x + lx1, t.y + ly1];
   // Envelope of the turned box: hit-testing, clamping and the fab-clip
   // warning all work off this.
-  const pts = [[-w / 2, -h / 2], [w / 2, -h / 2], [w / 2, h / 2], [-w / 2, h / 2]]
+  const pts = [[lx0, ly0], [lx1, ly0], [lx1, ly1], [lx0, ly1]]
     .map(([px, py]) => rotOff(px, py, t.rot));
   const xs = pts.map(q => q[0]), ys = pts.map(q => q[1]);
   return [t.x + Math.min(...xs), t.y + Math.min(...ys),
           t.x + Math.max(...xs), t.y + Math.max(...ys)];
 }
+// A text that cuts a window instead of printing ink. The stroke font cannot:
+// gr_text only exists on silk, and the server forces its material back.
+const isWindowText = t => !!t.font && t.font !== "kicad"
+  && (t.material === "glow" || t.material === "bare");
+// How far this text's ink has to stay inside the board, mm -- and the two ends
+// of the check behave differently, so it is worth naming what each prevents.
+//
+// A TTF text becomes art polygons, and the art pipeline CLIPS them
+// (webapp._clip_art_geom): ink placed outside the margin is not a DRC
+// violation, it is ink that quietly disappears from the download. So the
+// number here has to be the server's clip margin exactly, per material and per
+// board shape, or the editor is describing a board nobody gets.
+//
+// A stroke-font text is a gr_text and nothing clips it: it reaches the fab
+// whole, and KiCad's own silk_edge_clearance fires on contact with Edge.Cuts
+// (measured: a gr_text overhanging the edge fails `pcb drc
+// --severity-all --exit-code-violations`, the gate this project ships behind).
+// It keeps SILK_EDGE_CLEAR for the same reason copper has it.
+function textEdgeClear(t) {
+  if (isWindowText(t)) return WINDOW_EDGE_CLEAR;
+  // A custom outline clips every decorated layer, text included, to
+  // outline_poly.buffer(-0.35); the plain square board clips text to
+  // pcb.TEXT_EDGE_CLEAR alone.
+  return boardCarved() && state.shape.rings ? OUTLINE_ART_CLEAR : SILK_EDGE_CLEAR;
+}
 // True when the whole text box sits on solid board (used to warn about
 // fab clipping at edges and holes).
 function textOnSolidBoard(t) {
-  // Canvas text metrics run a few percent narrower than the server's real
-  // glyph outlines; pad the checked box 3% per side so a string that will
-  // clip at the fab can't look fine here.
-  // Ink that merely reaches the outline still trips KiCad's silk-to-edge
-  // check, so hold text the same 0.2 mm off the edge the board rules ask of
-  // copper: grow the tested box by that margin and require the whole of it
-  // to land on solid board.
+  // Two margins, and only one of them is a board rule.
+  //
+  // The board rule is textEdgeClear(t): how far the server keeps this text's
+  // material off the edge, so ink placed inside it is ink the download will
+  // not contain.
+  //
+  // The other is model error, and it is now usually ZERO. The box comes from
+  // the server's own per-glyph metrics (inkRun100), checked against
+  // text_geometry over 12 faces x 19 strings x 7 sizes: the board's ink never
+  // reached outside it. Only a run measured in the browser before those
+  // metrics arrive (measuredRun100) needs covering, and only because the two
+  // rasterisers disagree -- worst case 6.1% of the width, Pacifico "gjpqy",
+  // whose "g" and "o" the browser draws from that face's default alternates.
+  // Charging that 8% to every face was what refused a 17 mm string with
+  // millimetres of clearance: 1.36 mm of phantom margin per side, for a
+  // disagreement 10 of the 12 faces do not have.
+  //
+  // The pad is NOT cover for a wrong scale. Assuming one cap ratio for every
+  // face made this box 43% too wide for Press Start 2P, and no pad can make a
+  // wrong measurement safe -- it only refuses more designs.
   const b0 = textBBox(t);
-  const pad = (b0[2] - b0[0]) * 0.03 + SILK_EDGE_CLEAR;
-  const b = [b0[0] - pad, b0[1] - SILK_EDGE_CLEAR,
-             b0[2] + pad, b0[3] + SILK_EDGE_CLEAR];
+  const clear = textEdgeClear(t);
+  // Stroke text has no per-glyph metrics here at all (it is measured with a
+  // stand-in face, calibrated by STROKE_W), so it is always the inexact case.
+  const exact = t.font && t.font !== "kicad" && textInk(t).run.exact;
+  const slack = exact ? 0 : (b0[2] - b0[0]) * TEXT_BOX_SLACK;
+  const pad = slack + clear;
+  const b = [b0[0] - pad, b0[1] - clear - slack,
+             b0[2] + pad, b0[3] + clear + slack];
   // A reverse-mount unit routes a hole clean through the board, so silk over
   // it prints on nothing, the same failure as hanging off the outer edge,
   // and what this check's own warning already promises to cover.
@@ -3138,7 +3531,7 @@ function textOnSolidBoard(t) {
     if (!L.reverse) continue;
     const d = layoutOf(L.layout || "stacked", L.size || "0805", true).hole;
     if (!d) continue;
-    const r = d / 2 + SILK_EDGE_CLEAR;
+    const r = d / 2 + REVERSE_HOLE_CLEAR;
     const nx = Math.max(0, Math.max(b[0] - L.x, L.x - b[2]));
     const ny = Math.max(0, Math.max(b[1] - L.y, L.y - b[3]));
     if (nx * nx + ny * ny < r * r) return false;
@@ -3626,13 +4019,16 @@ function drawTextLayers(c, mirror) {
   for (const g of groups) {
     if (!g.list.length) continue;
     const [off, oc] = newLayer(c.canvas);
-    oc.textAlign = "center";
+    // Stroke text is drawn with a stand-in face and centred by advance, the
+    // way STROKE_W was calibrated. A real face is centred by its ink, because
+    // that is what the server does with it.
+    oc.textAlign = g.stroke ? "center" : "left";
     for (const t of g.list) {
       const [cr, cg, cb, ca] = materialRGBA(g.stroke ? "silk" : t.material);
       oc.fillStyle = `rgba(${cr},${cg},${cb},${(ca / 255).toFixed(3)})`;
       oc.font = g.stroke
         ? `bold ${t.size * SCALE * STROKE_W}px Helvetica, Arial, "Liberation Sans", sans-serif`
-        : `${t.size * SCALE / 0.7}px ${textFontCSS(t)}`;
+        : `${t.size * SCALE / capOf(t.font)}px ${textFontCSS(t)}`;
       // The composite flips this layer on the back view; pre-mirror so the
       // string reads correctly on its own side and backwards through the
       // board, like the real thing.
@@ -3641,8 +4037,16 @@ function drawTextLayers(c, mirror) {
       oc.translate(mm2px(t.x), mm2px(t.y));
       if (t.rot) oc.rotate((t.rot % 360) * Math.PI / 180);
       if (pre) oc.scale(-1, 1);
-      oc.fillText(g.stroke ? strokePrintable(t.text) : t.text,
-                  0, t.size * SCALE * (g.stroke ? 0.45 : 0.5));
+      const base = t.size * SCALE * (g.stroke ? 0.45 : 0.5);
+      if (g.stroke) {
+        oc.fillText(strokePrintable(t.text), 0, base);
+      } else {
+        // Per character, at the server's own offsets: see textRun100.
+        const ink = textInk(t), k = t.size * SCALE / 100;
+        for (const c of ink.run.chars) {
+          oc.fillText(c.ch, ink.run.dx * k + c.x * k, base);
+        }
+      }
       oc.restore();
     }
     if (!g.stroke) eraseArtKeepouts(oc, g.win, viewSide);
@@ -4376,6 +4780,9 @@ let ready = false; // set once initial render is done
 let m3d = { url: null, designKey: null, busy: false, pending: false,
             pendingForce: false, framed: false, timer: null };
 let mode3d = false;
+// A redraw that is not an edit: same pixels, same warnings, but the design is
+// no less saved than it was a moment ago.
+const redraw = () => { const was = dirty; draw(); dirty = was; };
 function draw() {
   if (ready) { dirty = true; scheduleAutosave(); }
   // Every edit funnels through here, so this is the one place that can promise
@@ -4568,10 +4975,15 @@ function selectionInfo() {
   }
   if (selected.kind === "text" && state.texts[selected.index]) {
     const t = state.texts[selected.index];
-    const sb = textBBox(t);
+    const sb = textGrabBox(t);
     const mid = [(sb[0] + sb[2]) / 2, (sb[1] + sb[3]) / 2];
     return {
       sb, resizable: true, rotatable: true,
+      // The text turns about its own anchor, which is not the middle of its
+      // ink box: a string of digits sits high in the box a descender needs.
+      // The gesture is relative either way, but reading the angle from the
+      // real pivot keeps the knob tracking the cursor 1:1.
+      pivot: [t.x, t.y],
       stem: [mid[0], sb[1]], knob: [mid[0], sb[1] - 16 / SCALE],
     };
   }
@@ -4612,7 +5024,7 @@ function attachPointer(cv, side) {
     const textHit = () => {
       for (let i = state.texts.length - 1; i >= 0; i--) {
         const t = state.texts[i];
-        if (t.side === side && inBBox(textBBox(t), mx, my)) {
+        if (t.side === side && inBBox(textGrabBox(t), mx, my)) {
           return { kind: "text", index: i, x: t.x, y: t.y, side: t.side };
         }
       }
@@ -4760,7 +5172,8 @@ function attachPointer(cv, side) {
     if (si.rotatable) {
       const [kx, ky] = si.knob || [cx, y0 - 16 / SCALE];
       if (Math.abs(mx - kx) <= r && Math.abs(my - ky) <= r) {
-        return { type: "rotate", cx, cy };
+        const [px, py] = si.pivot || [cx, cy];
+        return { type: "rotate", cx: px, cy: py };
       }
     }
     if (si.resizable) {
@@ -5096,6 +5509,7 @@ function attachPointer(cv, side) {
         if (L) { L.rot = rot; [L.x, L.y] = clampLedFor(L, L.x, L.y); }
       } else if (drag.tkind === "jumper") {
         state.clk.rot = rot;
+        renderClkOpts(); // the card's dial tracks the canvas gesture
       } else if (drag.tkind === "ledres" || drag.tkind === "ledbody") {
         const L = state.leds[drag.index];
         if (L && L.adv) {
@@ -5137,7 +5551,11 @@ function attachPointer(cv, side) {
         }
       } else if (drag.tkind === "text") {
         const t = state.texts[drag.index];
-        if (t) t.size = Math.min(5, Math.max(0.8, drag.w0 * f));
+        // Rounded to the card's own 0.1 mm step: the corner handle and the
+        // number box have to agree on what sizes exist, or a drag leaves a
+        // value the box cannot show and the next keystroke jumps.
+        if (t) t.size = Math.min(TEXT_MM[1],
+                                 Math.max(TEXT_MM[0], Math.round(drag.w0 * f * 10) / 10));
       } else if (drag.tkind === "shapeel") {
         const el = state.shape.elements[drag.index];
         if (el) {
@@ -5225,6 +5643,7 @@ function attachPointer(cv, side) {
     if (hit.kind === "jumper") {
       state.clk.rot = (Math.round(state.clk.rot || 0) + 90) % 360;
       relocateJumper(); // a quarter turn can swing a label off the board
+      renderClkOpts();
       draw();
       m3dStale("CLK jumper rotated");
       return;
@@ -5273,27 +5692,132 @@ attachPointer(cvB, "back");
 const opt = (v, label, cur) => `<option value="${v}"${String(v) === String(cur) ? " selected" : ""}>${label}</option>`;
 
 // Slider + numeric box pair, kept in sync; apply(value) runs on either.
-const pairHTML = (cls, min, max, step, val) => `
+// `log` puts the slider on a logarithmic scale, where one step of the thumb
+// is a fixed PERCENTAGE of the value rather than a fixed amount. That is what
+// lets one control hold a two-orders-of-magnitude range without giving up the
+// bottom of it: text at 0.9 mm still trims by 0.1 mm per drag step on a
+// slider whose far end is 119 mm, which a linear sweep could never do.
+const LOG_TICKS = 1000; // thumb positions across the whole log range
+const logTick = (v, lo, hi) => Math.round(
+  LOG_TICKS * Math.log(Math.min(hi, Math.max(lo, v)) / lo) / Math.log(hi / lo));
+const logValue = (tick, lo, hi, step) => {
+  const v = lo * Math.pow(hi / lo, tick / LOG_TICKS);
+  return Math.min(hi, Math.max(lo, +(Math.round(v / step) * step).toFixed(4)));
+};
+const rangeHTML = (cls, min, max, step, val, log) =>
+  `<input type="range" class="${cls}" ${log
+    ? `min="0" max="${LOG_TICKS}" step="1" value="${logTick(val, min, max)}" data-log="${min} ${max} ${step}"`
+    : `min="${min}" max="${max}" step="${step}" value="${val}"`}>`;
+const numHTML = (cls, min, max, step, val) =>
+  `<input type="number" class="${cls}n" min="${min}" max="${max}" step="${step}" value="${val}">`;
+const pairHTML = (cls, min, max, step, val, log) => `
   <div class="row" style="align-items:center; gap:6px">
-    <div style="flex:1"><input type="range" class="${cls}" min="${min}" max="${max}" step="${step}" value="${val}"></div>
-    <input type="number" class="${cls}n" min="${min}" max="${max}" step="${step}" value="${val}">
+    <div style="flex:1">${rangeHTML(cls, min, max, step, val, log)}</div>
+    ${numHTML(cls, min, max, step, val)}
   </div>`;
-function bindPair(root, cls, apply, wrap) {
+function bindPair(root, cls, apply) {
   const s = root.querySelector("." + cls);
   if (!s) return;
   const n = root.querySelector("." + cls + "n");
-  s.oninput = () => { n.value = s.value; apply(+s.value); };
+  // A log slider's own value is a tick index, so every read and write goes
+  // through the mapping; a plain one maps 1:1 and needs none of it.
+  const log = s.dataset.log ? s.dataset.log.split(" ").map(Number) : null;
+  const lo = log ? log[0] : +s.min, hi = log ? log[1] : +s.max;
+  const fromSlider = () => log ? logValue(+s.value, ...log) : +s.value;
+  // What the design is actually using: the typed box can hold a finer value
+  // than the slider has ticks for, and it is the typed one that was applied.
+  let cur = +n.value;
+  s.oninput = () => { cur = fromSlider(); n.value = cur; apply(cur); };
   n.oninput = () => {
-    let v = parseFloat(n.value);
+    const v = parseFloat(n.value);
     if (!isFinite(v)) return;
-    // Angles wrap (720° is two full turns, i.e. 0°); plain sizes clamp.
-    v = wrap ? ((v % 360) + 360) % 360 : Math.min(+s.max, Math.max(+s.min, v));
-    s.value = v;
-    apply(v);
+    cur = Math.min(hi, Math.max(lo, v));
+    s.value = log ? logTick(cur, lo, hi) : cur;
+    apply(cur);
   };
   // Snap the display to the accepted value on commit (Enter as well as
   // blur): a box still showing -5 while the design uses 3 is a lie.
-  n.onchange = n.onblur = () => { n.value = s.value; };
+  n.onchange = n.onblur = () => { n.value = cur; };
+  if (log) {
+    // One arrow press moves a 1000-tick log slider by a fraction of a
+    // percent, and at the bottom of the range 30 of them go by before the
+    // value changes at all. Step the value by its own quantum instead, so
+    // the keyboard reaches every size the box can show.
+    s.addEventListener("keydown", e => {
+      const dir = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+      if (dir === undefined) return;
+      e.preventDefault();
+      const q = log[2] * (e.shiftKey ? 10 : 1);
+      cur = Math.min(hi, Math.max(lo,
+        +(Math.round(cur / q) * q + dir * q).toFixed(4)));
+      s.value = logTick(cur, lo, hi);
+      n.value = cur;
+      apply(cur);
+    });
+  }
+}
+
+// A rotation control: the dial above plus the same numeric box the sliders
+// carry. Dragging is absolute -- the needle goes where the cursor is, and
+// keeps going through 360 into the next turn -- so pointing something
+// backwards is one flick rather than a slider run to the far end and back.
+const dialHTML = (cls, val) => {
+  const v = ((Math.round(val) % 360) + 360) % 360;
+  return `<div class="row dialrow">
+    <div class="dial ${cls}" style="--a:${v}deg" tabindex="0" role="slider"
+         aria-label="Rotation in degrees clockwise" aria-valuemin="0"
+         aria-valuemax="359" aria-valuenow="${v}"
+         title="Drag to turn (Shift snaps to 15&deg;); arrow keys step 1&deg;, Home returns to 0"><i></i></div>
+    <input type="number" class="${cls}n" min="0" max="359" step="1" value="${v}">
+  </div>`;
+};
+function bindDial(root, cls, apply) {
+  const d = root.querySelector(".dial." + cls);
+  if (!d) return;
+  const n = root.querySelector("." + cls + "n");
+  const at = () => +d.getAttribute("aria-valuenow");
+  const show = v => { d.style.setProperty("--a", v + "deg"); d.setAttribute("aria-valuenow", v); };
+  const set = v => {
+    v = ((Math.round(v) % 360) + 360) % 360;
+    show(v); n.value = v; apply(v);
+  };
+  // Clockwise from straight up: the sense the board itself turns, so the
+  // needle points the way the object points.
+  const angleAt = e => {
+    const r = d.getBoundingClientRect();
+    const a = Math.atan2(e.clientX - (r.left + r.width / 2),
+                         (r.top + r.height / 2) - e.clientY) * 180 / Math.PI;
+    return e.shiftKey ? Math.round(a / 15) * 15 : a;
+  };
+  d.addEventListener("pointerdown", e => {
+    d.setPointerCapture(e.pointerId); // the gesture may swing well outside the circle
+    d.classList.add("turning");
+    e.preventDefault(); // no text selection dragged out of the panel
+    d.focus();
+    set(angleAt(e));
+  });
+  d.addEventListener("pointermove", e => {
+    if (d.hasPointerCapture(e.pointerId)) set(angleAt(e));
+  });
+  const rest = () => d.classList.remove("turning");
+  d.addEventListener("pointerup", rest);
+  d.addEventListener("pointercancel", rest);
+  d.addEventListener("keydown", e => {
+    const dir = { ArrowRight: 1, ArrowUp: 1, ArrowLeft: -1, ArrowDown: -1 }[e.key];
+    if (dir === undefined && e.key !== "Home") return;
+    // The window-level handler nudges the SELECTED object on arrows and only
+    // steps aside for real form controls; this dial is a div, so it has to
+    // say so itself or one keystroke would turn the dial and move the board.
+    e.preventDefault(); e.stopPropagation();
+    set(dir === undefined ? 0 : at() + dir * (e.shiftKey ? 15 : 1));
+  });
+  n.oninput = () => {
+    const v = parseFloat(n.value);
+    if (!isFinite(v)) return;
+    const w = ((Math.round(v) % 360) + 360) % 360;
+    show(w); apply(w); // leave the box alone: it is being typed into
+  };
+  n.onchange = n.onblur = () => { n.value = at(); };
 }
 
 const WAND_MATS = { ignore: "Ignore (mask)", ...MATERIALS };
@@ -5439,7 +5963,7 @@ function renderArtList() {
           <div><select class="m" title="What this layer is made of. &quot;Cut through board&quot; is not ink: it routs a hole clean through, the same cut a board-shape part makes">${Object.entries(MATERIALS).map(([v, l]) => opt(v, l, a.material)).join("")}</select></div>
           <div style="flex:0 0 96px">${sideSelectHTML(a)}</div>
         </div>
-        ${a.kind === "circle" ? "" : `<div class="sub">Rotation (&deg;)</div>${pairHTML("rots", 0, 359, 1, a.rot)}`}
+        ${a.kind === "circle" ? "" : `<div class="sub">Rotation (&deg;)</div>${dialHTML("rots", a.rot)}`}
         ${a.kind === "hex" ? `<div class="sub">Sides</div>${pairHTML("sd", 3, 12, 1, a.sides || 6)}` : ""}
         <div class="sub">Width (mm)</div>
         ${pairHTML("wd", 3, 119, 0.5, a.wmm)}
@@ -5469,7 +5993,7 @@ function renderArtList() {
         renderArtList(); draw();
       };
       div.querySelector(".aside").onchange = e => { a.side = e.target.value; draw(); };
-      bindPair(div, "rots", v => { a.rot = v; draw(); }, true);
+      bindDial(div, "rots", v => { a.rot = v; draw(); });
       bindPair(div, "sd", v => { a.sides = Math.round(v); draw(); });
       bindPair(div, "wd", v => { a.wmm = v; draw(); });
       bindPair(div, "hh", v => { a.h = v; draw(); });
@@ -5510,7 +6034,7 @@ function renderArtList() {
       <div class="sub">Width (mm)</div>
       ${pairHTML("wd", 3, 119, 0.5, a.wmm)}
       <div class="sub">Rotation (&deg;, clockwise); double-click the layer on the board for +90</div>
-      ${pairHTML("rots", 0, 359, 1, a.rot)}
+      ${dialHTML("rots", a.rot)}
       <div class="row" style="margin-top:6px">
         <div><button class="tool flipb">${a.flip ? "Unmirror" : "Mirror"}</button></div>
         <div><button class="tool repb" title="Swap the picture, keep position/size/transform">Change image…</button></div>
@@ -5576,10 +6100,10 @@ function renderArtList() {
     const inv = div.querySelector(".inv");
     if (inv) inv.onchange = e => { a.invert = e.target.checked; rebuild(); };
     bindPair(div, "wd", v => { a.wmm = v; draw(); });
-    bindPair(div, "rots", v => {
+    bindDial(div, "rots", v => {
       a.rot = v;
       applyTransform(a); rebuildArt(a); draw();
-    }, true);
+    });
     div.querySelector(".flipb").onclick = () => {
       a.flip = !a.flip;
       applyTransform(a); rebuildArt(a); renderArtList(); draw();
@@ -5674,13 +6198,29 @@ function textWarnings(t) {
       : "Some characters are missing from this typeface and will be left off the "
         + "board entirely, even though the preview shows them.");
   }
+  if (t.text.trim() && t.size < TEXT_MM_FINE) {
+    // The size still goes this low -- it is legal, it renders, and it passes
+    // the board rules -- but nothing downstream will say the ink came out
+    // finer than the process, so this is the one place it can be said.
+    msgs.push(`At ${+t.size.toFixed(2)} mm the strokes are finer than most fabs `
+      + `reliably print; expect it soft or patchy. Above ${TEXT_MM_FINE} mm is safe.`);
+  }
   if (t.text.trim() && textOverParts(t)) {
     msgs.push("This text overlaps a part or pad; the overlapping area is "
       + "clipped away and won't print there.");
   }
   if (t.text.trim() && !textOnSolidBoard(t)) {
-    msgs.push("Part of this text hangs over the board edge or a hole, where "
-      + "nothing gets printed. Downloads are blocked until it fits.");
+    // A window text is refused well before it reaches the edge -- windows keep
+    // WINDOW_EDGE_CLEAR so the pours keep an unbroken perimeter ring -- so
+    // telling its owner it "hangs over the board edge" sends them looking for
+    // an overhang that is 1.6 mm away.
+    msgs.push(isWindowText(t)
+      ? `Part of this text comes within ${WINDOW_EDGE_CLEAR} mm of the board `
+        + "edge, which is nearer than a window may go: the copper pours need an "
+        + "unbroken ring round the outside. That part is cut off the window, so "
+        + "downloads are blocked until it fits."
+      : "Part of this text hangs over the board edge or a hole, where "
+        + "nothing gets printed. Downloads are blocked until it fits.");
   }
   return msgs;
 }
@@ -5731,7 +6271,9 @@ function blockingProblems() {
     // Silk that leaves the board is not printed at all, and KiCad's DRC
     // flags it; the preview clips it, so the export must not ship it.
     if (t.text.trim() && !textOnSolidBoard(t)) {
-      out.push([`Text ${i + 1} hangs over the board edge or a hole`, "text", i]);
+      out.push([isWindowText(t)
+        ? `Text ${i + 1} is too near the board edge for a window`
+        : `Text ${i + 1} hangs over the board edge or a hole`, "text", i]);
     }
   });
   if (boardCarved() && state.shape.outlineEmpty) {
@@ -5836,7 +6378,7 @@ function collectWarnings() {
     const msgs = textWarnings(t);
     if (msgs.length) {
       want.push([`w:text-${i}`, `Text ${i + 1}`, msgs.join(" "), "text", i,
-                 markRect(textBBox(t), t.side, !textOnSolidBoard(t))]);
+                 markRect(textGrabBox(t), t.side, !textOnSolidBoard(t))]);
     }
   });
   state.art.forEach((a, i) => {
@@ -5995,7 +6537,7 @@ function renderLedList() {
       ${L.side === "back" && !L.reverse && !L.farled ? `<div class="sub">Faces the host badge; only shows from behind.</div>` : ""}
       ${(PKG[L.size] || PKG["0805"]).drill && !L.reverse ? `<div class="sub">Leads pass through; solder on the far face. Short lead toward the bar.</div>` : ""}
       <div class="sub">Rotation (&deg;)</div>
-      ${pairHTML("r", 0, 359, 1, L.rot)}
+      ${dialHTML("r", L.rot)}
       <div class="check" style="margin-top:6px"><input type="checkbox" class="clk" id="clk${i}"${L.clk ? " checked" : ""}${pinOn("9") ? "" : " disabled"}><label for="clk${i}">Blink with the badge clock (CLK)</label> <button class="qm" tabindex="-1" data-tip="clk" title="How blinking works">?</button></div>
       ${L.clk && pinOn("9")
         ? `<div class="sub">${state.clk.jumper
@@ -6040,9 +6582,9 @@ function renderLedList() {
             <input type="number" class="ary" min="-20" max="20" step="0.05" value="${(+L.adv.ry).toFixed(2)}">
           </div>
           <div class="sub">Resistor angle (&deg;)</div>
-          ${pairHTML("arr", 0, 359, 1, L.adv.rrot)}
+          ${dialHTML("arr", L.adv.rrot)}
           <div class="sub">LED angle (&deg;)</div>
-          ${pairHTML("arl", 0, 359, 1, L.adv.lrot || 0)}
+          ${dialHTML("arl", L.adv.lrot || 0)}
           ${L.novia ? "" : `<div class="sub">Via offset X / Y (mm)</div>
           <div class="row" style="gap:6px">
             <input type="number" class="avx" min="-20" max="20" step="0.05" value="${(+L.adv.vx).toFixed(2)}">
@@ -6075,7 +6617,7 @@ function renderLedList() {
     div.querySelector(".s").onchange = e => {
       L.side = e.target.value; pushApart(i); renderLedList(); draw();
     };
-    bindPair(div, "r", v => { L.rot = v; reposition(); draw(); }, true);
+    bindDial(div, "r", v => { L.rot = v; reposition(); draw(); });
     div.querySelector(".l").onchange = e => { L.layout = e.target.value; reposition(); draw(); };
     // Re-render: the package decides whether the leads are plated through, so
     // the via-less explainer under the checkbox changes with it.
@@ -6144,14 +6686,8 @@ function renderLedList() {
       num(".ary", v => { L.adv.ry = v; });
       num(".avx", v => { L.adv.vx = v; });
       num(".avy", v => { L.adv.vy = v; });
-      bindPair(div, "arr", v => {
-        L.adv.rrot = ((Math.round(v) % 360) + 360) % 360;
-        reposition(); draw();
-      });
-      bindPair(div, "arl", v => {
-        L.adv.lrot = ((Math.round(v) % 360) + 360) % 360;
-        reposition(); draw();
-      });
+      bindDial(div, "arr", v => { L.adv.rrot = v; reposition(); draw(); });
+      bindDial(div, "arl", v => { L.adv.lrot = v; reposition(); draw(); });
     }
     wrap.appendChild(div);
   });
@@ -6182,6 +6718,8 @@ function renderClkOpts() {
         ? "The 3V3 pad drops into the front power plane through its own via."
         : "Traced to a 3V3 pin on this face; drag the &#9670; endpoint to pick which."}</div>` : ""}
       ${needsVia ? `<div class="sub">A blinking LED sits on the ${farFace}; the rail via beside the jumper carries its supply through the board.</div>` : ""}
+      <div class="sub">Rotation (&deg;); drag the jumper on the board, or double-click it for +90</div>
+      ${dialHTML("jrot", state.clk.rot || 0)}
       <div class="sub">Bridge ONE side when soldering: 3V3 = steady, CLK = blinks. Unbridged, those LEDs stay dark.</div>`
       : `<div class="sub">Those LEDs pulse with the badge clock; there is no steady option without reworking the board.</div>`}
     </div>`;
@@ -6207,6 +6745,13 @@ function renderClkOpts() {
     state.clk.via = e.target.checked;
     renderLedList(); draw(); m3dStale("CLK via changed");
   };
+  // Same relocate the canvas gesture runs: a turn can swing the CLK/3V3
+  // captions off the board, and the jumper is placed by the app, not pinned.
+  bindDial(wrap, "jrot", v => {
+    state.clk.rot = v;
+    relocateJumper();
+    draw(); m3dStale("CLK jumper rotated");
+  });
 }
 
 function renderTextList() {
@@ -6224,8 +6769,8 @@ function renderTextList() {
       <div class="counter"><span class="txn">${t.text.length}</span>/60</div>
       <div class="sub">Size (mm)</div>
       <div class="row" style="align-items:center; gap:6px">
-        <div style="flex:1"><input type="range" class="sz" min="0.8" max="5" step="0.1" value="${t.size}"></div>
-        <input type="number" class="szn" min="0.8" max="5" step="0.1" value="${t.size}">
+        <div style="flex:1">${rangeHTML("sz", TEXT_MM[0], TEXT_MM[1], 0.1, t.size, true)}</div>
+        ${numHTML("sz", TEXT_MM[0], TEXT_MM[1], 0.1, t.size)}
         <div style="flex:0 1 auto"><select class="s" title="Side">${opt("front", "Front", t.side)}${opt("back", "Back", t.side)}</select></div>
       </div>
       <div class="row" style="margin-top:6px">
@@ -6238,7 +6783,7 @@ function renderTextList() {
         </select></div>
       </div>
       <div class="sub">Rotation (&deg;, clockwise); double-click the text on the board for +90</div>
-      ${pairHTML("trot", 0, 359, 1, t.rot || 0)}
+      ${dialHTML("trot", t.rot || 0)}
       ${t.font === "kicad" ? `<div class="sub">KiCad's stroke font is silkscreen-only; pick another font to use copper, glow, or bare.</div>` : ""}`;
     div.querySelector(".tx").value = t.text;
     div.querySelector(".itemhead button").onclick = () => {
@@ -6257,7 +6802,7 @@ function renderTextList() {
       draw();
     };
     bindPair(div, "sz", v => { t.size = v; draw(); });
-    bindPair(div, "trot", v => { t.rot = ((Math.round(v) % 360) + 360) % 360; draw(); }, true);
+    bindDial(div, "trot", v => { t.rot = v; draw(); });
     div.querySelector(".s").onchange = e => { t.side = e.target.value; draw(); };
     div.querySelector(".fnt").onchange = e => {
       t.font = e.target.value;
@@ -6323,7 +6868,19 @@ async function svgObjectUrl(f) {
 // Shared loader. SVGs upload as-is (the server uses their exact vector
 // paths), plus a browser-rasterized PNG that doubles as the local preview
 // and the server's fallback for SVGs it can't parse exactly (gradients).
+// `cb` is called exactly once, with the loaded image or with null. The null
+// arm is load-bearing: it used to be missing, so an unreadable file left every
+// caller waiting forever with no way to tell "still decoding" from "will never
+// decode". Through the upload button that was a dead layer; through a restore it
+// was a promise that never settled and a restore that never returned.
 async function loadImageFile(f, cb) {
+  let done = false;
+  const once = r => { if (!done) { done = true; cb(r); } };
+  const failed = msg => {
+    setStatus(msg || "Could not read that file. If it is an SVG, save it with a "
+      + ".svg extension; otherwise use a PNG or JPG.", true);
+    once(null);
+  };
   const isSvg = /\.svg$/i.test(f.name) || f.type === "image/svg+xml";
   // Keep the original bytes as a data URL so the design can be autosaved
   // and restored, images included.
@@ -6343,18 +6900,24 @@ async function loadImageFile(f, cb) {
       cnv.height = Math.max(1, Math.round(ih * scale));
       cnv.getContext("2d").drawImage(img, 0, 0, cnv.width, cnv.height);
       src = cnv; iw = cnv.width; ih = cnv.height;
-      cnv.toBlob(b => cb({
+      cnv.toBlob(b => b ? once({
         upload: f, isSvg: true, dataUrl,
         raster: new File([b], f.name.replace(/\.svg$/i, "") + ".png", { type: "image/png" }),
         src, iw, ih,
-      }), "image/png");
+      }) : failed(), "image/png");
     } else {
-      cb({ upload: f, raster: null, isSvg: false, dataUrl, src, iw, ih });
+      once({ upload: f, raster: null, isSvg: false, dataUrl, src, iw, ih });
     }
     URL.revokeObjectURL(img.src);
   };
-  img.onerror = () => { setStatus("Could not read that file. If it is an SVG, save it with a .svg extension; otherwise use a PNG or JPG.", true); };
-  img.src = isSvg ? await svgObjectUrl(f) : URL.createObjectURL(f);
+  img.onerror = () => failed();
+  // A hostile or truncated SVG can throw in the parser before there is an <img>
+  // to fail; without this the caller waits on a promise nothing will settle.
+  try {
+    img.src = isSvg ? await svgObjectUrl(f) : URL.createObjectURL(f);
+  } catch (e) {
+    failed();
+  }
 }
 
 let artReplace = null; // layer index a "Change image…" click will refill
@@ -6374,7 +6937,9 @@ $("artfile").addEventListener("change", () => {
       + "Remove one before adding another.", true);
     return;
   }
-  loadImageFile(f, ({ upload, raster, isSvg, dataUrl, src, iw, ih }) => {
+  loadImageFile(f, r => {
+    if (!r) return; // unreadable; loadImageFile already said so
+    const { upload, raster, isSvg, dataUrl, src, iw, ih } = r;
     const { palette, fewColors } = extractPalette(src, iw, ih);
     if (target !== null && state.art[target]) {
       setStatus(`Swapped the image for ${f.name}.`);
@@ -6525,7 +7090,9 @@ $("shapefile").addEventListener("change", () => {
   const target = shapeFileTarget;
   shapeFileTarget = null;
   if (!f || target === null) return;
-  loadImageFile(f, ({ upload, raster, isSvg, dataUrl, src, iw, ih }) => {
+  loadImageFile(f, r => {
+    if (!r) return; // unreadable; loadImageFile already said so
+    const { upload, raster, isSvg, dataUrl, src, iw, ih } = r;
     let el = target === "new" ? null : state.shape.elements[target];
     if (!el) {
       outlineAddCheck = { rings: ringSig(state.shape.rings), label: f.name };
@@ -6762,12 +7329,15 @@ function reportBlocked() { // true (and says why) when the design can't build
   revealItem(kind, i);
   return true;
 }
-async function fetchDesignZip(endpoint, fallbackName) {
-  const resp = await fetch(endpoint, { method: "POST", body: designFormData() });
+async function fetchDesignZip(endpoint, fallbackName, extra) {
+  const body = designFormData();
+  if (extra) extra(body);
+  const resp = await fetch(endpoint, { method: "POST", body });
   if (!resp.ok) throw new Error((await resp.json()).error || resp.statusText);
   const blob = await resp.blob();
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
+  void fallbackName;
   a.download = (resp.headers.get("Content-Disposition") || "").match(/filename=(.+)/)?.[1] || fallbackName;
   a.click();
   URL.revokeObjectURL(a.href);
@@ -6793,18 +7363,124 @@ function revealCulprit(err) {
     draw();
   }
 }
+// ---- one download, with the pieces chosen in a dialog ---------------------
+// Three buttons used to sit here (KiCad project, Gerbers, Save design) and a
+// user had to know which of them kept their work. One button and three ticks
+// says it instead, and the design file can ride along with the board it built.
+const DL_PARTS = ["kicad", "gerbers", "design"];
+const DL_KEY = "bm-download-parts";
+// A design file is JSON with its pictures inlined as base64, so it is bigger
+// than the uploads it describes. Past this it is downloaded on its own instead
+// of riding in the POST, which the server would refuse for size.
+const DL_INLINE_MAX = 15e6;
+const dlBox = () => DL_PARTS.filter(k => $("dl-" + k).checked);
+function dlRemember() {
+  try { localStorage.setItem(DL_KEY, JSON.stringify(dlBox())); } catch (e) {}
+}
+function dlRestore() {
+  let want = ["kicad", "design"]; // the board, plus the file that reopens it
+  try {
+    const saved = JSON.parse(localStorage.getItem(DL_KEY) || "null");
+    if (Array.isArray(saved) && saved.length) {
+      want = DL_PARTS.filter(k => saved.includes(k));
+    }
+  } catch (e) {}
+  for (const k of DL_PARTS) $("dl-" + k).checked = want.includes(k);
+}
+// Say what will actually arrive, before it does: one file or a zip of pieces,
+// named the way it will be named.
+function dlNote() {
+  const parts = dlBox();
+  const slug = designSlug();
+  $("dlgo").disabled = !parts.length;
+  if (!parts.length) {
+    $("dlnote").textContent = "Nothing selected.";
+    return;
+  }
+  if (parts.length === 1) {
+    $("dlnote").textContent = "You get " + (
+      parts[0] === "kicad" ? `${slug}.zip` :
+      parts[0] === "gerbers" ? `${slug}-gerbers.zip` :
+      `${slug}${DESIGN_FILE_EXT}`) + ".";
+    return;
+  }
+  $("dlnote").textContent = `You get one zip, ${slug}-bundle.zip`
+    + (parts.includes("gerbers")
+       ? ", with the fab package inside it as its own zip so it stays uploadable."
+       : ".");
+}
+function downloadPicker() {
+  return new Promise(resolve => {
+    const box = $("dlbox");
+    const done = ok => {
+      box.classList.remove("open");
+      document.removeEventListener("keydown", onKey);
+      $("dlgo").onclick = $("dlcancel").onclick = box.onclick = null;
+      for (const k of DL_PARTS) $("dl-" + k).onchange = null;
+      resolve(ok ? dlBox() : null);
+    };
+    const onKey = e => { if (e.key === "Escape") done(false); };
+    for (const k of DL_PARTS) $("dl-" + k).onchange = () => { dlRemember(); dlNote(); };
+    $("dlgo").onclick = () => done(true);
+    $("dlcancel").onclick = () => done(false);
+    box.onclick = e => { if (e.target === box) done(false); };
+    document.addEventListener("keydown", onKey);
+    dlRestore();
+    dlNote();
+    box.classList.add("open");
+    $("dlgo").focus();
+  });
+}
 $("download").addEventListener("click", async () => {
   const btn = $("download");
   if (btn.disabled || reportBlocked()) return;
+  const parts = await downloadPicker();
+  if (!parts) return;
+  // The fab package goes straight to a board house, so the author's caveat is
+  // still a gate whenever it is one of the pieces.
+  if (parts.includes("gerbers") && !(await fabWarningAck())) return;
+  // Nothing to ask the server for: the design file is built here.
+  if (parts.length === 1 && parts[0] === "design") { saveDesignFile(); return; }
+
+  let design = null, saidSeparately = "";
+  if (parts.includes("design")) {
+    design = designFileText();
+    if (design.length > DL_INLINE_MAX) {
+      // Too big to post back for repackaging; save it here and fetch the rest.
+      saveDesignFile();
+      parts = parts.filter(k => k !== "design");
+      design = null;
+      saidSeparately = " The design file was saved separately: it is too large "
+        + "to travel with the board.";
+    }
+  }
   btn.disabled = true;
   // Generation can finish in well under a second, so re-enabling immediately
   // turns an impatient double-click into two identical zips.
   const settle = () => setTimeout(() => { btn.disabled = false; }, 700);
   setStatus("Generating…");
   try {
-    const note = await fetchDesignZip("/generate", "minibadge.zip");
-    setStatus("Done. Open the .kicad_pro in KiCad, press B to fill zones, export Gerbers." + note);
-    dirty = false; // the design is saved in the zip
+    const note = await fetchDesignZip("/bundle", "minibadge.zip", fd => {
+      fd.append("include", parts.join(","));
+      if (design !== null) {
+        fd.append("designfile",
+                  new File([design], designSlug() + DESIGN_FILE_EXT,
+                           { type: "application/json" }));
+      }
+    }) + saidSeparately;
+    if (parts.includes("design") || saidSeparately) dirty = false;
+    // `dirty` is cleared above only when the design file was part of it. A
+    // board zip holds no art layers, no text objects and no pictures, so it
+    // cannot be reopened to keep working, and treating it as a save is what
+    // made the unsaved-work prompt lie.
+    setStatus(
+      (parts.includes("design")
+        ? "Done — the design file in there is the one to open here again."
+        : parts.includes("kicad")
+        ? "Done. Open the .kicad_pro in KiCad, press B to fill zones, plot from "
+          + "there. Tick “Design file” next time to keep something you can reopen."
+        : "Done. Upload the package to your board house as-is.")
+      + note);
   } catch (err) {
     setStatus("Download failed: " + err.message, true);
     revealCulprit(err);
@@ -6834,26 +7510,6 @@ function fabWarningAck() {
     $("fabok").focus();
   });
 }
-$("gerberbtn").addEventListener("click", async () => {
-  const btn = $("gerberbtn");
-  if (btn.disabled || reportBlocked()) return;
-  if (!(await fabWarningAck())) return; // declined: nothing leaves the building
-  btn.disabled = true;
-  const settle = () => setTimeout(() => { btn.disabled = false; }, 700);
-  setStatus("Plotting Gerbers…");
-  try {
-    const note = await fetchDesignZip("/gerbers", "minibadge-gerbers.zip");
-    setStatus("Done. Upload the zip as-is to JLCPCB or PCBWay and order 1.6 mm, "
-      + "2 layers, your mask color and finish. (OSH Park instead takes the "
-      + ".kicad_pcb from the KiCad project zip directly.)" + note);
-  } catch (err) {
-    setStatus("Gerber export failed: " + err.message, true);
-    revealCulprit(err);
-  } finally {
-    settle();
-  }
-});
-
 // ---- interactive 3D view (real GLB model in a WebGL viewer) ----
 // The 3D rail tab takes over the canvas zone. The server exports the
 // populated board as binary glTF (kicad-cli pcb export glb) and the
@@ -7226,7 +7882,8 @@ const TIPS = {
   </ul>` },
   download: { title: "Step 6: the finished board", img: "final.png", html: `<ul>
     <li>The visor stays dark until the host badge lights its LED. The zip is a complete KiCad project (board, BOM, a README with ordering notes) that already passes KiCad's design checks. Open the <b>.kicad_pro</b>, press <b>B</b> to refill zones, plot Gerbers.</li>
-    <li>Or skip KiCad: <b>⬇ Gerbers for fab</b> plots a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the .kicad_pcb itself). Order 1.6 mm, 2 layers, your mask color and finish.</li>
+    <li><b>⬇ Download</b> asks what to include. <b>Gerber fab package</b> is a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the .kicad_pcb itself) — order 1.6 mm, 2 layers, your mask color and finish. Tick more than one and they arrive together in a single zip.</li>
+    <li><b>Design file</b> is the only piece you can open here again: tick it to keep editing later, or drop the saved file anywhere on the page to pick up where you left off. A board zip is not a design.</li>
   </ul>` },
 };
 const tipPop = document.createElement("div");
@@ -7397,7 +8054,7 @@ function yieldAutosave() {
   // quiets it until the next edit.
   putToast("autosave-yield", "This design is open in another tab, which is "
     + "the one being autosaved. Edits here stay on screen only until that tab "
-    + "closes; download the zip to keep them for sure.", "warn");
+    + "closes; download with “Design file” ticked to keep them for sure.", "warn");
   if (!autosaveOwner) return;
   autosaveOwner = false;
   clearTimeout(saveTimer);
@@ -7432,7 +8089,8 @@ function scheduleAutosave() {
       if (s.length > 4.5e6) {
         if (!saveWarned) {
           saveWarned = true;
-          setStatus("This design is too large to autosave; download the zip to keep it.", true);
+          setStatus("This design is too large to autosave; download it with "
+            + "“Design file” ticked to keep it.", true);
         }
         return;
       }
@@ -7440,71 +8098,309 @@ function scheduleAutosave() {
     } catch (e) {}
   }, 1200);
 }
+// Decoded here rather than through fetch(dataUrl), which cannot work: the app
+// serves `connect-src 'self' blob:` and a fetch of a data: URL is a connect-src
+// fetch, so the browser blocks it. That pairing shipped -- this function is from
+// the first commit, the policy landed four days later -- and it broke restoring
+// EVERY autosaved design that contained an image, silently: restoreDesign runs
+// inside a try/catch, so nothing reached window.onerror and the browser suite's
+// assert_clean() could not see it. Measured on the shipped build: art layers 1
+// -> 0 and "TypeError: Failed to fetch". atob touches no network at all, so the
+// policy stays as tight as it is. Still async: callers await it, and a throw has
+// to keep arriving as a rejection.
 async function dataUrlFile(dataUrl, fname) {
-  const blob = await (await fetch(dataUrl)).blob();
-  return new File([blob], fname, { type: blob.type });
+  const comma = dataUrl.indexOf(",");
+  if (comma < 0) throw new TypeError("not a data URL");
+  const head = dataUrl.slice(0, comma);
+  const type = (head.match(/^data:([^;,]*)/) || [])[1] || "";
+  const body = dataUrl.slice(comma + 1);
+  let bytes;
+  if (/;base64/i.test(head)) {
+    const bin = atob(body); // throws on malformed base64, which the caller reports
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } else {
+    bytes = new TextEncoder().encode(decodeURIComponent(body));
+  }
+  return new File([bytes], fname, { type });
 }
 const loadImageAsync = f => new Promise(res => loadImageFile(f, res));
-async function restoreDesign(d) {
+
+// ---- design files: version ladder, validator, two-phase load -------------
+// The schema has changed three times (rows -> pins, layout:"reverse" ->
+// reverse:true, and the square/custom dropdown era) and `v` stayed 1 through
+// all of them, so a `v: 1` in the wild means any of three shapes. That cannot
+// be undone: MIGRATIONS[1] therefore keeps every one of those sniffs, which are
+// tolerant and idempotent, and runs them on anything claiming 1. What the
+// version buys is the NEXT migration -- an explicit rung instead of a fourth
+// sniff nobody can date.
+const DESIGN_VERSION = 2;
+const MIGRATIONS = {
+  1: d => {
+    // Pre-per-pin saves stored rows; a row means both of its corner pairs.
+    if (!Array.isArray(d.pins) && d.rows) {
+      d.pins = ALL_PINS.filter(n => d.rows[PADS.find(p => p[4] === n)[3]]);
+    }
+    for (const L of Array.isArray(d.leds) ? d.leds : []) {
+      if (L && L.layout === "reverse") { L.layout = "stacked"; L.reverse = true; }
+    }
+    // The square/custom dropdown is gone: a board is square exactly when it has
+    // no outline parts. Saves from that era could carry leftover parts while set
+    // to "square" (switching back kept them, invisibly); honour what the save
+    // showed on screen by dropping them.
+    if (d.shape && d.shape.mode === "square") d.shape.elements = [];
+    return d;
+  },
+};
+function migrateDesign(d) {
+  const from = Number.isInteger(d.v) ? d.v : 1;
+  let out = d;
+  for (let v = from; v < DESIGN_VERSION; v++) {
+    if (MIGRATIONS[v]) out = MIGRATIONS[v](out);
+  }
+  out.v = DESIGN_VERSION;
+  return out;
+}
+
+// A total function: it never throws, and what it returns is safe to hand to
+// applyDesign. `refusal` means the input is not a design at all; otherwise
+// `design` is a sanitised copy and `notes` lists everything that was changed,
+// because a load that quietly drops half a file is the failure this replaces.
+const _num = (v, dflt, lo, hi) => {
+  const n = typeof v === "number" ? v : parseFloat(v);
+  if (!isFinite(n)) return dflt;
+  return Math.min(hi, Math.max(lo, n));
+};
+const _pick = (v, allowed, dflt) => (allowed.includes(v) ? v : dflt);
+const _str = (v, max) => String(v == null ? "" : v).slice(0, max);
+const TEXT_MATERIALS = ["silk", "copper", "glow", "bare"];
+const ART_SIDES = ["front", "back", "through"];
+const LED_LAYOUTS = ["inline", "stacked"];
+function normalizeDesign(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { refusal: "that file does not describe a design" };
+  }
+  const notes = [];
+  // Silence is the failure being fixed here: a file that arrives with half its
+  // contents unreadable used to load as though it were whole. Every reduction
+  // below leaves a note, and the caller shows them.
+  const cap = (list, max, what) => {
+    if (list != null && !Array.isArray(list)) {
+      notes.push(`the ${what} in that file were not a list, so none were loaded`);
+      return [];
+    }
+    const arr = Array.isArray(list) ? list : [];
+    if (arr.length > max) {
+      notes.push(`${arr.length - max} ${what} past the limit of ${max} `
+        + "were dropped; the board could not have carried them");
+    }
+    return arr.slice(0, max);
+  };
+  const usable = (arr, what) => {
+    const keep = arr.filter(x => x && typeof x === "object");
+    if (keep.length !== arr.length) {
+      notes.push(`${arr.length - keep.length} of the ${what} were not readable `
+        + "and were left out");
+    }
+    return keep;
+  };
+  const d = {
+    v: Number.isInteger(raw.v) ? raw.v : 1,
+    name: _str(raw.name, 80) || "my-minibadge",
+    mask: _pick(raw.mask, Object.keys(MASKS), "green"),
+    finish: _pick(raw.finish, ["enig", "hasl"], "enig"),
+    tenting: raw.tenting !== false,
+    rows: raw.rows && typeof raw.rows === "object" ? raw.rows : undefined,
+    pins: Array.isArray(raw.pins)
+      ? ALL_PINS.filter(n => raw.pins.map(String).includes(n)) : undefined,
+  };
+  const c = raw.clk && typeof raw.clk === "object" ? raw.clk : {};
+  const node = n => Array.isArray(n) && n.length >= 2
+    ? [_num(n[0], 0, EXTENT[0], EXTENT[2]), _num(n[1], 0, EXTENT[1], EXTENT[3])] : null;
+  d.clk = {
+    jumper: c.jumper !== false,
+    x: typeof c.x === "number" && isFinite(c.x) ? _num(c.x, 0, EXTENT[0], EXTENT[2]) : null,
+    y: typeof c.y === "number" && isFinite(c.y) ? _num(c.y, 0, EXTENT[1], EXTENT[3]) : null,
+    rot: ((Math.round(_num(c.rot, 0, -1e6, 1e6)) % 360) + 360) % 360,
+    side: _pick(c.side, ["front", "back"], "front"),
+    via: c.via !== false,
+    nodes: (Array.isArray(c.nodes) ? c.nodes : []).map(node).filter(Boolean).slice(0, 8),
+    v3nodes: (Array.isArray(c.v3nodes) ? c.v3nodes : []).map(node).filter(Boolean).slice(0, 8),
+    v3pin: typeof c.v3pin === "string" ? _pick(c.v3pin, ALL_PINS, null) : null,
+  };
+  const sh = raw.shape && typeof raw.shape === "object" ? raw.shape : {};
+  d.shape = {
+    mode: sh.mode === "square" ? "square" : "custom",
+    smooth: _num(sh.smooth, 0.12, 0, 1),
+    elements: usable(cap(sh.elements, MAX_SHAPE_ELS, "board-shape parts"),
+                     "board-shape parts")
+      .map(e => ({
+        kind: _pick(e.kind, ["image", ...Object.keys(SHAPE_KIND_LABELS)], "rect"),
+        op: _pick(e.op, ["add", "cut"], "add"),
+        cx: _num(e.cx, 10.16, EXTENT[0], EXTENT[2]),
+        cy: _num(e.cy, 10.16, EXTENT[1], EXTENT[3]),
+        w: _num(e.w, 10, 0.1, 200), h: _num(e.h, 10, 0.1, 200),
+        rot: ((Math.round(_num(e.rot, 0, -1e6, 1e6)) % 360) + 360) % 360,
+        sides: Math.round(_num(e.sides, 6, 3, 12)),
+        threshold: Math.round(_num(e.threshold, 128, 1, 254)),
+        invert: !!e.invert,
+        fname: _str(e.fname, 120) || null,
+        srcData: typeof e.srcData === "string" ? e.srcData : null,
+      })),
+  };
+  d.art = usable(cap(raw.art, MAX_ART, "artwork layers"), "artwork layers")
+    .map(a => ({
+      kind: _pick(a.kind, ["image", ...Object.keys(SHAPE_KIND_LABELS)], "image"),
+      side: _pick(a.side, ART_SIDES, "front"),
+      bareSide: _pick(a.bareSide, ART_SIDES, undefined),
+      material: _pick(a.material, Object.keys(MATERIALS), "silk"),
+      mode: _pick(a.mode, ["threshold", "palette"], "threshold"),
+      fname: _str(a.fname, 120) || null,
+      srcData: typeof a.srcData === "string" ? a.srcData : null,
+      cx: _num(a.cx, 10.16, EXTENT[0], EXTENT[2]),
+      cy: _num(a.cy, 10.16, EXTENT[1], EXTENT[3]),
+      wmm: _num(a.wmm, 10, 0.5, 200), h: _num(a.h, 10, 0.5, 200),
+      rot: ((Math.round(_num(a.rot, 0, -1e6, 1e6)) % 360) + 360) % 360,
+      sides: Math.round(_num(a.sides, 6, 3, 12)),
+      flip: !!a.flip,
+      threshold: Math.round(_num(a.threshold, 128, 1, 254)),
+      invert: !!a.invert,
+      // Three integers, always. These numbers are interpolated into a style
+      // attribute in the art panel, so a crafted string here is the one place a
+      // design file could have carried markup; cssRGB's own comment predicted
+      // this feature. Clamping at the door means it cannot.
+      palette: (Array.isArray(a.palette) ? a.palette : []).slice(0, MAX_PAL)
+        .filter(q => q && typeof q === "object")
+        .map(q => ({
+          rgb: [0, 1, 2].map(i => Math.round(_num((q.rgb || [])[i], 0, 0, 255))),
+          material: _pick(q.material, ["ignore", ...Object.keys(MATERIALS)], "ignore"),
+        })),
+      overrides: (Array.isArray(a.overrides) ? a.overrides : []).slice(0, 64)
+        .filter(o => o && typeof o === "object")
+        .map(o => ({
+          u: _num(o.u, 0, 0, 1), v: _num(o.v, 0, 0, 1),
+          material: _pick(o.material, ["ignore", ...Object.keys(MATERIALS)], "ignore"),
+          rgb: Array.isArray(o.rgb)
+            ? [0, 1, 2].map(i => Math.round(_num(o.rgb[i], 0, 0, 255))) : null,
+        })),
+    }));
+  d.leds = usable(cap(raw.leds, MAX_LEDS, "LED units"), "LED units")
+    .map(L => {
+      const adv = L.adv && typeof L.adv === "object" ? L.adv : null;
+      return {
+        x: _num(L.x, 10.16, EXTENT[0], EXTENT[2]),
+        y: _num(L.y, 10.16, EXTENT[1], EXTENT[3]),
+        color: _pick(L.color, Object.keys(LEDC), "red"),
+        side: _pick(L.side, ["front", "back"], "front"),
+        rot: ((Math.round(_num(L.rot, 0, -1e6, 1e6)) % 360) + 360) % 360,
+        // "reverse" is a pre-migration layout value; MIGRATIONS[1] rewrites it,
+        // and anything still unrecognised lands on the default rather than
+        // reaching the renderer as an unknown key.
+        layout: _pick(L.layout, [...LED_LAYOUTS, "reverse"], "inline"),
+        size: _pick(L.size, LED_SIZE_ORDER, "0805"),
+        reverse: !!L.reverse, novia: !!L.novia, farled: !!L.farled, clk: !!L.clk,
+        term: Array.isArray(L.term) && L.term.length === 2
+          ? [_pick(L.term[0], ["unit", "pad"], "pad"),
+             typeof L.term[1] === "number" ? Math.round(L.term[1])
+                                           : _pick(L.term[1], ALL_PINS, "16")] : null,
+        nodes: (Array.isArray(L.nodes) ? L.nodes : []).map(node).filter(Boolean).slice(0, 8),
+        anodes: (Array.isArray(L.anodes) ? L.anodes : []).map(node).filter(Boolean).slice(0, 8),
+        vnodes: (Array.isArray(L.vnodes) ? L.vnodes : []).map(node).filter(Boolean).slice(0, 8),
+        cnodes: (Array.isArray(L.cnodes) ? L.cnodes : []).map(node).filter(Boolean).slice(0, 8),
+        adv: adv ? {
+          rx: _num(adv.rx, 0, -20, 20), ry: _num(adv.ry, 0, -20, 20),
+          vx: _num(adv.vx, 0, -20, 20), vy: _num(adv.vy, 0, -20, 20),
+          rrot: ((Math.round(_num(adv.rrot, 0, -1e6, 1e6)) % 360) + 360) % 360,
+          lrot: ((Math.round(_num(adv.lrot, 0, -1e6, 1e6)) % 360) + 360) % 360,
+        } : null,
+      };
+    });
+  d.texts = usable(cap(raw.texts, MAX_TEXTS, "text layers"), "text layers")
+    .map(t => ({
+      // Coerced, never trusted to be a string: a null here used to wedge the
+      // editor permanently, because draw() and every list render call
+      // t.text.trim() on every frame from then on.
+      text: _str(t.text, 60),
+      x: _num(t.x, 10.16, EXTENT[0], EXTENT[2]),
+      y: _num(t.y, 10.16, EXTENT[1], EXTENT[3]),
+      size: _num(t.size, 1.5, TEXT_MM[0], TEXT_MM[1]),
+      side: _pick(t.side, ["front", "back"], "front"),
+      rot: ((Math.round(_num(t.rot, 0, -1e6, 1e6)) % 360) + 360) % 360,
+      font: _pick(t.font, ["kicad", ...FONTS.map(f => f.key)], "kicad"),
+      material: _pick(t.material, TEXT_MATERIALS, "silk"),
+      auto: !!t.auto,
+    }));
+  return { design: d, notes };
+}
+
+// Phase one of a load: everything that can fail, and nothing that touches
+// `state`. Every picture in the file is decoded here, up front, so that by the
+// time anything is applied the answer is already known. The old single-phase
+// restore mutated `state` across its awaits, which is why a bad layer left half
+// the old design and half the new one, and why two loads at once interleaved
+// into a design that was neither.
+async function prepareDesign(d) {
+  const assets = new Map();
+  const jobs = [];
+  (d.shape.elements || []).forEach((e, i) => {
+    if (e.kind === "image" && e.srcData) jobs.push(["el" + i, e.srcData, e.fname || "image.png"]);
+  });
+  (d.art || []).forEach((a, i) => {
+    if ((a.kind || "image") === "image" && a.srcData) jobs.push(["art" + i, a.srcData, a.fname || "art.png"]);
+  });
+  for (const [key, srcData, fname] of jobs) {
+    let file;
+    try {
+      file = await dataUrlFile(srcData, fname);
+    } catch (e) {
+      return { error: `${fname} is not stored as readable image data` };
+    }
+    const r = await loadImageAsync(file);
+    if (!r) return { error: `${fname} is not an image this browser can read` };
+    assets.set(key, r);
+  }
+  return { assets };
+}
+
+// Phase two: synchronous from the first line to the last. It cannot fail
+// part-way, so there is no state in which the editor holds a mixture of two
+// designs.
+function applyDesign(d, assets) {
   $("name").value = d.name || "my-minibadge";
   state.mask = d.mask || "green"; $("mask").value = state.mask;
   state.finish = d.finish || "enig"; $("finish").value = state.finish;
   state.tenting = d.tenting !== false;  // absent (older saves) means tented
   $("tenting").value = state.tenting ? "tented" : "exposed";
-  // Saved designs from before per-pin control stored rows; a row means both
-  // of its corner pairs, so they translate straight across.
-  state.pins = Array.isArray(d.pins) ? ALL_PINS.filter(n => d.pins.includes(n))
-    : d.rows ? ALL_PINS.filter(n => d.rows[PADS.find(p => p[4] === n)[3]])
-    : [...ALL_PINS];
+  // pins arrive already whitelisted (normalizeDesign) and already migrated from
+  // the pre-per-pin `rows` shape (MIGRATIONS[1]).
+  state.pins = Array.isArray(d.pins) ? [...d.pins] : [...ALL_PINS];
   renderPinGrid();
   // Keep state.clk's identity: the jumper selection machinery holds a
   // reference to this exact object (SEL_LIST).
-  Object.assign(state.clk,
-                { jumper: true, x: null, y: null, rot: 0,
-                  side: "front", via: true, nodes: [], v3nodes: [],
-                  v3pin: null },
-                d.clk ? { jumper: d.clk.jumper !== false,
-                          x: typeof d.clk.x === "number" ? d.clk.x : null,
-                          y: typeof d.clk.y === "number" ? d.clk.y : null,
-                          rot: +d.clk.rot || 0,
-                          side: d.clk.side === "back" ? "back" : "front",
-                          via: d.clk.via !== false,
-                          nodes: Array.isArray(d.clk.nodes)
-                            ? d.clk.nodes.map(n => [+n[0], +n[1]]) : [],
-                          v3nodes: Array.isArray(d.clk.v3nodes)
-                            ? d.clk.v3nodes.map(n => [+n[0], +n[1]]) : [],
-                          v3pin: typeof d.clk.v3pin === "string"
-                            ? d.clk.v3pin : null }
-                      : {});
-  state.leds = (d.leds || []).map(L => {
-    const led = { ...L, adv: L.adv ? { ...L.adv } : null };
-    if (led.layout === "reverse") { led.layout = "stacked"; led.reverse = true; }
-    return led;
-  });
-  state.texts = (d.texts || []).map(t => ({ ...t }));
+  Object.assign(state.clk, { ...d.clk, nodes: d.clk.nodes.map(n => [...n]),
+                             v3nodes: d.clk.v3nodes.map(n => [...n]) });
+  state.leds = d.leds.map(L => ({ ...L, adv: L.adv ? { ...L.adv } : null }));
+  state.texts = d.texts.map(t => ({ ...t }));
   state.texts.forEach(t => ensureFont(t.font));
-  // The square/custom dropdown is gone: a board is square exactly when it
-  // has no outline parts. Saves from the dropdown era could carry leftover
-  // parts while set to "square" (switching back kept them, invisibly);
-  // honor what that save showed on screen by dropping the parts.
-  const savedMode = (d.shape && d.shape.mode) || "square";
+  // A board is square exactly when it has no outline parts; there is no mode
+  // switch left (MIGRATIONS[1] drops the dropdown era's stranded parts).
   state.shape.mode = "custom";
-  state.shape.smooth = (d.shape && d.shape.smooth != null) ? d.shape.smooth : 0.12;
+  state.shape.smooth = d.shape.smooth;
   state.shape.elements = [];
-  for (const e of (savedMode === "custom" && d.shape.elements) || []) {
+  d.shape.elements.forEach((e, i) => {
     const el = { kind: e.kind, op: e.op, cx: e.cx, cy: e.cy, w: e.w, h: e.h,
-                 rot: e.rot || 0, sides: e.sides || 6,
+                 rot: e.rot, sides: e.sides,
                  threshold: e.threshold, invert: e.invert };
-    if (e.kind === "image" && e.srcData) {
-      const r = await loadImageAsync(await dataUrlFile(e.srcData, e.fname || "image.png"));
+    const r = assets.get("el" + i);
+    if (r) {
       Object.assign(el, { file: r.upload, raster: r.raster, isSvg: r.isSvg,
                           srcData: e.srcData, fname: e.fname, orig: r.src, ow: r.iw, oh: r.ih });
       computeElGrid(el);
     }
     state.shape.elements.push(el);
-  }
+  });
   state.art = [];
-  for (const s of d.art || []) {
+  d.art.forEach((s, ai) => {
     if (s.kind && s.kind !== "image") {
       state.art.push({
         kind: s.kind, material: s.material || "bare",
@@ -7514,10 +8410,10 @@ async function restoreDesign(d) {
         mode: "threshold", threshold: 128, invert: false, flip: false,
         palette: [], overrides: [], caches: null, empty: false,
       });
-      continue;
+      return;
     }
-    if (!s.srcData) continue;
-    const r = await loadImageAsync(await dataUrlFile(s.srcData, s.fname || "art.png"));
+    const r = assets.get("art" + ai);
+    if (!r) return; // a layer with no picture behind it is not a layer
     const a = {
       file: r.upload, raster: r.raster, isSvg: r.isSvg, srcData: s.srcData,
       fname: s.fname, orig: r.src, img: r.src, ow: r.iw, oh: r.ih, iw: r.iw, ih: r.ih,
@@ -7532,12 +8428,218 @@ async function restoreDesign(d) {
     applyTransform(a);
     rebuildArt(a);
     state.art.push(a);
-  }
+  });
   renderShapeOpts(); renderPinGrid(); renderArtList(); renderLedList(); renderTextList(); renderLegend();
   requestOutline(true);
   draw();
-  setStatus("Design restored.");
 }
+
+// The whole load, in the one order that is safe: migrate, sanitise, decode,
+// and only then apply. `loadSeq` makes a second call supersede a first instead
+// of interleaving with it -- two loads used to merge into a design that was
+// neither, with both reporting success.
+let loadSeq = 0;
+async function installDesign(raw, what) {
+  const seq = ++loadSeq;
+  const checked = normalizeDesign(raw);
+  if (checked.refusal) return { error: checked.refusal };
+  // A schema we do not have the migration for is refused whole. Loading the
+  // parts we happen to recognise would quietly discard whatever the newer build
+  // added, and the user would not know which half they were looking at.
+  if (checked.design.v > DESIGN_VERSION) {
+    return { error: `that design was saved by a newer version of the designer `
+      + `(format ${checked.design.v}, this build reads ${DESIGN_VERSION})` };
+  }
+  const d = migrateDesign(checked.design);
+  const prepared = await prepareDesign(d);
+  if (prepared.error) return { error: prepared.error };
+  if (seq !== loadSeq) return { superseded: true };
+  applyDesign(d, prepared.assets);
+  const notes = checked.notes.length ? " " + checked.notes.join("; ") + "." : "";
+  setStatus(`${what}.${notes}`, !!checked.notes.length);
+  return { ok: true, notes: checked.notes };
+}
+// Kept as the name the restore bar and the tests already use.
+async function restoreDesign(d) {
+  const r = await installDesign(d, "Design restored");
+  if (r.error) throw new Error(r.error);
+  return r;
+}
+
+// ---- design files the user keeps -----------------------------------------
+// One plain-JSON file, because a save format outlives the app that wrote it:
+// this one can be read, diffed and hand-repaired with no tooling. `design` is
+// designJSON()'s output verbatim -- one serialiser, so the file can never drift
+// from what the generator is actually given -- and the envelope around it exists
+// so a loader can identify a file before trusting a byte of it.
+//
+// The envelope is built AROUND designJSON() rather than added to it on purpose:
+// JSON.stringify(designJSON()) is the 3D viewer's cache key, so a timestamp
+// inside would re-export the board on every check.
+const DESIGN_FILE_FORMAT = "minibadge-design";
+const DESIGN_FILE_EXT = ".minibadge.json";
+// A ceiling checked before parsing. Eight 3 MB photos base64 to ~34 MB, which is
+// a legal design this app will happily produce, so the limit has to sit above
+// that rather than at the server's upload cap.
+const DESIGN_FILE_MAX = 64e6;
+// Same rule the server uses for the zip's filename, so a design and its board
+// arrive under the same name.
+const designSlug = () => ($("name").value.trim()
+  .replace(/[^A-Za-z0-9._-]+/g, "_").replace(/^[._-]+|[._-]+$/g, "") || "minibadge");
+
+// A yes/no question, in the same card the fab warning uses. Native confirm()
+// would be the only blocking dialog in the app and cannot be styled or reached
+// the same way by a test.
+function askAck(title, body, okLabel) {
+  return new Promise(resolve => {
+    const box = $("askbox");
+    $("askboxh").textContent = title;
+    $("askboxbody").textContent = body;
+    $("askyes").textContent = okLabel || "Continue";
+    const done = ok => {
+      box.classList.remove("open");
+      document.removeEventListener("keydown", onKey);
+      $("askyes").onclick = $("askno").onclick = box.onclick = null;
+      resolve(ok);
+    };
+    const onKey = e => { if (e.key === "Escape") done(false); };
+    $("askyes").onclick = () => done(true);
+    $("askno").onclick = () => done(false);
+    box.onclick = e => { if (e.target === box) done(false); };
+    document.addEventListener("keydown", onKey);
+    box.classList.add("open");
+    $("askno").focus(); // the safe option, since this one can discard work
+  });
+}
+
+function designFileText() {
+  return JSON.stringify({
+    $format: DESIGN_FILE_FORMAT,
+    formatVersion: DESIGN_VERSION,
+    savedAt: new Date().toISOString(),
+    app: APP_VERSION,
+    design: designJSON(),
+  });
+}
+function saveDesignFile() {
+  let text;
+  try {
+    text = designFileText();
+  } catch (e) {
+    setStatus("Could not build the design file: " + e.message, true);
+    return null;
+  }
+  const fname = designSlug() + DESIGN_FILE_EXT;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([text], { type: "application/json" }));
+  a.download = fname;
+  a.click();
+  URL.revokeObjectURL(a.href);
+  dirty = false; // this file, unlike the board zip, really does hold the design
+  setStatus(`Saved ${fname}. Open it with “⬆ Open design” to carry on later.`);
+  return fname;
+}
+
+// The order here is the whole point: identify, then check the version, then ASK,
+// then decode, then apply. Every refusal before the last step leaves the open
+// design byte-identical, which is what makes it safe to just try a file.
+async function loadDesignFile(file) {
+  const refuse = msg => { setStatus(msg, true); return { error: msg }; };
+  if (!file) return { error: "no file" };
+  if (file.size > DESIGN_FILE_MAX) {
+    return refuse(`${file.name} is ${(file.size / 1e6).toFixed(0)} MB, which is `
+      + "larger than any design this app can produce; it is probably not one.");
+  }
+  let raw;
+  try {
+    raw = JSON.parse(await file.text());
+  } catch (e) {
+    return refuse(`${file.name} is not a minibadge design: it is not even valid JSON.`);
+  }
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)
+      || raw.$format !== DESIGN_FILE_FORMAT || !raw.design
+      || typeof raw.design !== "object" || Array.isArray(raw.design)) {
+    return refuse(`${file.name} is valid JSON but not a minibadge design file.`);
+  }
+  const fv = raw.formatVersion;
+  if (!Number.isInteger(fv) || fv < 1) {
+    return refuse(`${file.name} does not say which design format it uses.`);
+  }
+  if (fv > DESIGN_VERSION) {
+    return refuse(`${file.name} was saved by a newer version of the designer `
+      + `(format ${fv}, this build reads ${DESIGN_VERSION}). Update and try again.`);
+  }
+  if (dirty && !(await askAck("Replace the open design?",
+      "This board has changes that are not in a saved file. Opening "
+      + `${file.name} replaces them.`, "Open it"))) {
+    setStatus("Kept the design that was open.");
+    return { cancelled: true };
+  }
+  // The envelope's version is the authority for a file; the copy inside the
+  // design is whatever the writer happened to stamp.
+  let r;
+  try {
+    r = await installDesign({ ...raw.design, v: fv }, `Opened ${file.name}`);
+  } catch (e) {
+    // Reaching here means normalizeDesign let something through that applying
+    // could not survive, i.e. a bug rather than a bad file. Say so plainly
+    // instead of dying inside a change handler where nothing is reported -- and
+    // console.error it, because that is what the test suite watches and this
+    // must not be able to go quiet.
+    console.error("applying a design threw", e);
+    return refuse(`${file.name} could not be applied (${e.message}). The board `
+      + "on screen may be part-way through the change; reload to start clean.");
+  }
+  if (r.error) return refuse(`${file.name} could not be opened: ${r.error}.`);
+  if (r.ok) dirty = false;
+  return r;
+}
+$("openbtn").addEventListener("click", () => $("designfile").click());
+// Dragging a design file onto the window opens it. A whole-window target is
+// easier to aim at than a button, and it is what anyone who has used a design
+// tool before will try first. `dragenter`/`dragleave` fire for every element
+// crossed, so the overlay is counted in and out rather than toggled.
+let dragDepth = 0;
+const dragHasFile = e => [...(e.dataTransfer?.types || [])].includes("Files");
+const showDrop = on => {
+  dragDepth = on ? dragDepth : 0;
+  $("dropzone").classList.toggle("on", on);
+};
+window.addEventListener("dragenter", e => {
+  if (!dragHasFile(e)) return;
+  dragDepth++;
+  $("dropzone").classList.add("on");
+});
+window.addEventListener("dragover", e => {
+  if (!dragHasFile(e)) return;
+  e.preventDefault(); // without this the browser refuses the drop
+  e.dataTransfer.dropEffect = "copy";
+});
+window.addEventListener("dragleave", e => {
+  if (!dragHasFile(e)) return;
+  if (--dragDepth <= 0) showDrop(false);
+});
+window.addEventListener("drop", async e => {
+  if (!dragHasFile(e)) return;
+  e.preventDefault();
+  showDrop(false);
+  const f = [...(e.dataTransfer.files || [])][0];
+  if (!f) return;
+  // An image dropped here is almost certainly meant as artwork, and silently
+  // refusing it as "not a design" would be unhelpful when the art panel is one
+  // click away.
+  if (/^image\//.test(f.type) || /\.(png|jpe?g|svg|gif|webp)$/i.test(f.name)) {
+    setStatus(`${f.name} is a picture, not a design file. Add it as artwork with `
+      + "“+ Image…” in the Art panel, or as a board outline in Shape.", true);
+    return;
+  }
+  await loadDesignFile(f);
+});
+$("designfile").addEventListener("change", async () => {
+  const f = $("designfile").files[0];
+  $("designfile").value = ""; // so re-opening the same file fires again
+  if (f) await loadDesignFile(f);
+});
 (() => { // offer (never force) restoring the last session's design
   let saved = null;
   try {
