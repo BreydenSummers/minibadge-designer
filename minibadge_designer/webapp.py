@@ -1876,7 +1876,10 @@ def _generate_impl(render: bool):
             solid = _prep(outline_poly.buffer(-0.55))
 
             def on_board(led):
-                return solid.contains(pcb.unit_poly(led, safe))
+                # The unit's real footprint: a unit whose parts were placed by
+                # hand claims only the room its copper uses, not the empty
+                # envelope those parts span (pcb.unit_footprint).
+                return solid.contains(pcb.unit_footprint(led, safe))
 
             def overlaps_any(probe, skip):
                 pp = pcb.unit_poly(probe, safe)
