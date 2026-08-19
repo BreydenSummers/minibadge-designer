@@ -180,7 +180,8 @@ def texts(draw):
         text=draw(st.text(alphabet=st.characters(min_codepoint=32,
                                                  max_codepoint=126),
                           min_size=1, max_size=12)),
-        size=draw(st.floats(0.6, 6.0, allow_nan=False)),   # webapp clamps
+        # the whole range webapp.TEXT_SIZE_MM admits, ends included
+        size=draw(st.floats(0.6, 119.0, allow_nan=False)),
         side=draw(st.sampled_from(SIDES)), rot=draw(rot),
         font=draw(st.sampled_from(FONTS)),
         material=draw(st.sampled_from(MATERIALS)))

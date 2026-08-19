@@ -132,6 +132,21 @@ def _load_font(key: str):
     return font, font.getGlyphSet(), font.getBestCmap(), upm, cap
 
 
+def cap_ratio(key: str) -> float:
+    """Cap height as a fraction of the em, for one bundled face.
+
+    The web preview draws text with the browser's own rasteriser, which sizes a
+    face by its em, while everything on the board is sized by its CAP HEIGHT
+    (see :func:`text_geometry`). Converting between the two needs this ratio,
+    and it is a property of the individual font: the bundled faces run from
+    0.348 (Special Elite) to 1.000 (Press Start 2P). A preview that assumes one
+    value for all of them draws text at the wrong size and then decides whether
+    it fits the board from that wrong size.
+    """
+    _font, _gs, _cmap, upm, cap = _load_font(key)
+    return cap / upm
+
+
 @lru_cache(maxsize=256)
 def _glyph_geom(key: str, ch: str):
     """(geometry in font units | None, advance width) for one character."""
@@ -179,3 +194,75 @@ def text_geometry(text: str, key: str, size_mm: float):
     minx, _y0, maxx, _y1 = g.bounds
     g = translate(g, xoff=-(minx + maxx) / 2)
     return g.simplify(0.005)
+
+
+#: Ink extents are rounded OUTWARD to this many font units before they are
+#: shipped, so the table always describes a box that contains the real ink
+#: (never one inside it) while keeping the payload small. 0.01 font unit is
+#: 1e-5 em, which at the largest text the UI offers (119 mm cap) is 1.7 um --
+#: four orders of magnitude below the 0.2 mm silk-to-edge budget it feeds.
+_INK_ROUND = 2
+
+
+def _out_lo(v: float) -> float:
+    from math import floor
+
+    return floor(v * 10**_INK_ROUND) / 10**_INK_ROUND
+
+
+def _out_hi(v: float) -> float:
+    from math import ceil
+
+    return ceil(v * 10**_INK_ROUND) / 10**_INK_ROUND
+
+
+@lru_cache(maxsize=None)
+def char_metrics(key: str) -> dict:
+    """Every character one bundled face can draw, measured as the board draws it.
+
+    The editor has to know how wide a string will print BEFORE it prints, to
+    decide whether it clears the board edge and the holes. It used to ask the
+    browser, whose rasteriser is not the thing that lays out the board: the
+    browser kerns, forms ligatures and swaps in a face's default alternates,
+    while :func:`text_geometry` walks the string one cmap glyph at a time. The
+    disagreement reached 6.1% of a string's width (Pacifico "gjpqy", whose "g"
+    and "o" the browser draws from that face's alternates), and the editor
+    covered it by padding every measurement of every face by 8% -- which on a
+    17 mm string is 1.36 mm of phantom margin per side, enough to refuse a
+    text that had millimetres of real clearance.
+
+    Shipping these numbers instead lets the editor compute the server's own ink
+    box exactly, for any string, with no padding and no round trip. The values
+    are this face's FONT UNITS (divide by `cap` and multiply by the text's
+    cap-height size to get mm), because that is the frame the glyph outlines
+    are already in and the advances are exact integers there:
+
+    * ``upm`` / ``cap``   -- em size and cap height, the two scales involved
+    * ``miss``            -- advance text_geometry gives a character this face
+                             has no glyph for (it draws nothing and moves on)
+    * ``chars[ch]``       -- ``[advance]`` for a blank glyph, else
+                             ``[advance, x0, x1, up, down]``: ink extents left
+                             and right of the pen and above and below the
+                             baseline, y measured upward like the font's own
+                             outlines.
+
+    Ink comes from the same flattened, unioned geometry :func:`text_geometry`
+    places, so a face whose curves the 12-step flattening undershoots is
+    undershot identically here; the editor's box is the ink the board gets,
+    not the ink the outline describes.
+    """
+    _font, _gs, cmap, upm, cap = _load_font(key)
+    chars: dict[str, list[float]] = {}
+    for cp in sorted(cmap):
+        if cp < 0x20:  # the UI strips control characters before they get here
+            continue
+        ch = chr(cp)
+        geom, advance = _glyph_geom(key, ch)
+        if advance is None:  # cmap named a glyph the glyf table does not have
+            continue
+        if geom is None or geom.is_empty:
+            chars[ch] = [advance]
+            continue
+        x0, y0, x1, y1 = geom.bounds
+        chars[ch] = [advance, _out_lo(x0), _out_hi(x1), _out_hi(y1), _out_hi(-y0)]
+    return {"upm": upm, "cap": cap, "miss": upm * 0.5, "chars": chars}
