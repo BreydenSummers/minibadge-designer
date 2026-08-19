@@ -377,7 +377,7 @@ PKG = {
     # tripped KiCad's courtyards_overlap error.
     "0603": {"dx": 0.875, "pw": 1.05, "ph": 0.95, "res_dy": 2.2, "gap": 2.15, "body": (1.6, 0.8)},
     "0805": {"dx": 1.025, "pw": 1.15, "ph": 1.4, "res_dy": 2.6, "gap": 2.2, "body": (2.0, 1.25)},
-    "1206": {"dx": 1.5375, "pw": 1.325, "ph": 1.8, "res_dy": 3.2, "gap": 2.6, "body": (3.2, 1.6)},
+    "1206": {"dx": 1.5375, "pw": 1.325, "ph": 1.75, "res_dy": 3.2, "gap": 2.6, "body": (3.2, 1.6)},
     "1.8mm": {"dx": 1.27, "pw": 1.8, "ph": 1.8, "res_dy": 2.8, "gap": 2.2, "body": (3.3, 2.4),
               "lens": 1.8, "drill": 0.9, "res_pkg": "0805", "th_desc": "radial",
               "th_model": "LED_D1.8mm_W3.3mm_H2.4mm"},
