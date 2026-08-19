@@ -152,6 +152,17 @@ MIN_DRILL_MM = 0.2              # smallest drill in the cheap tier
 RULE_CLEARANCE_MM = 0.15        # copper to other-net copper
 RULE_EDGE_CLEARANCE_MM = 0.2    # copper to board edge
 FAB_CLEARANCE_FLOOR_MM = 0.127  # 5 mil; below this no cheap fab will build it
+RULE_TEXT_HEIGHT_MM = 0.6       # silkscreen text cap height
+RULE_TEXT_THICKNESS_MM = 0.1    # silkscreen text stroke width
+
+#: A legible silkscreen pen, as a fraction of the cap height it draws. Stated as
+#: a band rather than a number because the emitter's exact ratio is a taste
+#: decision and this is not: under the low end the glyphs come off the panel
+#: spidery and break up, over the high end the pen floods the counters of an
+#: 'e' or an 'a' and the word turns into a row of blobs. Neither is a DRC
+#: violation -- the pen width alone satisfies the rules at any height -- so
+#: nothing but this catches a pen that stopped following the size it draws.
+PEN_RATIO_BAND = (0.08, 0.25)
 
 #: ``pcb._n`` writes coordinates at four decimal places, so a vertex read back
 #: out of the file can sit up to 5e-5 mm from the geometry that produced it.
@@ -1631,6 +1642,62 @@ def assert_fab_choices_reach_the_stackup(b: Board, spec) -> None:
         "the user pays for ENIG and gets HASL, or vice versa")
 
 
+def assert_stroke_text_prints_at_the_size_it_asks_for(b: Board, spec) -> None:
+    """Every ``gr_text`` on the board is a cap height AND a stroke width the
+    board rules accept.
+
+    The two numbers are one decision, and only one of them is proportional:
+    ``_text_items`` writes the pen width as a fraction of the cap height, so
+    shrinking the text thins the pen with it, and past a point the pen goes
+    under ``min_text_thickness`` while the height is still legal. The
+    downloaded project then fails its own DRC on the smallest text the UI is
+    willing to make -- a user who typed a 0.6 mm handle opens KiCad to
+    violations they did not cause and cannot see the cause of.
+
+    Stated here rather than read out of ``pcb``: a check sourcing its floor
+    from the emitter it is judging would follow the emitter down.
+    """
+    # Presence before the loop: a check that only reads what the file happens
+    # to contain says nothing about a text that never reached it, and the whole
+    # battery is loops that pass on []. The stroke font is the only one that
+    # becomes a gr_text; the TTF faces arrive as art polygons.
+    want = [t for t in spec.texts if t.font == "kicad" and t.text.strip()]
+    got = _kids(b.root, "gr_text")
+    assert len(got) == len(want), (
+        f"the spec asks for {len(want)} stroke-font text(s) and the board "
+        f"carries {len(got)}; the user typed a string that is not on the board "
+        "they download, or one they deleted is still on it")
+    for t in got:
+        eff = _kid(t, "effects")
+        font = _kid(eff, "font") if eff is not None else None
+        assert font is not None, (
+            f"gr_text {t[1]!r} carries no (font ...): KiCad prints it at "
+            "whatever the default is, not at the size the user picked")
+        height = float(_kid(font, "size")[1])
+        thickness = float(_val(font, "thickness"))
+        assert height >= RULE_TEXT_HEIGHT_MM - _EPS, (
+            f"gr_text {t[1]!r} is {height} mm tall, under the "
+            f"{RULE_TEXT_HEIGHT_MM} mm min_text_height the project declares; "
+            "the download fails its own DRC")
+        assert thickness >= RULE_TEXT_THICKNESS_MM - _EPS, (
+            f"gr_text {t[1]!r} is {height} mm tall with a {thickness} mm pen, "
+            f"under the {RULE_TEXT_THICKNESS_MM} mm min_text_thickness the "
+            "project declares; the smallest text the UI allows ships a board "
+            "that fails DRC, and no fab prints a stroke that thin either")
+        lo, hi = PEN_RATIO_BAND
+        assert thickness >= max(RULE_TEXT_THICKNESS_MM, height * lo) - _EPS, (
+            f"gr_text {t[1]!r} is {height} mm tall but drawn with a "
+            f"{thickness} mm pen, {thickness / height:.3f} of its height: the "
+            f"pen stopped scaling with the text below {lo}, and big text comes "
+            "back from the fab spidery and broken up where the preview showed "
+            "it solid")
+        assert thickness <= height * hi + _EPS, (
+            f"gr_text {t[1]!r} is {height} mm tall but drawn with a "
+            f"{thickness} mm pen, {thickness / height:.3f} of its height: past "
+            f"{hi} the pen floods the counters and the word prints as a row of "
+            "blobs, which DRC has no opinion about")
+
+
 def assert_project_rules_match_the_invariants(pro_text: str) -> None:
     """The shipped ``.kicad_pro`` declares the rules these invariants enforce.
 
@@ -1659,6 +1726,16 @@ def assert_project_rules_match_the_invariants(pro_text: str) -> None:
             f"the project declares {name} {got} mm, below the "
             f"{FAB_CLEARANCE_FLOOR_MM} mm fab floor; DRC passes locally and "
             "the panel comes back scrap")
+    # Same blind spot, on the silk text rules: raise either one here without
+    # raising it in assert_stroke_text_prints_at_the_size_it_asks_for and the
+    # smallest texts pass every fast test while real DRC rejects them.
+    for name, enforced in (("min_text_height", RULE_TEXT_HEIGHT_MM),
+                           ("min_text_thickness", RULE_TEXT_THICKNESS_MM)):
+        got = float(rules[name])
+        assert got <= enforced + _EPS, (
+            f"the project declares {name} {got} mm but the in-process text "
+            f"check only enforces {enforced} mm; text that fails real DRC "
+            "would pass every fast test")
 
 
 # ===========================================================================
@@ -1695,6 +1772,7 @@ ALL_CHECKS = [
     assert_board_outline_is_closed_and_matches_the_spec,
     assert_fab_choices_reach_the_stackup,
     assert_back_side_parts_live_on_back_layers,
+    assert_stroke_text_prints_at_the_size_it_asks_for,
 ]
 
 

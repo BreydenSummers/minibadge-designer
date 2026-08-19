@@ -26,6 +26,27 @@ ORIGIN = 100.0  # page offset of the footprint frame, mm
 # Board outline in board mm (from MiniBadge_Simple Edge.Cuts).
 OUTLINE = (0.16, 0.16, 20.16, 20.16)
 
+# How close to the board edge a text's ink may be placed, mm. Text is the one
+# thing the user positions to the millimetre, so this is the number the editor
+# refuses them at, and it was worth measuring rather than borrowing.
+#
+# KiCad's own limit is CONTACT: a silk polygon whose left edge sits 0 mm from
+# Edge.Cuts trips silk_edge_clearance ("Silkscreen clipped by board edge"),
+# and the same polygon 0.001 mm inside it passes -- verified with kicad-cli
+# 9.0.4 `pcb drc --severity-all --exit-code-violations` against this project's
+# own generate_project() rules, for gr_poly (filled and outline), gr_line,
+# gr_rect, gr_circle and gr_text alike. So DRC would allow ink a micron from
+# the cut, which no fab can print: published silk-to-edge capability runs
+# 0.2-0.25 mm, with 0.3-0.5 mm recommended.
+#
+# 0.2 mm is the bottom of that capability range and the same edge budget this
+# board already gives COPPER (min_copper_edge_clearance in generate_project),
+# which is the more critical layer of the two -- ink that smears into the
+# routed edge is cosmetic, copper there is not. Artwork keeps the wider
+# logo.EDGE_MARGIN 0.5 mm: an uploaded image is framed by the app, not placed
+# by hand, so it has nothing to gain from the last 0.3 mm.
+TEXT_EDGE_CLEAR = 0.2
+
 # Connector pads: (pad number, x, y, net label or None, row).
 # Vendored from MiniBadge_Simple.kicad_mod: 1.75 mm circular pads, 0.95 mm drill.
 # Each row alone provides 3V3 + GND, so a badge may keep just one of them.
@@ -3756,7 +3777,11 @@ def _text_items(spec: BadgeSpec) -> list[str]:
         front = t.side != "back"
         layer = "F.SilkS" if front else "B.SilkS"
         mirror = "" if front else " (justify mirror)"
-        thickness = round(t.size * 0.15, 3)
+        # 0.15 of the cap height reads like KiCad's own default, but the
+        # board rules also ask for min_text_thickness 0.1: below a 0.67 mm
+        # cap the proportional stroke would thin past that and fail DRC, so
+        # the smallest text prints with a slightly heavier pen instead.
+        thickness = max(0.1, round(t.size * 0.15, 3))
         # KiCad text angles count counterclockwise; ours run clockwise.
         rot = (-float(t.rot)) % 360
         at = (f"{_n(ORIGIN + t.x)} {_n(ORIGIN + t.y)}"
@@ -3913,7 +3938,9 @@ def generate_project(name: str) -> str:
     # min_copper_edge_clearance 0.2: the official minibadge connector pads sit
     # 0.235 mm from the outline, so KiCad's 0.25 default false-flags them.
     # min_text_height 0.6: the printed pin captions are 0.6 mm silk, small
-    # but well within what fabs print; user text stays >= 0.8 in the UI.
+    # but well within what fabs print, and it is also the floor the UI holds
+    # user text to (webapp.TEXT_SIZE_MM) -- _text_items thickens the pen at
+    # that end so the stroke clears min_text_thickness too.
     # lib_footprint_issues ignored: all footprints are embedded in the board.
     return (
         "{\n"
