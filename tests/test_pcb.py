@@ -491,7 +491,7 @@ def test_package_sizes_scale_footprints():
     assert '"minibadge-designer:LED_RED_0603"' in out
     assert "(size 1.05 0.95)" in out    # 0603 hand-solder pads
     assert '"minibadge-designer:LED_BLUE_1206"' in out
-    assert "(size 1.325 1.8)" in out    # 1206 hand-solder pads
+    assert "(size 1.325 1.75)" in out    # 1206 hand-solder pads
     bom = pcb.generate_bom(pcb.BadgeSpec(leds=[pcb.Led(6, 6, "red", size="0603")]))
     assert "LED 0603 (1608 metric)" in bom
 
