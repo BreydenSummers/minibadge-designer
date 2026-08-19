@@ -163,6 +163,38 @@ def test_clamp_is_rotation_aware():
             assert bx1 <= pcb.UNIT_SAFE[2] + 1e-9 and by1 <= pcb.UNIT_SAFE[3] + 1e-9
 
 
+@pytest.mark.parametrize(
+    "size, side, rot",
+    [("0805", "front", 0), ("1206", "back", 0), ("0805", "front", 90)],
+)
+def test_a_hand_placed_unit_only_blocks_the_pads_its_copper_reaches(size, side, rot):
+    """Free-placed parts are judged on their copper, not on the box round them.
+
+    Dragging the resistor to one corner and the LED to another leaves most of
+    the unit's envelope empty board.  Judging that envelope costs the user a
+    placement the fab can build: the generator slides the unit somewhere else
+    (resolve_pad_overlap) or refuses the download, over a corner nothing of
+    the unit occupies.
+    """
+    from shapely.geometry import box as sbox
+
+    spread = {"rx": 5.0, "ry": 12.0, "vx": 2.0, "vy": 10.0}
+    away = pcb.Led(3.0, 4.5, "red", size=size, side=side, rot=rot, adv=spread)
+    hits = [k for k in pcb.active_pairs(pcb.ALL_PINS)
+            if pcb.unit_poly(away).intersects(sbox(*pcb.PAD_PAIRS[k]["keepout"]))]
+    assert hits, ("vacuous: this unit's envelope no longer reaches a pad pair, "
+                  "so it cannot show that the envelope is not what is judged")
+    assert not pcb.pad_conflict(away, pcb.ALL_PINS), (
+        f"a unit whose envelope merely spans the {hits} pair is refused, "
+        "though none of its pads, traces or via reach it")
+    # ...and dragging the resistor ONTO that pair is still a conflict: this is
+    # the copper that shorts the header, and it has to keep being refused.
+    onto = dict(spread, rx=-0.6, ry=13.6)
+    assert pcb.pad_conflict(
+        pcb.Led(3.0, 4.5, "red", size=size, side=side, rot=rot, adv=onto),
+        pcb.ALL_PINS), "a part parked on the connector pads is not refused"
+
+
 def test_rotation_rotates_pads_and_via():
     # rot 90 (clockwise): resistor moves from above the LED to its right,
     # LED pads go vertical, via moves above the LED.

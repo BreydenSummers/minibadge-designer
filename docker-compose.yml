@@ -15,6 +15,43 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     restart: unless-stopped
+
+    # ---- resource ceilings ------------------------------------------------
+    # Not tuning: containment. Every endpoint here is unauthenticated and
+    # every one of them decodes a file the caller chose, so "how much of this
+    # machine can one upload spend" has to have an answer other than "all of
+    # it". It matters more than usual because of what shares the box: the
+    # GitHub runner that deploys this app and the reverse proxy that fronts it
+    # both live here, so an OOM triggered from the internet would take down the
+    # site, the proxy, and the thing that could redeploy either.
+    #
+    # 3 GB across 4 gunicorn workers is roughly 4x their steady ~100 MB plus
+    # headroom for the heaviest legitimate board. Over it, the kernel kills one
+    # worker and gunicorn starts a replacement; the alternative is the host's
+    # OOM killer choosing, and it does not know which process is the website.
+    deploy:
+      resources:
+        limits:
+          memory: 3g
+          cpus: "2.0"
+          # kicad-cli forks; runaway process creation should not be able to
+          # exhaust the host's process table. (Set here rather than as the
+          # top-level `pids_limit`, which compose rejects as a duplicate.)
+          pids: 512
+    security_opt:
+      - "no-new-privileges:true"
+    # Nothing in the image is written at runtime: the app reads its own
+    # package, and every request builds its own TemporaryDirectory. The three
+    # tmpfs below are the paths that genuinely need to be writable --
+    # /tmp for those directories, /dev/shm for gunicorn's worker heartbeat
+    # (see gunicorn.conf.py), and /home/badge because kicad-cli insists on
+    # writing a config file into HOME before it will export anything.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /dev/shm:size=64m
+      - /home/badge:uid=1000,gid=1000
+
     # No curl in the image; the interpreter is already there.
     healthcheck:
       test: ["CMD", "python3", "-c",

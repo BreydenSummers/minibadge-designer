@@ -86,6 +86,27 @@ DEFAULT_BUDGET_S = 20.0
 #: while sitting far under the seconds a regression would cost.
 SVG_BUDGET_S = 2.0
 
+#: A board outline the app ACCEPTS has to come back promptly, because /outline
+#: runs on every nudge of the design and the user is watching the preview while
+#: it does.
+#:
+#: This budget exists to hold one specific repair. The pixel classifier filled
+#: its per-material grids with `setdefault(mat, [False] * n)`, and Python
+#: evaluates arguments before the call, so a fresh n-element list was built and
+#: thrown away on every SET pixel instead of once per material -- making the
+#: loop O(set_pixels x total_pixels). On the outline grid (n = 230 400) a filled
+#: silhouette sets ~180 000 of them, which is 42 billion element writes:
+#: measured at **26.3 s** for the repo's own helmet fixture, and 0.016 s after
+#: hoisting the allocation to the miss. It was never only a hostile-input
+#: problem; anyone building a custom outline from their own logo paid it.
+#:
+#: 5 s therefore sits with ~15x headroom over the repaired path and fails the
+#: regression by 5x. The payload is a plain filled disc, which is the worst
+#: case for that loop (many set pixels) and near the best case for everything
+#: downstream (one merged run per row), so a failure here points at the
+#: classifier and not at the geometry.
+ACCEPTED_OUTLINE_BUDGET_S = 5.0
+
 
 # ---------------------------------------------------------------------------
 # Live defects, keyed by the id in the decisions-file ledger, referenced by
@@ -225,6 +246,20 @@ def png_bytes(w: int = 120, h: int = 120) -> bytes:
     from PIL import Image, ImageDraw
     img = Image.new("RGB", (w, h), "white")
     ImageDraw.Draw(img).ellipse((w // 6, h // 6, w * 5 // 6, h * 5 // 6), fill="black")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+@cache
+def filled_silhouette_png(side: int = 600) -> bytes:
+    """A large filled disc: maximum SET pixels, minimum output rectangles.
+
+    Wider than the 480-cell outline grid so the shape survives the resample.
+    """
+    from PIL import Image, ImageDraw
+    img = Image.new("L", (side, side), "white")
+    ImageDraw.Draw(img).ellipse((2, 2, side - 2, side - 2), fill="black")
     buf = io.BytesIO()
     img.save(buf, "PNG")
     return buf.getvalue()
@@ -561,6 +596,15 @@ SVG = [
     Case("svg-4k-cubic-art", params={"art": [A()]},
          files=[art_file(0, "c.svg", lambda: cubic_svg(4000))],
          budget=SVG_BUDGET_S),
+    # ACCEPTED, and that is the point: the classifier's cost has to scale with
+    # the badge rather than with the grid it is classified on. See
+    # ACCEPTED_OUTLINE_BUDGET_S -- this case is 26 s against a repaired 0.3 s.
+    Case("outline-filled-silhouette-at-full-width",
+         params={"shape": {"mode": "custom",
+                           "elements": [{"kind": "image", "cx": 10, "cy": 10,
+                                         "w": 119, "threshold": 128}]}},
+         files=[("shape0", "disc.png", filled_silhouette_png)],
+         budget=ACCEPTED_OUTLINE_BUDGET_S),
     Case("svg-4k-cubic-shape", params={"shape": IMAGE_SHAPE()},
          files=[shape_file("c.svg", lambda: cubic_svg(4000))],
          budget=SVG_BUDGET_S),

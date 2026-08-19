@@ -4,18 +4,22 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
+import time
 import zipfile
 
 from flask import Flask, render_template, request, send_file
 from PIL import Image
 from shapely.errors import ShapelyError
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import pcb, svgart, textpoly
 from .logo import (
     EDGE_MARGIN,
     MAX_PALETTE,
     CircleKeepout,
+    ImageTooLarge,
     RectKeepout,
     classify_image,
     grid_to_rects,
@@ -64,9 +68,110 @@ _GEOMETRY_ERRORS = (OSError, ValueError, TypeError, AttributeError, KeyError,
 MAX_SVG_COMPLEXITY = 40_000
 SVG_CURVE_COST = 16
 
+#: Floor charged for every paintable shape, whatever its vertex count.
+#:
+#: Vertices were the only thing priced, and they are the wrong unit for a
+#: document made of many simple shapes: `svg_color_regions`' painter pass
+#: unions and differences a growing geometry once per *shape*, so 6 000
+#: four-vertex `<rect>` scored 24 000 against the 40 000 cap -- comfortably
+#: inside it -- and still took 12 s. Measured at ~2 ms of that pass per shape,
+#: which against a cap tuned for a few seconds puts one shape at ~24 vertices.
+#:
+#: Applied as `max(vertex_score, this)` rather than added, so a single
+#: 40 000-vertex path still scores exactly 40 000 and the documented ceiling
+#: above keeps meaning what it says.
+SVG_SHAPE_COST = 24
+
 
 class _TooComplex(ValueError):
     """An SVG whose exact vector geometry would cost minutes to build."""
+
+
+#: Pixel rectangles one board-outline computation may union into geometry,
+#: summed over all of its (up to 12) image elements.
+#:
+#: The outline grid is 480 cells across, and `grid_to_rects` merges each row's
+#: horizontal runs, so this number tracks how *broken up* the silhouette is
+#: rather than how big it is -- which is also what the cost tracks. Measured
+#: end to end on /outline at the full 119 mm width, one element:
+#:
+#:     helmet fixture       610 rects   0.11 s
+#:     dot grid, 16 px    1 857 rects   0.42 s
+#:     dot grid, 12 px    3 300 rects   0.85 s
+#:     dot grid, 10 px    3 600 rects   1.37 s
+#:     dot grid,  8 px    7 425 rects   2.92 s
+#:     dot grid,  6 px   11 600 rects   7.79 s
+#:     1-px checkerboard 64 620 rects   61 s (measured in production)
+#:
+#: Superlinear, and /outline runs on every edit of the design, so the ceiling
+#: is set at the knee rather than as far out as it could go: 6 000 rects is
+#: about 2 s in the worst accepted case, with ten times the headroom over a
+#: real traced silhouette. An earlier 40 000 was picked to be generous and
+#: measured afterwards at 13 s for a single accepted element, which is a
+#: refusal the user would rather have had.
+#:
+#: What it refuses could not be routed anyway: tens of thousands of separate
+#: 0.25 mm islands against a ~2 mm router bit is not a board outline, so
+#: answering "too fine to cut" is the honest reply as well as the cheap one.
+MAX_OUTLINE_RECTS = 6_000
+
+
+class _TooFine(ValueError):
+    """A silhouette broken into more pieces than the board could be cut in."""
+
+
+class _RectBudget:
+    """Per-outline allowance of pixel rectangles, shared across elements."""
+
+    def __init__(self, total: int = MAX_OUTLINE_RECTS):
+        self.left = total
+
+    def spend(self, n: int) -> None:
+        self.left -= n
+        if self.left < 0:
+            raise _TooFine(
+                "this artwork carries more fine detail than the board can be "
+                f"cut in (over {MAX_OUTLINE_RECTS:,} separate pieces at the "
+                "outline's resolution). Raise the threshold, smooth the "
+                "shape, or use a cleaner silhouette with fewer isolated "
+                "specks -- a board router cannot cut features below about "
+                "2 mm anyway")
+
+
+#: Wall-clock a single export request may spend inside subprocesses.
+#:
+#: This number exists because the old per-subprocess budgets did not add up.
+#: /gerbers allowed 120 s for the pcbnew zone refill, then 120 s for the plot,
+#: then 120 s for the drill export -- 360 s against gunicorn's `timeout = 300`.
+#: Each of those three steps has a carefully written 500 explaining what timed
+#: out and what to do instead, and in the case they were written for the worker
+#: was SIGKILLed before it could send one; the user got a dropped connection.
+#:
+#: One deadline for the request, shared out across its steps, means the handler
+#: always wins that race. 240 s leaves 60 s of gunicorn budget for zipping the
+#: result and streaming it back.
+EXPORT_BUDGET_S = int(os.environ.get("EXPORT_BUDGET_S", "240"))
+
+
+class _Deadline:
+    """A wall-clock budget shared by every subprocess in one request."""
+
+    def __init__(self, budget: float = EXPORT_BUDGET_S):
+        self.end = time.monotonic() + budget
+
+    def left(self) -> float:
+        # Floored rather than raising: a step handed ~0 s times out at once and
+        # the caller's own TimeoutExpired branch reports it, which is the
+        # message the user should see. Overshoot is bounded by the floor.
+        return max(1.0, self.end - time.monotonic())
+
+
+#: Refusals that name something the user can actually change about their own
+#: upload -- too much vector detail, too many pixels, a silhouette too broken
+#: up to cut -- as opposed to geometry that merely came out unbuildable. Each
+#: carries a message written for the person who hit it, so these are reported
+#: verbatim while `_GEOMETRY_ERRORS` collapses to a generic 400.
+_UPLOAD_REFUSALS = (_TooComplex, ImageTooLarge, _TooFine)
 
 
 # Path-data commands and how many numbers one segment of each consumes. `t`
@@ -107,12 +212,177 @@ def _path_complexity(d: bytes) -> int:
     return cost + flush(cmd, run)
 
 
+# What one of each non-path shape flattens to, in the same currency
+# `_path_complexity` counts. A circle or ellipse becomes four arcs, and
+# `_ring_points` gives each arc up to 256 chords, so they carry the curve
+# weight; a plain rect is four straight sides, a rounded one four sides plus
+# four corner arcs. `text` and `image` are absent on purpose: svgelements does
+# not report them as `Shape`, so `svg_color_regions` never draws them.
+_SVG_ELEMENT_COST = {
+    "circle": 4 * SVG_CURVE_COST,
+    "ellipse": 4 * SVG_CURVE_COST,
+    "line": 1,
+    "rect": 4,
+}
+
+# Tags svgelements reports as a `Shape`, i.e. the ones that get drawn and so
+# the ones that pay `SVG_SHAPE_COST`. Containers and metadata score nothing of
+# their own.
+_SVG_SHAPES = frozenset({"path", "polygon", "polyline",
+                         "circle", "ellipse", "line", "rect"})
+
+# Subtrees that are definitions, not drawings: nothing inside them paints
+# unless a `<use>` names it, at which point it is scored through that `<use>`.
+_SVG_DEFS = frozenset({"defs", "symbol", "clipPath", "mask", "pattern",
+                       "marker", "filter", "linearGradient", "radialGradient"})
+
+
+def _svg_localname(tag) -> str:
+    """`circle` from `{http://www.w3.org/2000/svg}circle`."""
+    return tag.rsplit("}", 1)[-1] if isinstance(tag, str) else ""
+
+
+def _svg_postorder(root) -> list:
+    """Every element, children before parents, without recursion.
+
+    Iterative on purpose: `tests/hostile.nested_svg` is 5 000 nested `<g>`
+    around one rect -- a harmless file, and one a recursive walk crashes on
+    long before Python's own limit becomes the user's problem.
+    """
+    out, stack = [], [(root, False)]
+    while stack:
+        el, done = stack.pop()
+        if done:
+            out.append(el)
+            continue
+        stack.append((el, True))
+        for child in reversed(el):
+            stack.append((child, False))
+    return out
+
+
+def _svg_tree_complexity(data: bytes) -> int | None:
+    """Score an SVG's whole render tree, resolving `<use>`. None if unparseable.
+
+    This exists because the byte-level scan below cannot see the two axes that
+    actually cost the most.
+
+    The first is element count. The scan only reads `d` and `points`
+    attributes, so `<circle>`/`<rect>`/`<ellipse>`/`<line>` scored zero no
+    matter how many there were -- and shape *count*, not vertex count, is what
+    `svg_color_regions` pays for: its painter pass unions and differences a
+    growing geometry once per shape. Measured on this repo, 8 000 `<circle>`
+    (382 KB) took 36 s and 6 000 `<rect>` took 12 s, both returning 200.
+
+    The second is `<use>`. A `<g>` holding two `<use>` of the previous `<g>`
+    doubles the shape count per level, so payload size grows linearly while
+    the work grows as 2^depth: a **1 253-byte** file (depth 17, 131 072
+    shapes) held a worker past 120 s. That one cannot be caught after the
+    fact, because the blow-up happens inside `SVG.parse` itself -- hence a
+    guard that runs on the XML before svgelements ever sees it.
+
+    `xml.etree` is the right parser for that job: it is cheap (microseconds on
+    these files, against seconds for reification) and it resolves no external
+    entities, so pointing it at hostile markup is safe. When it cannot parse
+    at all -- an internal DTD with undefined entities, malformed markup --
+    this returns None and the caller keeps the byte scan, which is what those
+    files already got.
+
+    `<use>` makes the reference graph a DAG rather than a tree, so the scores
+    are relaxed to a fixed point instead of being computed in one pass: each
+    round resolves one more level of `<use>` nesting, and every score
+    saturates at the limit. That is what makes the exponential case cheap --
+    doubling from one shape reaches the ceiling in about ten rounds, so it
+    stops there instead of counting to 131 072 and then refusing.
+    """
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(data)
+    except (ET.ParseError, ValueError):
+        return None
+
+    cap = MAX_SVG_COMPLEXITY + 1
+
+    def own(el, tag: str) -> int:
+        if tag not in _SVG_SHAPES:
+            return 0
+        if tag == "path":
+            detail = _path_complexity(
+                (el.get("d") or "").encode("utf-8", "replace"))
+        elif tag in ("polygon", "polyline"):
+            pts = (el.get("points") or "").encode("utf-8", "replace")
+            detail = len(_SVG_TOKEN.findall(pts)) // 2
+        elif tag == "rect" and (el.get("rx") or el.get("ry")):
+            detail = 4 + 4 * SVG_CURVE_COST
+        else:
+            detail = _SVG_ELEMENT_COST.get(tag, 0)
+        return max(detail, SVG_SHAPE_COST)
+
+    order = _svg_postorder(root)
+    tags = {id(el): _svg_localname(el.tag) for el in order}
+    mine = {id(el): own(el, tags[id(el)]) for el in order}
+    by_id, uses = {}, []
+    for el in order:
+        ref = el.get("id")
+        if ref is not None and ref not in by_id:
+            by_id[ref] = el
+        if tags[id(el)] == "use":
+            href = el.get("href") or el.get(
+                "{http://www.w3.org/1999/xlink}href") or ""
+            uses.append((el, href[1:] if href.startswith("#") else None))
+
+    # `drawn` is what an element contributes where it sits: zero inside a
+    # definition, which paints only through a <use>. `whole` ignores that rule,
+    # so a <use> naming a <symbol> can still be charged for its contents.
+    drawn: dict[int, int] = {}
+    whole: dict[int, int] = {}
+    use_score: dict[int, int] = dict.fromkeys((id(u) for u, _ in uses), 0)
+
+    # Each round resolves one more level of <use>, so a settled answer needs as
+    # many rounds as the reference graph is deep. Non-convergence is reported
+    # as "over the limit" rather than as the partial total, because the partial
+    # total is a LOWER bound: a 60-level chain left the root's <use> still
+    # reading zero, which would have waved through the very file the guard is
+    # here to stop. A <use> graph deeper than this is pathological by itself.
+    settled = False
+    for _round in range(64):
+        for el in order:  # children first, so their totals are already in
+            key, tag = id(el), tags[id(el)]
+            if tag == "use":
+                drawn[key] = whole[key] = use_score[key]
+                continue
+            total = min(mine[key] + sum(drawn.get(id(c), 0) for c in el), cap)
+            whole[key] = total
+            drawn[key] = 0 if tag in _SVG_DEFS else total
+        if not uses or whole[id(root)] >= cap:
+            settled = True
+            break
+        moved = False
+        for use_el, ref in uses:
+            target = by_id.get(ref) if ref else None
+            if target is None or target is use_el:
+                continue
+            # `whole`, not `drawn`: a <use> paints its target wherever it lives.
+            was, now = use_score[id(use_el)], whole.get(id(target), 0)
+            if now > was:
+                use_score[id(use_el)], moved = now, True
+        if not moved:
+            settled = True
+            break
+
+    return whole[id(root)] if settled else cap
+
+
 def _check_svg_complexity(data: bytes) -> None:
     """Refuse the exact vector pipeline an SVG too intricate to build in time."""
-    cost = sum(_path_complexity(m.group(1) or m.group(2) or b"")
-               for m in _SVG_PATH_D.finditer(data))
-    for m in _SVG_POINTS.finditer(data):  # <polygon>/<polyline>
-        cost += len(_SVG_TOKEN.findall(m.group(1) or m.group(2) or b"")) // 2
+    cost = _svg_tree_complexity(data)
+    if cost is None:
+        # Not parseable as XML: score what the bytes show, as before.
+        cost = sum(_path_complexity(m.group(1) or m.group(2) or b"")
+                   for m in _SVG_PATH_D.finditer(data))
+        for m in _SVG_POINTS.finditer(data):  # <polygon>/<polyline>
+            cost += len(_SVG_TOKEN.findall(m.group(1) or m.group(2) or b"")) // 2
     if cost > MAX_SVG_COMPLEXITY:
         raise _TooComplex(
             "this SVG carries too much vector detail to trace exactly "
@@ -123,6 +393,126 @@ def _check_svg_complexity(data: bytes) -> None:
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD
+
+# The app is served behind a reverse proxy on the same host, which is itself
+# behind Cloudflare, so every peer address the app sees is the proxy's loopback
+# address. Without any of this the gunicorn access log recorded 127.0.0.1 for
+# all traffic -- and when the site fell over there was no way to tell who had
+# done it or what to block.
+#
+# ProxyFix alone does NOT solve it here, and counting hops is the wrong tool for
+# the job. `X-Forwarded-For` positions depend on the local proxy's config, and
+# both usual configs get it wrong: nginx's `$proxy_add_x_forwarded_for` appends
+# the peer, so the chain is "<visitor>, <cloudflare-edge>" and the rightmost
+# entry -- the only one it is safe to count from -- is Cloudflare's edge, not
+# the visitor; nginx's `$remote_addr` overwrites the header outright and the
+# visitor's address is not in it at all. Measured both ways: x_for=1 yields the
+# Cloudflare edge IP, which varies enough to look plausible in a log and is
+# useless for blocking anyone.
+#
+# `CF-Connecting-IP` is the header that answers the question. Cloudflare sets it
+# on every request as a single address, *overwriting* whatever the client sent,
+# and a local proxy passes it through untouched, so there is no chain to count.
+#
+# What makes trusting it sound is the topology, not the header: compose
+# publishes only on 127.0.0.1, gunicorn accepts forwarded headers only from
+# loopback, and nothing but the proxy can reach the app. If the origin is ever
+# exposed directly -- a LAN bind, a port opened on the host -- this becomes
+# forgeable and the check has to become "is the peer a Cloudflare address".
+#
+# ProxyFix still runs, for `x_proto`/`x_host` (the scheme and host the visitor
+# actually used) and as the fallback when the header is absent, which is what
+# happens when the app is reached without Cloudflare in front of it.
+class _CloudflareClientIP:
+    """Set REMOTE_ADDR from `CF-Connecting-IP`, when Cloudflare supplied one.
+
+    The value is parsed as an IP address before it is used, and dropped if it
+    is not one. Cloudflare would never send anything else, but REMOTE_ADDR is
+    interpolated straight into the access log by gunicorn's `%(h)s`, and a
+    header that reached that unchecked would be a log-injection primitive: one
+    newline and an attacker writes their own log lines. Validating is cheaper
+    than trusting the whole path.
+    """
+
+    def __init__(self, wsgi_app):
+        self.wsgi_app = wsgi_app
+
+    def __call__(self, environ, start_response):
+        raw = environ.get("HTTP_CF_CONNECTING_IP")
+        if raw:
+            import ipaddress
+
+            try:
+                environ["REMOTE_ADDR"] = str(ipaddress.ip_address(raw.strip()))
+            except ValueError:
+                pass  # not an address: keep whatever ProxyFix worked out
+        return self.wsgi_app(environ, start_response)
+
+
+# Order matters and is easy to get backwards. WSGI middleware runs
+# outermost-first, so ProxyFix has to be the OUTER wrapper and this the inner
+# one: ProxyFix works out scheme, host and a fallback address from
+# X-Forwarded-*, then this overrides the address with Cloudflare's answer. Wrap
+# them the other way round and ProxyFix runs second and puts the Cloudflare edge
+# IP back -- which is exactly what the first version of this did.
+app.wsgi_app = ProxyFix(_CloudflareClientIP(app.wsgi_app),
+                        x_for=1, x_proto=1, x_host=1)
+
+
+#: Response headers added to everything this app serves.
+#:
+#: The site had none of these. Individually they are all cheap; the one worth
+#: explaining is the CSP, because the whole UI is a single 7 000-line page with
+#: its script and styles inline, and a policy is the difference between "a
+#: future templating slip is a bug" and "a future templating slip is an
+#: account-less stranger running JavaScript on the designer".
+#:
+#: `'unsafe-inline'` is in there because that inline block is the app. It still
+#: buys the parts that matter: `default-src 'self'` means no third-party
+#: origin can be reached at all (the typefaces and <model-viewer> are served
+#: from here on purpose), `object-src 'none'` and `base-uri 'none'` close the
+#: two classic injection escapes, and `frame-ancestors 'none'` replaces
+#: X-Frame-Options. Moving the inline block into a static file would let
+#: `'unsafe-inline'` go, and nothing else here would need to change.
+#:
+#: HSTS is sent from the origin so it survives a change of edge provider, but
+#: it only takes effect over HTTPS -- the http:// -> https:// redirect itself
+#: has to be turned on at the edge, which the app cannot do for itself.
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'self'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data: blob:; "
+        "font-src 'self'; "
+        # blob: is load-bearing, not belt-and-braces: /model3d is fetched,
+        # turned into an object URL, and handed to <model-viewer>, which
+        # fetches that URL itself. Without blob: here the 3D view dies with
+        # "Failed to fetch" and an empty viewer -- measured in Chrome, which
+        # is the only way this shows up at all.
+        "connect-src 'self' blob:; "
+        "worker-src 'self' blob:; "
+        "object-src 'none'; "
+        "base-uri 'none'; "
+        "form-action 'self'; "
+        "frame-ancestors 'none'"
+    ),
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Referrer-Policy": "strict-origin-when-cross-origin",
+    "Permissions-Policy": "geolocation=(), microphone=(), camera=(), usb=()",
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+}
+
+
+@app.after_request
+def _add_security_headers(resp):
+    # setdefault, not assignment: a handler that has deliberately set one of
+    # these for its own response keeps it.
+    for name, value in _SECURITY_HEADERS.items():
+        resp.headers.setdefault(name, value)
+    return resp
 
 
 def _slug(name: str) -> str:
@@ -406,8 +796,13 @@ def _svg_shape_geometry(data: bytes, el: dict):
     return None if g.is_empty else g
 
 
-def _image_silhouette(el: dict, data: bytes | None, raster: bytes | None, smooth_r: float):
-    """Silhouette geometry of one image outline element (SVG-exact or raster)."""
+def _image_silhouette(el: dict, data: bytes | None, raster: bytes | None,
+                      smooth_r: float, budget: "_RectBudget | None" = None):
+    """Silhouette geometry of one image outline element (SVG-exact or raster).
+
+    `budget` is charged for the pixel rectangles this element contributes, so
+    a composition of twelve elements cannot spend twelve times the ceiling.
+    """
     from shapely.geometry import box as sbox
     from shapely.ops import unary_union
 
@@ -446,6 +841,8 @@ def _image_silhouette(el: dict, data: bytes | None, raster: bytes | None, smooth
     rects = grid_to_rects(ci, "silk", [], board=pcb.OUTLINE_EXTENT)
     if not rects:
         return None
+    if budget is not None:
+        budget.spend(len(rects))
     # Pad each pixel rect slightly: rect coordinates are rounded to 4
     # decimals, and the ~1e-4 mm seams would otherwise keep neighbouring
     # rows as separate polygons (slicing the outline to ribbons).
@@ -464,7 +861,8 @@ def _image_silhouette(el: dict, data: bytes | None, raster: bytes | None, smooth
 SHAPE_KINDS = ("image", "circle", "rect", "triangle", "hex", "star")
 
 
-def _element_geometry(el: dict, data: bytes | None, raster: bytes | None, smooth_r: float):
+def _element_geometry(el: dict, data: bytes | None, raster: bytes | None,
+                      smooth_r: float, budget: "_RectBudget | None" = None):
     """Geometry of a single outline element, or None."""
     import math
 
@@ -474,7 +872,7 @@ def _element_geometry(el: dict, data: bytes | None, raster: bytes | None, smooth
 
     kind = str(el.get("kind", "circle"))
     if kind == "image":
-        return _image_silhouette(el, data, raster, smooth_r)
+        return _image_silhouette(el, data, raster, smooth_r, budget)
     ex = pcb.OUTLINE_EXTENT
     cx = min(max(float(el.get("cx", 10.16)), ex[0] + 2), ex[2] - 2)
     cy = min(max(float(el.get("cy", 10.16)), ex[1] + 2), ex[3] - 2)
@@ -525,18 +923,22 @@ def _shape_geometry(shape_meta: dict, uploads: dict, rasters: dict):
 
     mode = str(shape_meta.get("mode", "square"))
     smooth_r = _smooth_radius(shape_meta)
+    # One allowance for the whole composition, not per element.
+    budget = _RectBudget()
     if mode == "circle":  # legacy
         d = min(max(float(shape_meta.get("d", 20.0)), 12.0), 100.0)
         return Point(10.16, 10.16).buffer(d / 2, quad_segs=64)
     if mode == "image":  # legacy single image
         return _image_silhouette(
-            shape_meta, uploads.get("legacy"), rasters.get("legacy"), smooth_r
+            shape_meta, uploads.get("legacy"), rasters.get("legacy"), smooth_r,
+            budget,
         )
     if mode != "custom":
         return None
     adds, cuts = [], []
     for i, el in enumerate(list(shape_meta.get("elements", []))[:12]):
-        g = _element_geometry(el, uploads.get(i), rasters.get(i), smooth_r)
+        g = _element_geometry(el, uploads.get(i), rasters.get(i), smooth_r,
+                              budget)
         if g is None or g.is_empty:
             continue
         (cuts if el.get("op") == "cut" else adds).append(g)
@@ -943,7 +1345,6 @@ def generate():
 
 
 def _kicad_cli() -> str | None:
-    import os
     import shutil
 
     for cand in (os.environ.get("KICAD_CLI"), shutil.which("kicad-cli"),
@@ -1040,7 +1441,7 @@ def _tag_glb_layers(data: bytes) -> bytes:
     )
 
 
-def _refill_zones(board_path: str) -> bool:
+def _refill_zones(board_path: str, deadline: "_Deadline | None" = None) -> bool:
     """Recompute the copper pours with KiCad's own filler, in place.
 
     The shipped fills are precomputed so the project is electrically complete
@@ -1081,8 +1482,9 @@ def _refill_zones(board_path: str) -> bool:
         candidates = [_refill_zones.exe]
     for exe in candidates:
         try:
-            run = subprocess.run([exe, "-c", script, board_path],
-                                 capture_output=True, timeout=120)
+            run = subprocess.run(
+                [exe, "-c", script, board_path], capture_output=True,
+                timeout=deadline.left() if deadline else 120)
         except (OSError, subprocess.SubprocessError):
             continue
         if run.returncode == 0:
@@ -1125,13 +1527,14 @@ def _model_glb(spec: "pcb.BadgeSpec", slug: str):
         return {"error": "3D view needs KiCad (kicad-cli) installed on the "
                          "server; the downloaded project shows the same "
                          "thing in KiCad's 3D viewer (View > 3D)."}, 501
+    deadline = _Deadline()
     with tempfile.TemporaryDirectory() as td:
         board = f"{td}/{slug}.kicad_pcb"
         with open(board, "w") as f:
             f.write(pcb.generate_pcb(spec))
         # Show the pours the way KiCad will fill them, not the slit-open
         # form the file format forces on us (no-op without pcbnew).
-        _refill_zones(board)
+        _refill_zones(board, deadline)
         glb = f"{td}/{slug}.glb"
         try:
             run = subprocess.run(
@@ -1139,7 +1542,7 @@ def _model_glb(spec: "pcb.BadgeSpec", slug: str):
                  "--include-tracks", "--include-pads", "--include-zones",
                  "--include-silkscreen", "--include-soldermask",
                  "--force", "-o", glb, board],
-                capture_output=True, timeout=120,
+                capture_output=True, timeout=deadline.left(),
             )
         except subprocess.TimeoutExpired:
             return {"error": "the 3D export timed out"}, 500
@@ -1207,6 +1610,7 @@ def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
                          "the server; download the KiCad project instead and "
                          "plot there (the README in the zip walks through "
                          "it)."}, 501
+    deadline = _Deadline()
     with tempfile.TemporaryDirectory() as td:
         board = f"{td}/{slug}.kicad_pcb"
         with open(board, "w") as f:
@@ -1214,7 +1618,7 @@ def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
         # The 3D preview may shrug off unfilled zones; a fab package must
         # not. Plotting the shipped slit-open fills would put hairline gaps
         # across both power planes on the physical board.
-        if not _refill_zones(board):
+        if not _refill_zones(board, deadline):
             return {"error": "the server could not refill the copper zones "
                              "(KiCad's pcbnew Python module is missing), and "
                              "Gerbers plotted without a refill carry hairline "
@@ -1227,7 +1631,7 @@ def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
                 [cli, "pcb", "export", "gerbers", "-o", out + "/",
                  "--layers", _FAB_LAYERS, "--no-x2", "--no-netlist",
                  "--subtract-soldermask", board],
-                capture_output=True, timeout=120,
+                capture_output=True, timeout=deadline.left(),
             )
             drill = subprocess.run(
                 [cli, "pcb", "export", "drill", "-o", out + "/",
@@ -1235,7 +1639,7 @@ def _fab_gerbers(spec: "pcb.BadgeSpec", slug: str):
                  "--excellon-zeros-format", "decimal",
                  "--excellon-oval-format", "alternate",
                  "--excellon-units", "mm", board],
-                capture_output=True, timeout=120,
+                capture_output=True, timeout=deadline.left(),
             )
         except subprocess.TimeoutExpired:
             return {"error": "the Gerber export timed out"}, 500
@@ -1301,7 +1705,7 @@ def _generate_impl(render: bool):
         shape_meta = params.get("shape") or {}
         uploads, rasters = _shape_uploads()
         outline_rings, _bridged = _compute_outline(shape_meta, uploads, pins, rasters)
-    except _TooComplex as exc:
+    except _UPLOAD_REFUSALS as exc:
         return {"error": f"board shape: {exc}"}, 400
     except _GEOMETRY_ERRORS:
         return {"error": "could not process the board shape"}, 400
@@ -1335,7 +1739,7 @@ def _generate_impl(render: bool):
     try:
         classified = _classify_all(art_box)
         cut_geom = _art_cut_geometry([src for _i, src, _w, _s in classified], art_box)
-    except _TooComplex as exc:
+    except _UPLOAD_REFUSALS as exc:
         return {"error": f"artwork: {exc}"}, 400
     except _GEOMETRY_ERRORS:
         return {"error": "could not process an artwork image"}, 400
@@ -1349,7 +1753,7 @@ def _generate_impl(render: bool):
             # art would sit at a different scale than the preview drew.
             if _art_board_of(outline_rings) != art_box:
                 classified = _classify_all(_art_board_of(outline_rings))
-        except _TooComplex as exc:
+        except _UPLOAD_REFUSALS as exc:
             return {"error": f"artwork: {exc}"}, 400
         except _GEOMETRY_ERRORS:
             return {"error": "could not process the board shape"}, 400
@@ -1472,7 +1876,10 @@ def _generate_impl(render: bool):
             solid = _prep(outline_poly.buffer(-0.55))
 
             def on_board(led):
-                return solid.contains(pcb.unit_poly(led, safe))
+                # The unit's real footprint: a unit whose parts were placed by
+                # hand claims only the room its copper uses, not the empty
+                # envelope those parts span (pcb.unit_footprint).
+                return solid.contains(pcb.unit_footprint(led, safe))
 
             def overlaps_any(probe, skip):
                 pp = pcb.unit_poly(probe, safe)
@@ -1942,7 +2349,7 @@ def _generate_impl(render: bool):
         for key, src, side in text_entries:
             if "silk" in src:
                 emit(key, src, "silk", silk_carve(decor_base[side], side), art_board, side)
-    except _TooComplex as exc:
+    except _UPLOAD_REFUSALS as exc:
         return {"error": f"artwork: {exc}"}, 400
     except _GEOMETRY_ERRORS:
         return {"error": "could not process an artwork image"}, 400

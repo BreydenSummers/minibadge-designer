@@ -62,8 +62,17 @@ def test_the_container_serve_command_answers_simultaneous_users(tmp_path):
     process boundary that production relies on for request isolation.
     """
     port = _free_port()
+    # PYTHONDONTWRITEBYTECODE is not tidiness. gunicorn loads gunicorn.conf.py
+    # *by path* from the repo root, so Python caches its bytecode as
+    # `__pycache__/gunicorn.conf.*.pyc` right there -- and the autouse
+    # `_no_repo_writes` guard then fails this test in teardown for writing into
+    # the repo. Intermittent in the worst way: it only fires when that .pyc is
+    # absent or stale, which means on a fresh clone, in CI, and once for
+    # everybody after any edit to gunicorn.conf.py. The subprocess gets a
+    # curated env, so it has to be named explicitly.
     env = {"PORT": str(port), "WEB_CONCURRENCY": "2",
-           "PATH": "/usr/bin:/bin", "HOME": str(tmp_path)}
+           "PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
+           "PYTHONDONTWRITEBYTECODE": "1"}
     with subprocess.Popen(
         [sys.executable, "-m", "gunicorn", "-c", str(REPO / "gunicorn.conf.py"),
          APP],

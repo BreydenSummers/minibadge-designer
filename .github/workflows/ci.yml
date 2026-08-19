@@ -1,6 +1,20 @@
 # CI for the working branch. Runs on the self-hosted `badge` runner, which is
 # also the deploy host, so the image this builds warms the layer cache that
 # deploy.yml later reuses.
+#
+# That convenience is also this file's main security constraint. A self-hosted
+# runner executes whatever the checked-out commit says to execute, on the box
+# that serves the site: the build step runs the commit's own Dockerfile, the
+# test step runs the commit's own test suite, and the runner user is in the
+# `docker` group, which is root-equivalent on the host. So the question this
+# workflow has to answer is "whose code is allowed to reach that", and the
+# answer is enforced by the `if:` on the job below -- same-repository commits
+# only, never a fork's pull request.
+#
+# The repo is private today, which makes that condition redundant. It is here
+# for the day it is not: on a public repo, `pull_request` plus a self-hosted
+# runner is remote code execution for any GitHub account, and it would be
+# switched on by a repository setting rather than by a change to this file.
 name: CI
 
 on:
@@ -22,13 +36,27 @@ permissions:
 
 jobs:
   test:
+    # Fork pull requests are skipped rather than run untrusted. To test one,
+    # read the diff, then push it to a branch here and let that push build it.
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 45
     env:
       IMAGE: minibadge-designer:ci-${{ github.sha }}
 
     steps:
-      - uses: actions/checkout@v4
+      # Pinned to the commit v4.4.0 points at, not to the `v4` tag: a tag is
+      # mutable, and on a self-hosted runner "whatever v4 means today" is a
+      # third party with shell access to the deploy host.
+      #
+      # persist-credentials: false keeps the job's token out of the workspace's
+      # .git/config. The runner's working directory outlives the job, so a
+      # token left there is readable by the next thing that runs on this box.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       # Not just a build: the last stage exports a two-LED board and fails if
       # the 3D models did not resolve or lost their colours, which is the one
@@ -41,9 +69,17 @@ jobs:
       # with. --strict-tools turns "kicad is missing" into a failure instead of
       # a green run full of skips. The browser tier is excluded: no Chromium in
       # this image, and installing one per run costs more than it is worth.
+      #
+      # --user root is still needed (the editable install writes to /app and to
+      # site-packages), so the container is given nothing else: every Linux
+      # capability dropped, no way to regain privileges through setuid, and a
+      # process cap. Root inside a capability-less container is a much smaller
+      # thing than root on the runner.
       - name: Test suite
         run: |
           docker run --rm --user root --workdir /app \
+            --cap-drop ALL --security-opt no-new-privileges \
+            --pids-limit 512 --memory 4g \
             -e HOME=/root -e PIP_DISABLE_PIP_VERSION_CHECK=1 \
             "$IMAGE" bash -c '
               pip install --quiet --no-cache-dir --break-system-packages -e ".[dev]" &&
