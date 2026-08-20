@@ -50,6 +50,18 @@
     border-radius: 4px; width: 30px; height: 30px; cursor: pointer; font-size: 14px;
   }
   #themebtn:hover { color: var(--accent); border-color: var(--accent); }
+  /* Snapping rides with the theme toggle: both are workbench preferences that
+     outlive the design, and neither belongs in the view selector -- which sits
+     centred over the board, where the restore bar and the boards themselves
+     already compete for room. */
+  #snapbtn {
+    background: none; border: 1px solid var(--edge); color: var(--dim);
+    border-radius: 4px; height: 30px; padding: 0 10px; cursor: pointer;
+    font: 700 10.5px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: .1em; flex: 0 0 auto;
+  }
+  #snapbtn:hover { color: var(--accent); border-color: var(--accent); }
+  #snapbtn.on { background: var(--accent); border-color: var(--accent); color: var(--panel); }
   #shell {
     display: grid; grid-template-columns: 54px 330px 1fr; height: 100%; overflow: hidden;
   }
@@ -606,6 +618,7 @@
   <input type="text" id="name" value="my-minibadge" maxlength="40" title="Project name (used for the zip and its files)">
   <button class="qm" tabindex="-1" data-tip="basics" title="Getting around">?</button>
   <button id="themebtn" title="Toggle light/dark">◐</button>
+  <button id="snapbtn" aria-pressed="true" title="Snap while dragging: the board's centre lines, the centre of anything else placed, else a 0.5 mm grid. Rotation steps 15°. Hold Alt to ignore it for one move.">SNAP</button>
   <button id="openbtn" title="Open a design file saved earlier (or drop one anywhere on the page)">⬆ Open<span class="dlx"> design</span></button>
   <input type="file" id="designfile" accept=".json,application/json" hidden>
   <button id="download" title="Choose what to download: the KiCad project, the Gerber fab package, the design file, or any combination">⬇ Download<span class="dlx">…</span></button>
@@ -4707,6 +4720,29 @@ function drawView(canvas, side) {
       }
     }
   }
+  if (drag && snapGuides.length) {
+    // The lines this drag is locked to. Both views get them: the guide is a
+    // fact about the board, and a back part is routinely dragged by its ghost
+    // on the front view. They live and die with the drag, so nothing here
+    // survives into a still frame.
+    c.save();
+    c.setLineDash([4, 5]);
+    c.lineWidth = 1;
+    for (const g of snapGuides) {
+      c.strokeStyle = g.center ? "#ff6ec7" : "#54e0ff";
+      c.beginPath();
+      // Full canvas span, in the viewport's own translated coordinates.
+      if (g.axis === "x") {
+        c.moveTo(mm2px(g.at), -VIEW.ty);
+        c.lineTo(mm2px(g.at), canvas.height - VIEW.ty);
+      } else {
+        c.moveTo(-VIEW.tx, mm2px(g.at));
+        c.lineTo(canvas.width - VIEW.tx, mm2px(g.at));
+      }
+      c.stroke();
+    }
+    c.restore();
+  }
   { // hover feedback: what a control changes, on the layer's own view
     const ha = artHL && state.art[artHL.index];
     if (ha && (((ha.side || "front") === "back") === mirror)) {
@@ -4804,6 +4840,189 @@ function draw() {
   // Every edit funnels through here, so this is where the 3D view learns it
   // went stale (no-ops unless that tab is open; m3dLoad diffs the design).
   m3dSchedule();
+}
+
+// ---- snapping ----
+// Optional, toggled in the view bar. With it on, a drag is pulled onto the
+// lines a badge actually gets lined up with: the board's own two centre lines,
+// the centre of anything else already placed, and -- when neither is near -- a
+// 0.5 mm grid, so a free drag still lands on a round number.
+//
+// The pull is measured in SCREEN pixels and converted to mm through the live
+// SCALE, so it feels the same whether the viewport is fitted to a 20 mm square
+// or a 120 mm silhouette. In board mm a fixed radius would grab from half a
+// board away on the zoomed-out view and be unreachably tight on the small one.
+// On by default: nearly every placement on a 20 mm board wants to line up with
+// something, and Alt is right there for the one that does not. A stored choice
+// still wins -- turning it off has to survive a reload, or the toggle is a lie.
+let snapOn = true;
+try {
+  const stored = localStorage.getItem("bm-snap");
+  if (stored !== null) snapOn = stored === "1";
+} catch (e) {}
+const SNAP_PULL_PX = 7;  // how near the cursor has to be for a line to grab
+const SNAP_GRID = 0.5;   // mm; the fallback when nothing lines up
+const SNAP_ROT = 15;     // degrees, same step Shift has always given
+// The three parts a free-placed unit drags one by one. Each is stored at its
+// own centre, so each snaps as itself -- that is what "individually" means.
+const ADV_KINDS = new Set(["ledbody", "ledres", "ledvia"]);
+// Alt inverts the toggle for the duration of one gesture: snapping off when it
+// is on (nudge something a tenth of a millimetre past a centre line), and on
+// when it is off. Matches the escape hatch every drawing tool has.
+const snapActive = e => snapOn !== !!(e && e.altKey);
+// Which lines the drag is currently locked to, in board mm. Written by
+// snapXY(), drawn on both views, cleared when the drag ends.
+let snapGuides = [];
+
+// The centre of the box the canvas draws around an item, in board mm -- what a
+// user means by "centred". It is NOT the position the item stores: a unit's
+// anchor is its LED, so the resistor and via hang off to one side, and a text's
+// anchor is its rotation pivot, which sits inside the ink rather than in the
+// middle of it. Snapping the stored anchor put the LED on the centre line and
+// left the unit visibly off it.
+function itemCentre(kind, index) {
+  const mid = b => b && [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
+  if (kind === "led") {
+    const L = state.leds[index];
+    return L ? mid(unitBBox(L)) : null;
+  }
+  if (kind === "text") {
+    const t = state.texts[index];
+    return t ? mid(textBBox(t)) : null;
+  }
+  if (kind === "art") {
+    const a = state.art[index];
+    return a ? [a.cx, a.cy] : null;   // art is stored by its centre already
+  }
+  if (kind === "shapeel") {
+    const el = state.shape.elements[index];
+    return el ? (mid(elBounds(el)) || [el.cx, el.cy]) : null;
+  }
+  return null; // bends, trace ends, the jumper and the free-placed parts are
+               // each stored AT their own centre, so there is nothing to shift
+}
+
+// Every centre worth lining up with, split per axis. `skip` names the object
+// being dragged, so it never snaps to the position it is already in.
+function snapTargets(skip) {
+  // Dragging an outline part reshapes the board, so its own bounds centre
+  // would crawl along with the cursor and never be a line to aim at. That
+  // drag lines up on the standard square instead -- the pad square every
+  // minibadge is built around, and what "centred" means for a silhouette.
+  const ob = skip && skip.kind === "shapeel" ? OUT : outlineBounds();
+  // The board centre goes in first: pick() keeps the earliest of equally
+  // close candidates, so a centre line wins any tie against an object's.
+  const xs = [{ at: (ob[0] + ob[2]) / 2, center: true }];
+  const ys = [{ at: (ob[1] + ob[3]) / 2, center: true }];
+  const add = (x, y) => { xs.push({ at: x }); ys.push({ at: y }); };
+  const addC = c => { if (c) add(c[0], c[1]); };
+  // A part of a free-placed unit belongs to that unit: offer neither the part
+  // nor the envelope it is currently stretching.
+  const owner = skip && ADV_KINDS.has(skip.kind)
+    ? { kind: "led", index: skip.index } : skip;
+  const mine = (kind, i) => owner && owner.kind === kind && owner.index === i;
+  const each = (list, kind) => list.forEach((_o, i) => {
+    if (!mine(kind, i)) addC(itemCentre(kind, i));
+  });
+  each(state.art, "art");
+  each(state.texts, "text");
+  each(state.leds, "led");
+  each(state.shape.elements, "shapeel");
+  if (clkActive() && !(skip && skip.kind === "jumper")) {
+    add(state.clk.x != null ? state.clk.x : JUMPER_AT[0],
+        state.clk.y != null ? state.clk.y : JUMPER_AT[1]);
+  }
+  if (owner !== skip) {
+    // Free placement, one part in hand: its siblings are what it usually wants
+    // to line up with -- a resistor centred on its LED, the via on either.
+    const L = state.leds[skip.index];
+    if (L && L.adv) {
+      const g = geomOf(L);
+      if (skip.kind !== "ledbody") add(L.x, L.y);
+      if (skip.kind !== "ledres") add(...unitPoint(L, g.res[0], g.res[1]));
+      if (skip.kind !== "ledvia") add(...unitPoint(L, g.viaF[0], g.viaF[1]));
+    }
+  }
+  return [xs, ys];
+}
+
+// Snap one board point, recording the guide lines it landed on. Callers pass
+// the raw cursor target; the clamping each kind does stays where it is, so a
+// snapped position is still refused wherever an unsnapped one would be.
+function snapXY(x, y, skip, enabled) {
+  snapGuides = [];
+  if (!enabled) return [x, y];
+  const tol = SNAP_PULL_PX / SCALE;
+  const [xs, ys] = snapTargets(skip);
+  const pick = (v, cands, axis) => {
+    let best = null, bd = tol;
+    for (const c of cands) {
+      const d = Math.abs(c.at - v);
+      if (d < bd) { bd = d; best = c; } // strictly closer: first one keeps a tie
+    }
+    if (!best) return Math.round(v / SNAP_GRID) * SNAP_GRID;
+    snapGuides.push({ axis, at: best.at, center: !!best.center });
+    return best.at;
+  };
+  return [pick(x, xs, "x"), pick(y, ys, "y")];
+}
+
+// How far the dragged item's visual centre sits from the position it stores,
+// measured ONCE at pick-up. Locking it there is deliberate: recomputing it per
+// move would let a snapped position feed back into the offset and creep.
+function snapCentreOffset(kind, index, anchorX, anchorY) {
+  const c = itemCentre(kind, index);
+  return c ? [c[0] - anchorX, c[1] - anchorY] : [0, 0];
+}
+
+// Where the thing being dragged actually ended up, in board mm.
+function dragLandedAt() {
+  if (!drag) return null;
+  const L = state.leds[drag.index];
+  switch (drag.kind) {
+    case "led": case "ledbody":
+      return L ? [L.x, L.y] : null;
+    case "ledres": case "ledvia": {
+      if (!L || !L.adv) return null;
+      const [kx, ky] = drag.kind === "ledres" ? ["rx", "ry"] : ["vx", "vy"];
+      // Unit-frame offset back out to the board (the drag's own inverse).
+      const [bx, by] = rotOff(L.adv[kx], L.adv[ky], L.rot || 0);
+      return [L.x + bx, L.y + by];
+    }
+    case "text": { const t = state.texts[drag.index]; return t ? [t.x, t.y] : null; }
+    case "art": { const a = state.art[drag.index]; return a ? [a.cx, a.cy] : null; }
+    case "shapeel": {
+      const el = state.shape.elements[drag.index];
+      return el ? [el.cx, el.cy] : null;
+    }
+    case "jumper": return [state.clk.x, state.clk.y];
+    case "lednode": {
+      const n = L && (L[NODE_KEYS[drag.trace || "run"]] || [])[drag.node];
+      return n ? [n[0], n[1]] : null;
+    }
+    case "jumpernode": {
+      const n = (state.clk[JNODE_KEYS[drag.trace || "link"]] || [])[drag.node];
+      return n ? [n[0], n[1]] : null;
+    }
+    default: return null;
+  }
+}
+
+// A snapped position still has to survive the clamping each kind does -- a
+// board edge, another unit in the way, an offset that would exceed its reach.
+// Drop the guides the object did not actually land on, or the canvas would
+// draw a line through a part that is sitting somewhere else. The tolerance
+// covers the 0.05 mm rounding the advanced part offsets go through.
+function keepLandedGuides() {
+  if (!snapGuides.length) return;
+  const at = dragLandedAt();
+  if (!at) return;
+  // The guide marks where the item's CENTRE ended up, so that is what has to
+  // be on the line -- the stored anchor can be a whole resistor away from it.
+  const off = drag.cOff || [0, 0];
+  const centre = [at[0] + off[0], at[1] + off[1]];
+  snapGuides = snapGuides.filter(g =>
+    Math.abs((g.axis === "x" ? centre[0] : centre[1]) - g.at) < 0.03);
 }
 
 // ---- interaction ----
@@ -5313,7 +5532,8 @@ function attachPointer(cv, side) {
     }
     if (hit) {
       drag = { kind: hit.kind, index: hit.index, trace: hit.trace,
-               node: hit.node, dx: hit.x - mx, dy: hit.y - my };
+               node: hit.node, dx: hit.x - mx, dy: hit.y - my,
+               cOff: snapCentreOffset(hit.kind, hit.index, hit.x, hit.y) };
       if (hit.kind === "ledterm") {
         // Enumerate the legal destinations once, at pick-up: the move
         // handler snaps to the nearest of these and nothing else.
@@ -5377,9 +5597,23 @@ function attachPointer(cv, side) {
       return;
     }
     const [mx, my] = boardCoords(cv, e, mirror);
+    // Kinds that snap call snapXY (which rewrites the guides); the ones that
+    // cannot -- the trace endpoints, which snap to legal pads instead -- must
+    // still not leave a previous move's guides on screen.
+    snapGuides = [];
+    // Snapping works on the item's centre and hands back the anchor that puts
+    // it there, so what lands on a guide is what the user sees, not the
+    // internal point the object happens to be stored by.
+    const cOff = drag.cOff || [0, 0];
+    const snap = (x, y, skip) => {
+      const [sx, sy] = snapXY(x + cOff[0], y + cOff[1], skip, snapActive(e));
+      return [sx - cOff[0], sy - cOff[1]];
+    };
     if (drag.kind === "led") {
       const L = state.leds[drag.index];
-      const [nx, ny] = clampLedFor(L, mx + drag.dx, my + drag.dy);
+      const [sx, sy] = snap(mx + drag.dx, my + drag.dy,
+                            { kind: "led", index: drag.index });
+      const [nx, ny] = clampLedFor(L, sx, sy);
       if (!ledPosOk(L, drag.index)) {
         // Already stranded (e.g. a cut landed on it, with nowhere to auto-
         // relocate): move freely so the user can pull it onto solid board.
@@ -5416,8 +5650,9 @@ function attachPointer(cv, side) {
       }
     } else if (drag.kind === "jumper") {
       const ob = outlineBounds();
-      const nx = Math.min(Math.max(mx + drag.dx, ob[0] + 1), ob[2] - 1);
-      const ny = Math.min(Math.max(my + drag.dy, ob[1] + 1), ob[3] - 1);
+      const [jsx, jsy] = snap(mx + drag.dx, my + drag.dy, { kind: "jumper" });
+      const nx = Math.min(Math.max(jsx, ob[0] + 1), ob[2] - 1);
+      const ny = Math.min(Math.max(jsy, ob[1] + 1), ob[3] - 1);
       if (jumperConflict()) {
         // Already stranded (a unit landed on it, or the shape changed):
         // move freely so the user can pull it somewhere legal.
@@ -5434,24 +5669,30 @@ function attachPointer(cv, side) {
       const L = state.leds[drag.index];
       const kk = NODE_KEYS[drag.trace || "run"];
       if (L && L[kk] && L[kk][drag.node]) {
+        const [bx, by] = snap(mx + drag.dx, my + drag.dy, null);
         L[kk] = L[kk].map((n, k) => k === drag.node
-          ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, mx + drag.dx)),
-             Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, my + drag.dy))]
+          ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, bx)),
+             Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, by))]
           : n);
       }
     } else if (drag.kind === "jumpernode") {
       const kk = JNODE_KEYS[drag.trace || "link"];
       if (state.clk[kk] && state.clk[kk][drag.node]) {
+        const [bx, by] = snap(mx + drag.dx, my + drag.dy, null);
         state.clk[kk] = state.clk[kk].map((n, k) => k === drag.node
-          ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, mx + drag.dx)),
-             Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, my + drag.dy))]
+          ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, bx)),
+             Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, by))]
           : n);
       }
     } else if (drag.kind === "ledres" || drag.kind === "ledvia") {
       const L = state.leds[drag.index];
       if (L && L.adv) {
-        // Board point -> unit-frame offset (undo the unit rotation).
-        const [ox, oy] = rotOff(mx + drag.dx - L.x, my + drag.dy - L.y, -(L.rot || 0));
+        // Board point -> unit-frame offset (undo the unit rotation). Snapping
+        // happens on the board point, so a part lines up with what the user
+        // can see rather than with its own rotated frame.
+        const [px, py] = snap(mx + drag.dx, my + drag.dy,
+                              { kind: drag.kind, index: drag.index });
+        const [ox, oy] = rotOff(px - L.x, py - L.y, -(L.rot || 0));
         const cl = v => Math.min(20, Math.max(-20, Math.round(v * 20) / 20));
         if (drag.kind === "ledres") { L.adv.rx = cl(ox); L.adv.ry = cl(oy); }
         else { L.adv.vx = cl(ox); L.adv.vy = cl(oy); }
@@ -5467,15 +5708,18 @@ function attachPointer(cv, side) {
         // let the pinned parts push the LED around.
         const s = unitSafe();
         const [phx, phy] = partHalf(L, "led");
-        const nx = Math.min(Math.max(mx + drag.dx, s[0] + phx), s[2] - phx);
-        const ny = Math.min(Math.max(my + drag.dy, s[1] + phy), s[3] - phy);
+        const [bsx, bsy] = snap(mx + drag.dx, my + drag.dy,
+                                { kind: "ledbody", index: drag.index });
+        const nx = Math.min(Math.max(bsx, s[0] + phx), s[2] - phx);
+        const ny = Math.min(Math.max(bsy, s[1] + phy), s[3] - phy);
         const [ux, uy] = rotOff(nx - L.x, ny - L.y, -(L.rot || 0));
         const rx = L.adv.rx - ux, ry = L.adv.ry - uy;
         const vx = L.adv.vx - ux, vy = L.adv.vy - uy;
         // refuse the move if a counter-shift would exceed the offset reach
         // (the part would start dragging along instead of staying put).
-        // No grid-snapping here: the compensation must be exact or the
-        // resistor/via creep as the LED moves.
+        // Snapping moves the LED's target, never these offsets: they are
+        // derived from wherever it landed and are not rounded on their own,
+        // or the resistor/via would creep as the LED moves.
         if ([rx, ry, vx, vy].every(v => v >= -20 && v <= 20)) {
           L.adv.rx = rx; L.adv.ry = ry;
           L.adv.vx = vx; L.adv.vy = vy;
@@ -5486,24 +5730,33 @@ function attachPointer(cv, side) {
     } else if (drag.kind === "text") {
       const t = state.texts[drag.index];
       const ob = outlineBounds();
-      t.x = Math.min(Math.max(mx + drag.dx, Math.min(0.8, ob[0] + 0.8)), Math.max(19.5, ob[2] - 0.8));
-      t.y = Math.min(Math.max(my + drag.dy, ob[1] + 0.8), ob[3] - 0.8);
+      const [tsx, tsy] = snap(mx + drag.dx, my + drag.dy,
+                              { kind: "text", index: drag.index });
+      t.x = Math.min(Math.max(tsx, Math.min(0.8, ob[0] + 0.8)), Math.max(19.5, ob[2] - 0.8));
+      t.y = Math.min(Math.max(tsy, ob[1] + 0.8), ob[3] - 0.8);
       t.auto = false; // the user owns this position now; never move it for them
     } else if (drag.kind === "art") {
       const a = state.art[drag.index];
       const ab = artBoard();
-      a.cx = Math.min(Math.max(mx + drag.dx, ab[0]), ab[2]);
-      a.cy = Math.min(Math.max(my + drag.dy, ab[1]), ab[3]);
+      const [asx, asy] = snap(mx + drag.dx, my + drag.dy,
+                              { kind: "art", index: drag.index });
+      a.cx = Math.min(Math.max(asx, ab[0]), ab[2]);
+      a.cy = Math.min(Math.max(asy, ab[1]), ab[3]);
     } else if (drag.kind === "shapeel") {
       const el = state.shape.elements[drag.index];
-      el.cx = Math.min(Math.max(mx + drag.dx, EXTENT[0] + 2), EXTENT[2] - 2);
-      el.cy = Math.min(Math.max(my + drag.dy, EXTENT[1] + 2), EXTENT[3] - 2);
+      const [esx, esy] = snap(mx + drag.dx, my + drag.dy,
+                              { kind: "shapeel", index: drag.index });
+      el.cx = Math.min(Math.max(esx, EXTENT[0] + 2), EXTENT[2] - 2);
+      el.cy = Math.min(Math.max(esy, EXTENT[1] + 2), EXTENT[3] - 2);
       // The parts compose client-side during the drag; the exact outline
       // (pad tabs included) is re-fetched on release.
     } else if (drag.kind === "rotate") {
       const a1 = Math.atan2(my - drag.cy, mx - drag.cx) * 180 / Math.PI;
       let rot = ((drag.rot0 + a1 - drag.a0) % 360 + 360) % 360;
-      rot = e.shiftKey ? Math.round(rot / 15) * 15 % 360 : Math.round(rot);
+      // Snapping on gives the same 15° steps Shift has always given; Alt (which
+      // inverts the toggle) is the way back to a free angle.
+      rot = e.shiftKey || snapActive(e)
+        ? Math.round(rot / SNAP_ROT) * SNAP_ROT % 360 : Math.round(rot);
       if (drag.tkind === "led") {
         const L = state.leds[drag.index];
         if (L) { L.rot = rot; [L.x, L.y] = clampLedFor(L, L.x, L.y); }
@@ -5565,10 +5818,12 @@ function attachPointer(cv, side) {
         }
       }
     }
+    keepLandedGuides(); // only draw a guide the object is really sitting on
     draw();
   });
   cv.addEventListener("pointerup", () => {
     if (!drag) return;
+    snapGuides = []; // guides belong to the gesture, not to the board
     _noviaCache = new Map(); _noviaPrev = new Map();
     _clkCache = new Map(); _clkPrev = new Map();
     _linkCache = { sig: null, route: null };
@@ -6855,6 +7110,7 @@ $("addart").addEventListener("click", () => {
 // SVGs also get rasterized in the browser (native rendering): the PNG is
 // the local preview and the server's fallback for SVGs whose paint the
 // exact vector parser can't represent (gradients, patterns).
+
 async function svgObjectUrl(f) {
   const doc = new DOMParser().parseFromString(await f.text(), "image/svg+xml");
   const svg = doc.documentElement;
@@ -7833,6 +8089,7 @@ const TIPS = {
     copper stripes, a glowing visor, and a stencil name.</p><ul>
     <li>Drag anything on either view; dashed ghosts live on the other side and can be grabbed here too.</li>
     <li>Click to select, then: <b>arrows</b> nudge (Shift = 1 mm), <b>Delete</b> removes, corner squares resize art and text, the round knob rotates (Shift snaps 15°), <b>double-click</b> = +90°.</li>
+    <li><b>SNAP</b> (top bar, on by default) pulls a drag onto the board's centre lines — pink guide — or onto the centre of anything else placed (blue), and onto a 0.5 mm grid when neither is near; rotation then steps 15°. What lines up is the middle of the thing you are dragging, not the point it hangs from, so a whole LED unit centres as the box you can see. Hold <b>Alt</b> while dragging to ignore it for one move. Arrow-key nudges are never snapped.</li>
   </ul>` },
   shape: { title: "Step 1: a helmet-shaped board", img: "parts.webp", html: `<ul>
     <li><b>+ Silhouette…</b> turns a picture into the board: dark pixels become material, so the badge IS the helmet. Raise the threshold if bright details get punched out.</li>
@@ -7865,7 +8122,7 @@ const TIPS = {
     <li><b>In line</b> is a thin strip (fits behind the visor); 0805 is the minibadge standard. The Layout and Size selects carry the rest.</li>
   </ul>` },
   placement: { title: "When the standard layouts don't fit", img: "placement.webp", html: `<ul>
-    <li><b>Move parts freely</b> unlocks the LED, resistor, and via to drag one by one; the card warns if a spot would short copper.</li>
+    <li><b>Move parts freely</b> unlocks the LED, resistor, and via to drag one by one; the card warns if a spot would short copper. With <b>SNAP</b> on, each part lines up on its own — squared up on the LED it belongs to, or on either of its siblings.</li>
     <li><b>No power via</b> runs a surface trace to a connector pad instead: drag its &#9670; endpoint — every legal target lights up — or double-click it to go back to automatic.</li>
     <li><b>Reverse mount</b> and <b>LED on the other side</b> shine through the board; each explains itself on the card as you tick it.</li>
   </ul>` },
@@ -7929,6 +8186,28 @@ function applyTheme(t) {
 }
 $("themebtn").addEventListener("click", () => {
   applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+});
+
+// Snapping is a workbench preference, not part of the design: it survives a
+// reload but is never written into a saved design file, so opening someone
+// else's badge cannot change how your cursor behaves.
+function applySnap(on, remember = true) {
+  snapOn = !!on;
+  // Writing the default back on load would freeze today's default into every
+  // browser that ever opened the app; only a real choice is stored.
+  if (remember) {
+    try { localStorage.setItem("bm-snap", snapOn ? "1" : "0"); } catch (e) {}
+  }
+  const b = $("snapbtn");
+  b.classList.toggle("on", snapOn);
+  b.setAttribute("aria-pressed", snapOn ? "true" : "false");
+}
+$("snapbtn").addEventListener("click", () => {
+  applySnap(!snapOn);
+  setStatus(snapOn
+    ? "Snapping on: drags line up on the board centre lines, on anything else"
+      + " placed, or on a 0.5 mm grid. Rotation steps 15°. Hold Alt to ignore it."
+    : "Snapping off: drags follow the cursor exactly.");
 });
 
 const PANEL_TABS = { shape: "tab-shape", art: "tab-art", leds: "tab-leds", text: "tab-text" };
@@ -8670,6 +8949,7 @@ $("designfile").addEventListener("change", async () => {
 let savedTheme = "dark";
 try { savedTheme = localStorage.getItem("bm-theme") || "dark"; } catch (e) {}
 applyTheme(savedTheme);
+applySnap(snapOn, false); // reflect the preference; do not re-store it
 showPanel("shape");
 renderShapeOpts();
 renderPinGrid();

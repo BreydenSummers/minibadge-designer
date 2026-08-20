@@ -78,8 +78,21 @@ WIDTH_SWEEP = [(1600, 1000), (1400, 1000), (1280, 900), (1024, 768), (900, 700)]
 # (grouping keeps the stack to one card per problem class), but a discrete
 # control a card covers is covered permanently.  Anything absent at a given
 # width is skipped by the probe.
-CONTROLS = ["viewtabs", "tab-3d", "restorebar", "legend",
+CONTROLS = ["viewtabs", "tab-3d", "snapbtn", "restorebar", "legend",
             "download", "addled", "themebtn", "panelscroll"]
+
+# The pad square every minibadge is built on is 20.32 mm at a 0.16 mm origin,
+# so its centre is at 10.16 mm on both axes.  Stated here on purpose: sourcing
+# it from the app's own OUT would make an edit to OUT invisible to these tests.
+SQUARE_CENTRE_MM = 10.16
+# The grid a snapped drag falls back to when nothing lines up, in mm.  Also
+# stated independently: it is a documented number (the SNAP button says it).
+SNAP_GRID_MM = 0.5
+# A snap is an EXACT assignment, so it is its own signature: no hand drag
+# lands on a millimetre value to twelve decimal places by accident.  That is
+# what lets these tests discriminate a snap from a lucky cursor position,
+# which a 0.7 mm drag tolerance never could.
+SNAP_EXACT_MM = 1e-9
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +279,67 @@ class UI:
         for i in range(1, steps + 1):
             self.page.mouse.move(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps)
         self.page.mouse.up()
+
+    def drag_mm_hold(self, frm, to, side="front", steps=8, modifiers=()):
+        """Like `drag_mm`, but leaves the button DOWN and the modifiers held.
+
+        Snap guides only exist for the duration of a gesture -- the release
+        throws them away on purpose -- so the only way to see what the canvas
+        was drawing is to look before letting go.  Callers must `release()`.
+        """
+        self.scroll_into_view(side)
+        x0, y0 = self.board_to_client(frm[0], frm[1], side)
+        self.page.mouse.move(x0, y0)
+        self.page.mouse.down()
+        for m in modifiers:
+            self.page.keyboard.down(m)
+        x1, y1 = self.board_to_client(to[0], to[1], side)
+        for i in range(1, steps + 1):
+            self.page.mouse.move(x0 + (x1 - x0) * i / steps, y0 + (y1 - y0) * i / steps)
+        self._held = tuple(modifiers)
+
+    def release(self):
+        self.page.mouse.up()
+        for m in getattr(self, "_held", ()):
+            self.page.keyboard.up(m)
+        self._held = ()
+
+    def drag_mm_with(self, frm, to, side="front", steps=8, modifiers=()):
+        """One complete drag with modifier keys held for its whole length."""
+        self.drag_mm_hold(frm, to, side=side, steps=steps, modifiers=modifiers)
+        self.release()
+
+    # -- snapping ----------------------------------------------------------
+    def set_snap(self, on):
+        """Flip the SNAP toggle through its button, never by poking `snapOn`:
+        the button IS how a user chooses the mode, so a test that bypasses it
+        cannot notice the two disagreeing."""
+        if self.js("() => snapOn") != on:
+            self.page.click("#snapbtn", timeout=CONTROL_TIMEOUT)
+        self.wait_state(f"snapOn === {str(bool(on)).lower()}")
+
+    def snap_pressed(self):
+        """What the button claims the mode is, as a user reads it."""
+        return self.js(
+            "() => ({aria: $('snapbtn').getAttribute('aria-pressed'),"
+            " lit: $('snapbtn').classList.contains('on')})"
+        )
+
+    def snap_guides(self):
+        return self.js("() => JSON.parse(JSON.stringify(snapGuides))")
+
+    def visible_centre(self):
+        """The middle of the box the canvas draws around the current selection.
+
+        This -- not the position the object stores -- is what a user means by
+        "centred": a unit is anchored at its LED with the resistor and via off
+        to one side, so the two are a whole resistor apart.  Read through the
+        app's own `selectionInfo()`, which is what draws the box.
+        """
+        return self.js(
+            "() => { const si = selectionInfo(); if (!si) return null;"
+            " const b = si.sb; return [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2]; }"
+        )
 
     def drag_by_px(self, frm, dx, dy, side="front", steps=10):
         """Drag by a raw pixel delta that may leave the canvas.  pointerdown
@@ -4066,3 +4140,333 @@ def test_dropping_a_picture_says_where_pictures_go(ui):
     assert ui.js("() => JSON.stringify(designJSON())") == before, (
         "dropping a picture changed the design")
     ui.assert_clean("drop a picture")
+
+
+# ===========================================================================
+# Snapping (the SNAP toggle in the top bar; on by default)
+#
+# Snapping decides where a part is actually built: a drag that lands 0.3 mm
+# from the board's centre line builds a badge whose art is 0.3 mm off centre,
+# and a guide line drawn through a part that is somewhere else is a preview
+# telling the user a lie about the board they will get.  Both are invisible to
+# DRC -- an off-centre part is perfectly manufacturable -- so the editor is the
+# only place they can be caught.
+# ===========================================================================
+def _add_text_on(ui, side):
+    """One text layer, on the face asked for, with ink in it so it is grabbable
+    on the canvas.  `side='back'` is the deliberate move off the default: the
+    BACK view is mirrored, and mirrored board coordinates are where a
+    hand-rolled snap could quietly work on one face only."""
+    ui.show_panel("text")
+    ui.page.click("#addtext", timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.texts.length === 1")
+    ui.page.locator("#textlist .item input.tx").first.fill("SNAP", timeout=ELEMENT_TIMEOUT)
+    ui.card("textlist", 0).locator("select.s").select_option(side, timeout=ELEMENT_TIMEOUT)
+    ui.wait_state(f"state.texts[0].side === '{side}'")
+    return ui.js("() => [state.texts[0].x, state.texts[0].y]")
+
+
+def _grabbable_led(ui):
+    """The starter unit's anchor and the face it is mounted on."""
+    led = ui.leds()[0]
+    return [led["x"], led["y"]], led["side"]
+
+
+def _anchor_to_centre(ui, anchor, side):
+    """How far the selected item's visible centre sits from the point a drag
+    grabs it by.  A drag aims the ANCHOR, so a test that wants the CENTRE to
+    end up somewhere has to aim that much short of it -- which is exactly the
+    correction the app itself has to make."""
+    ui.click_mm(anchor[0], anchor[1], side=side)
+    centre = ui.visible_centre()
+    assert centre, "nothing is selected, so there is no box to centre"
+    return [centre[0] - anchor[0], centre[1] - anchor[1]]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("kind", ["text", "led"])
+def test_snapping_lands_a_dragged_part_exactly_on_the_board_centre(ui, kind):
+    """With SNAP on, a drag that ends NEAR a centre line lands ON it.
+
+    "Near" is the whole point: the user aims by hand and the app is supposed to
+    finish the job.  The contrast case in the same test is the same gesture with
+    SNAP off, which must land where the cursor was and nowhere else -- a snap
+    that cannot be turned off is worse than none, because 0.2 mm adjustments
+    stop existing.
+
+    Both faces are covered (a text on the BACK, the unit on its own face): the
+    back view is mirrored, so a snap computed on screen coordinates instead of
+    board coordinates would pass on the front alone.
+    """
+    if kind == "text":
+        start, side = _add_text_on(ui, "back"), "back"
+        read = lambda: ui.js("() => [state.texts[0].x, state.texts[0].y]")
+    else:
+        start, side = _grabbable_led(ui)
+        read = lambda: [ui.leds()[0]["x"], ui.leds()[0]["y"]]
+
+    # Aim the item's CENTRE a hair off the board centre: inside the pull,
+    # outside exactness.  For a unit that is a couple of millimetres away from
+    # where the cursor holds it, which is the whole point of this test.
+    off = _anchor_to_centre(ui, start, side)
+    aim = (SQUARE_CENTRE_MM - off[0] + 0.14, SQUARE_CENTRE_MM - off[1] - 0.11)
+
+    ui.set_snap(False)
+    ui.drag_mm(start, aim, side=side)
+    free_centre = ui.visible_centre()
+    assert abs(free_centre[0] - SQUARE_CENTRE_MM) > SNAP_EXACT_MM, (
+        f"snapping is OFF but the part still centred exactly: {free_centre}")
+    assert math.hypot(free_centre[0] - SQUARE_CENTRE_MM - 0.14,
+                      free_centre[1] - SQUARE_CENTRE_MM + 0.11) < 0.7, (
+        f"with snapping off the part must follow the cursor; centre {free_centre}")
+
+    ui.set_snap(True)
+    ui.drag_mm(read(), aim, side=side)
+    snapped = ui.visible_centre()
+    assert len(snapped) == 2, f"a centre is two numbers; got {snapped}"
+    for axis, got in enumerate(snapped):
+        assert abs(got - SQUARE_CENTRE_MM) < SNAP_EXACT_MM, (
+            f"axis {axis} of the item's own centre did not land on the board "
+            f"centre: {snapped} (the anchor it is stored by is at {read()})")
+    # The app's own idea of the board centre must be the one the test used, or
+    # the number above is only self-consistent.
+    bounds = ui.js("() => outlineBounds()")
+    assert abs((bounds[0] + bounds[2]) / 2 - SQUARE_CENTRE_MM) < 0.01, (
+        f"the default board is not the standard square any more: {bounds}")
+    ui.assert_clean(f"snap a {kind} to the board centre")
+
+
+@pytest.mark.browser
+def test_a_snapped_drag_with_nothing_to_line_up_with_lands_on_the_grid(ui):
+    """Away from every centre line, a snapped drag still lands on a round
+    number: the 0.5 mm grid the SNAP button promises.  Off, the same drag keeps
+    whatever fraction of a millimetre the cursor had.
+
+    This is the half of snapping that has no guide line to look at, so state is
+    the only witness.
+    """
+    start = _add_text_on(ui, "front")
+    # Not a grid multiple, and clear of every centre on the board -- the LED
+    # unit's own centre included, which sits well left of the LED itself.
+    aim = (14.37, 4.88)
+    targets = ui.js("() => snapTargets(null)[0].map(t => t.at)")
+    assert len(targets) >= 2, (
+        f"a board with a unit and a text has at least its own centre and the "
+        f"unit's to offer; got {targets}")
+    for c in targets:
+        assert abs(c - aim[0]) > 1.0, (
+            f"the aim point is {abs(c - aim[0]):.2f} mm from a real snap target "
+            f"at {c}: this test would measure that snap, not the grid")
+
+    ui.set_snap(False)
+    ui.drag_mm(start, aim, side="front")
+    free = ui.js("() => [state.texts[0].x, state.texts[0].y]")
+    free_centre = ui.visible_centre()
+    off_grid = [abs(v / SNAP_GRID_MM - round(v / SNAP_GRID_MM)) for v in free_centre]
+    assert max(off_grid) > SNAP_EXACT_MM, (
+        f"snapping is OFF but both axes still landed on the grid: {free_centre}")
+
+    ui.set_snap(True)
+    ui.drag_mm_hold(free, aim, side="front")
+    mid_drag_guides = ui.snap_guides()
+    ui.release()
+    assert not mid_drag_guides, (
+        f"a guide line appeared, so this landing was an alignment and not the "
+        f"grid: {mid_drag_guides}")
+    snapped = ui.visible_centre()
+    assert len(snapped) == 2, f"a centre is two numbers; got {snapped}"
+    for axis, got in enumerate(snapped):
+        steps = got / SNAP_GRID_MM
+        assert abs(steps - round(steps)) < SNAP_EXACT_MM, (
+            f"axis {axis} is not on the {SNAP_GRID_MM} mm grid: {snapped}")
+    assert math.hypot(snapped[0] - aim[0], snapped[1] - aim[1]) < 0.7, (
+        f"the grid snap moved the text further than one grid step: {snapped} vs {aim}")
+    ui.assert_clean("snap a text to the grid")
+
+
+@pytest.mark.browser
+def test_holding_alt_places_a_part_off_the_snap_lines(ui):
+    """Alt is the escape hatch: the one gesture it is held for ignores the
+    toggle, so a part can be nudged just off a centre line without hunting for
+    the button.  Without it, snapping on means some positions are unreachable.
+    """
+    start = _add_text_on(ui, "front")
+    aim = (SQUARE_CENTRE_MM + 0.13, SQUARE_CENTRE_MM + 0.13)
+
+    ui.set_snap(True)
+    ui.drag_mm_with(start, aim, side="front", modifiers=("Alt",))
+    landed = ui.visible_centre()
+    assert abs(landed[0] - SQUARE_CENTRE_MM) > SNAP_EXACT_MM, (
+        f"Alt did not suspend snapping; the text snapped anyway: {landed}")
+    assert math.hypot(landed[0] - aim[0], landed[1] - aim[1]) < 0.7, (
+        f"Alt-dragging must still follow the cursor; aimed {aim}, got {landed}")
+    assert not ui.snap_guides(), (
+        "a guide was left on screen for a drag that did not snap")
+
+    # And the toggle itself survives: Alt suspends, it does not switch off.
+    assert ui.js("() => snapOn") is True, "Alt turned the toggle off for good"
+    assert ui.snap_pressed() == {"aria": "true", "lit": True}, (
+        "the SNAP button stopped showing the mode the drags are using")
+    ui.assert_clean("alt-drag with snapping on")
+
+
+@pytest.mark.browser
+def test_a_snap_guide_only_marks_a_line_the_part_really_landed_on(ui):
+    """A guide line is a claim about the board: "this part is on this line".
+
+    A snapped position still has to survive the clamping each kind does -- a
+    unit will not enter another unit -- so the position the snap aimed at is
+    not always the position the part got.  Drawing the line anyway would make
+    the preview promise an alignment the fab board will not have.
+
+    Two units share a column here, so the y snap is refused by collision while
+    the x snap goes through: exactly the case where an unfiltered guide lies.
+    """
+    ui.show_panel("leds")
+    assert ui.add_led(), "the board must take a second unit for this test"
+    leds = ui.leds()
+    mover, target = leds[0], leds[1]
+    ui.set_snap(True)
+    # Aim at the other unit's row and column, from just off both.
+    ui.drag_mm_hold((mover["x"], mover["y"]),
+                    (target["x"] + 0.12, target["y"] + 0.12),
+                    side=mover["side"])
+    guides = ui.snap_guides()
+    centre = ui.visible_centre()
+    ui.release()
+
+    assert guides, (
+        "a drag onto another unit's column produced no guide at all, so this "
+        "test could not see whether guides tell the truth")
+    for g in guides:
+        at_part = centre[0] if g["axis"] == "x" else centre[1]
+        assert abs(at_part - g["at"]) < 0.03, (
+            f"a {g['axis']} guide is drawn at {g['at']} but the part sits at "
+            f"{at_part}: the preview claims an alignment the board will not have")
+    ui.assert_clean("guides during a blocked snap")
+
+
+@pytest.mark.browser
+def test_snapping_turns_a_rotation_drag_in_whole_15_degree_steps(ui):
+    """The knob is the only way to rotate on the canvas, and free-hand angles
+    are the reason silk text arrives 37° askew.  With SNAP on the knob steps
+    15°; with it off the same sweep keeps the angle the user drew.
+    """
+    _add_text_on(ui, "front")
+    # Park it low on the board first: the toast that every toggle click raises
+    # floats over the TOP of the canvas, and a rotate knob under it is a knob
+    # the mouse cannot reach -- a harness hazard, not a snapping one.
+    ui.js("() => { state.texts[0].x = 10.16; state.texts[0].y = 15.5;"
+          " state.texts[0].auto = false; draw(); }")
+    ui.click_mm(*ui.js("() => [state.texts[0].x, state.texts[0].y]"), side="front")
+    assert ui.selected() and ui.selected()["kind"] == "text", (
+        "the text was not selected, so no rotate knob exists to drag")
+
+    def sweep_to(degrees):
+        """Grab the knob and swing it `degrees` clockwise from straight up,
+        around the selection's own centre."""
+        si = ui.js("() => JSON.parse(JSON.stringify(selectionInfo()))")
+        box = si["sb"]
+        centre = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+        knob = si.get("knob") or ((box[0] + box[2]) / 2,
+                                 box[1] - 16 / ui.js("() => SCALE"))
+        arm = math.hypot(knob[0] - centre[0], knob[1] - centre[1])
+        rad = math.radians(degrees - 90)
+        ui.drag_mm(knob,
+                   (centre[0] + arm * math.cos(rad), centre[1] + arm * math.sin(rad)),
+                   side="front")
+        return ui.js("() => state.texts[0].rot")
+
+    ui.set_snap(False)
+    free = sweep_to(37)
+    assert free % 15 != 0, (
+        f"snapping is OFF but the angle still came out a 15° multiple: {free}°")
+
+    ui.set_snap(True)
+    stepped = sweep_to(37)
+    assert stepped % 15 == 0, f"snapping did not step the rotation: {stepped}°"
+    assert min(abs(stepped - 37), abs(stepped - 37 + 360)) <= 15, (
+        f"the snapped angle is not the nearest step to the gesture: {stepped}°")
+    ui.assert_clean("snap a rotation drag")
+
+
+@pytest.mark.browser
+def test_the_first_session_arrives_with_snapping_on_and_says_so(ui):
+    """Snapping is the default, and the button has to agree with it.
+
+    A button that reads OFF while drags snap (or the reverse) makes every
+    placement a guess: the user aims for a spot and the app moves the part
+    somewhere else with no visible reason.  Nothing is written to storage
+    until the user actually chooses, so a later change of default is not
+    frozen into every browser that ever opened the app.
+    """
+    assert ui.js("() => snapOn") is True, "the first session did not start snapped"
+    assert ui.snap_pressed() == {"aria": "true", "lit": True}, (
+        "the SNAP button does not show the mode the drags are using")
+    assert ui.js("() => localStorage.getItem('bm-snap')") is None, (
+        "the default was written to storage, freezing it for this browser")
+    ui.page.click("#snapbtn", timeout=CONTROL_TIMEOUT)
+    ui.wait_state("snapOn === false")
+    assert ui.js("() => localStorage.getItem('bm-snap')") == "0", (
+        "turning snapping off did not record the choice, so it will not survive")
+    assert ui.snap_pressed() == {"aria": "false", "lit": False}, (
+        "the button still reads pressed after being switched off")
+    ui.assert_clean("read and flip the snapping default")
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("part", ["ledres", "ledvia"])
+def test_a_free_placed_part_lines_up_on_its_own_units_led(ui, part):
+    """With free placement on, each part of a unit drags separately -- so each
+    one snaps separately, and what it wants to line up with is usually the LED
+    it belongs to.
+
+    Offering only whole-unit centres here would make the one alignment that
+    matters (resistor and via squared up on their own LED) the one alignment
+    the user has to do by eye, on parts about a millimetre across.
+    """
+    ui.show_panel("leds")
+    # Free placement, with the resistor and via parked well off both of the
+    # LED's own axes so a snap has somewhere to travel.  The LED itself is put
+    # on a deliberately OFF-grid column: on a round number the 0.5 mm grid
+    # would land the part in the same place and the test would pass without
+    # the LED ever being a target.
+    ui.js("""() => {
+        const L = state.leds[0];
+        L.x = 7.37;
+        L.adv = {rx: 3.2, ry: 2.4, vx: -2.8, vy: -2.0, rrot: 0, lrot: 0};
+        renderLedList(); draw();
+    }""")
+    led = ui.leds()[0]
+    body = [led["x"], led["y"]]
+    off_grid = abs(body[0] / SNAP_GRID_MM - round(body[0] / SNAP_GRID_MM))
+    assert off_grid > 0.1, (
+        f"the LED landed on the snap grid at x={body[0]}, so lining up on it "
+        "cannot be told apart from the grid fallback")
+    where = ui.js(
+        "(k) => { const L = state.leds[0], g = geomOf(L);"
+        " return k === 'ledres' ? unitPoint(L, g.res[0], g.res[1])"
+        "                       : unitPoint(L, g.viaF[0], g.viaF[1]); }", part)
+
+    ui.set_snap(True)
+    # Aim a hair off the LED's own column, keeping the row well clear so only
+    # one axis can snap: a two-axis landing would not say which target won.
+    ui.drag_mm(where, (body[0] + 0.12, where[1] - 1.6), side=led["side"])
+    guides = ui.snap_guides()
+    after = ui.js(
+        "(k) => { const L = state.leds[0], g = geomOf(L);"
+        " return k === 'ledres' ? unitPoint(L, g.res[0], g.res[1])"
+        "                       : unitPoint(L, g.viaF[0], g.viaF[1]); }", part)
+
+    # 0.03 mm covers the 0.05 mm rounding a free-placed offset goes through.
+    assert abs(after[0] - body[0]) < 0.03, (
+        f"the {part} did not line up on its own LED: part at {after}, LED at {body}")
+    assert abs(after[1] - where[1]) > 0.5, (
+        f"the {part} never moved, so nothing was tested: {where} -> {after}")
+    # The LED itself must not have been dragged along; only one part moves.
+    now = ui.leds()[0]
+    assert [now["x"], now["y"]] == body, (
+        f"dragging the {part} moved the LED too: {body} -> {[now['x'], now['y']]}")
+    assert not guides, "guides outlive the gesture that drew them"
+    ui.assert_clean(f"snap a free-placed {part} onto its LED")
+
