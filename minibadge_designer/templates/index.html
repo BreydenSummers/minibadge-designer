@@ -50,6 +50,18 @@
     border-radius: 4px; width: 30px; height: 30px; cursor: pointer; font-size: 14px;
   }
   #themebtn:hover { color: var(--accent); border-color: var(--accent); }
+  /* Snapping rides with the theme toggle: both are workbench preferences that
+     outlive the design, and neither belongs in the view selector -- which sits
+     centred over the board, where the restore bar and the boards themselves
+     already compete for room. */
+  #snapbtn {
+    background: none; border: 1px solid var(--edge); color: var(--dim);
+    border-radius: 4px; height: 30px; padding: 0 10px; cursor: pointer;
+    font: 700 10.5px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: .1em; flex: 0 0 auto;
+  }
+  #snapbtn:hover { color: var(--accent); border-color: var(--accent); }
+  #snapbtn.on { background: var(--accent); border-color: var(--accent); color: var(--panel); }
   #shell {
     display: grid; grid-template-columns: 54px 330px 1fr; height: 100%; overflow: hidden;
   }
@@ -606,6 +618,7 @@
   <input type="text" id="name" value="my-minibadge" maxlength="40" title="Project name (used for the zip and its files)">
   <button class="qm" tabindex="-1" data-tip="basics" title="Getting around">?</button>
   <button id="themebtn" title="Toggle light/dark">◐</button>
+  <button id="snapbtn" aria-pressed="true" title="Snap while dragging: the board's centre lines, the centre of anything else placed, else a 0.5 mm grid. Rotation steps 15°. Hold Alt to ignore it for one move.">SNAP</button>
   <button id="openbtn" title="Open a design file saved earlier (or drop one anywhere on the page)">⬆ Open<span class="dlx"> design</span></button>
   <input type="file" id="designfile" accept=".json,application/json" hidden>
   <button id="download" title="Choose what to download: the KiCad project, the Gerber fab package, the design file, or any combination">⬇ Download<span class="dlx">…</span></button>
@@ -838,6 +851,12 @@ const pairCaptionAt = k => {
 const powerMissing = () => ["3V3", "GND"].filter(
   net => !activePads().some(p => p[2] === net));
 const PIXEL_MM = 0.18, MAX_COLS = 192, EDGE = 0.5;
+// The tracer's sampling pitch (logo.py TRACE_PIXEL_MM / MAX_TRACE_COLS). Art
+// classification happens here, not on the 0.18 mm board grid: the cells are
+// boundary evidence for a polygon, not squares of ink, so the preview has to
+// resolve them as finely as the server does or it draws stairs the board
+// will not have.
+const TRACE_PIXEL_MM = 0.06, MAX_TRACE_COLS = 480;
 const UNIT_SAFE = [0.7, 0.7, 19.62, 19.62]; // standard square, inset from edge
 // Keepouts around each connector pad pair (pad copper + pour clearance).
 // Units may use the rest of the strip, including between the two pairs.
@@ -3628,12 +3647,13 @@ function floodFill(classes, cols, rows, seed) { // 4-connected, like logo.py
 function rebuildArt(a) {
   if (isShapeArt(a)) { a.empty = false; a.caches = null; return; }
   const d = artDims(a);
-  // SVG layers become exact vector geometry on the board, so their preview
-  // classifies at near-native resolution instead of the 0.18 mm board grid.
-  if (a.isSvg) {
-    d.cols = Math.max(d.cols, Math.min(768, a.iw));
-    d.rows = Math.max(1, Math.round(d.cols * d.h / d.w));
-  }
+  // Every image layer becomes polygons on the board -- an SVG from its own
+  // vector paths, a raster from a traced contour of this same classification
+  // -- so the preview classifies at the tracer's pitch, or at the SVG's own
+  // resolution where that is finer still, and never on the board grid.
+  const traceCols = Math.min(MAX_TRACE_COLS, Math.max(1, Math.round(d.w / TRACE_PIXEL_MM)));
+  d.cols = Math.max(d.cols, a.isSvg ? Math.min(768, Math.max(traceCols, a.iw)) : traceCols);
+  d.rows = Math.max(1, Math.round(d.cols * d.h / d.w));
   const src = document.createElement("canvas");
   src.width = d.cols; src.height = d.rows;
   const sctx = src.getContext("2d", { willReadFrequently: true });
@@ -3831,11 +3851,15 @@ function drawArtLayer(c, a, mat, viewSide) {
   const cache = a.caches && a.caches[mat];
   if (!cache) return;
   const d = artDims(a);
-  // Raster layers show their true board pixels (nearest-neighbor); SVG
-  // layers are exact on the board, so their preview scales smoothly too.
-  c.imageSmoothingEnabled = !!a.isSvg;
-  c.drawImage(cache, mm2px(a.cx - d.w / 2), mm2px(a.cy - d.h / 2), d.w * SCALE, d.h * SCALE);
+  // Both kinds of art reach the board as polygons now, so neither has board
+  // pixels to show: scale the classification smoothly and the preview edge
+  // reads like the traced curve instead of a staircase the board never gets.
+  // (The one case this flatters is art dense enough to exhaust the server's
+  // tracing allowance, which does ship as rectangles -- webapp.MAX_ART_TRACE_RECTS.
+  // Nothing a badge would carry gets close, and the preview cannot know which
+  // side of the allowance a layer landed on without doing the trace itself.)
   c.imageSmoothingEnabled = true;
+  c.drawImage(cache, mm2px(a.cx - d.w / 2), mm2px(a.cy - d.h / 2), d.w * SCALE, d.h * SCALE);
 }
 
 // Server-side art keepouts, mirrored for the preview: decor (silk/copper)
@@ -4707,6 +4731,29 @@ function drawView(canvas, side) {
       }
     }
   }
+  if (drag && snapGuides.length) {
+    // The lines this drag is locked to. Both views get them: the guide is a
+    // fact about the board, and a back part is routinely dragged by its ghost
+    // on the front view. They live and die with the drag, so nothing here
+    // survives into a still frame.
+    c.save();
+    c.setLineDash([4, 5]);
+    c.lineWidth = 1;
+    for (const g of snapGuides) {
+      c.strokeStyle = g.center ? "#ff6ec7" : "#54e0ff";
+      c.beginPath();
+      // Full canvas span, in the viewport's own translated coordinates.
+      if (g.axis === "x") {
+        c.moveTo(mm2px(g.at), -VIEW.ty);
+        c.lineTo(mm2px(g.at), canvas.height - VIEW.ty);
+      } else {
+        c.moveTo(-VIEW.tx, mm2px(g.at));
+        c.lineTo(canvas.width - VIEW.tx, mm2px(g.at));
+      }
+      c.stroke();
+    }
+    c.restore();
+  }
   { // hover feedback: what a control changes, on the layer's own view
     const ha = artHL && state.art[artHL.index];
     if (ha && (((ha.side || "front") === "back") === mirror)) {
@@ -4804,6 +4851,189 @@ function draw() {
   // Every edit funnels through here, so this is where the 3D view learns it
   // went stale (no-ops unless that tab is open; m3dLoad diffs the design).
   m3dSchedule();
+}
+
+// ---- snapping ----
+// Optional, toggled in the view bar. With it on, a drag is pulled onto the
+// lines a badge actually gets lined up with: the board's own two centre lines,
+// the centre of anything else already placed, and -- when neither is near -- a
+// 0.5 mm grid, so a free drag still lands on a round number.
+//
+// The pull is measured in SCREEN pixels and converted to mm through the live
+// SCALE, so it feels the same whether the viewport is fitted to a 20 mm square
+// or a 120 mm silhouette. In board mm a fixed radius would grab from half a
+// board away on the zoomed-out view and be unreachably tight on the small one.
+// On by default: nearly every placement on a 20 mm board wants to line up with
+// something, and Alt is right there for the one that does not. A stored choice
+// still wins -- turning it off has to survive a reload, or the toggle is a lie.
+let snapOn = true;
+try {
+  const stored = localStorage.getItem("bm-snap");
+  if (stored !== null) snapOn = stored === "1";
+} catch (e) {}
+const SNAP_PULL_PX = 7;  // how near the cursor has to be for a line to grab
+const SNAP_GRID = 0.5;   // mm; the fallback when nothing lines up
+const SNAP_ROT = 15;     // degrees, same step Shift has always given
+// The three parts a free-placed unit drags one by one. Each is stored at its
+// own centre, so each snaps as itself -- that is what "individually" means.
+const ADV_KINDS = new Set(["ledbody", "ledres", "ledvia"]);
+// Alt inverts the toggle for the duration of one gesture: snapping off when it
+// is on (nudge something a tenth of a millimetre past a centre line), and on
+// when it is off. Matches the escape hatch every drawing tool has.
+const snapActive = e => snapOn !== !!(e && e.altKey);
+// Which lines the drag is currently locked to, in board mm. Written by
+// snapXY(), drawn on both views, cleared when the drag ends.
+let snapGuides = [];
+
+// The centre of the box the canvas draws around an item, in board mm -- what a
+// user means by "centred". It is NOT the position the item stores: a unit's
+// anchor is its LED, so the resistor and via hang off to one side, and a text's
+// anchor is its rotation pivot, which sits inside the ink rather than in the
+// middle of it. Snapping the stored anchor put the LED on the centre line and
+// left the unit visibly off it.
+function itemCentre(kind, index) {
+  const mid = b => b && [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2];
+  if (kind === "led") {
+    const L = state.leds[index];
+    return L ? mid(unitBBox(L)) : null;
+  }
+  if (kind === "text") {
+    const t = state.texts[index];
+    return t ? mid(textBBox(t)) : null;
+  }
+  if (kind === "art") {
+    const a = state.art[index];
+    return a ? [a.cx, a.cy] : null;   // art is stored by its centre already
+  }
+  if (kind === "shapeel") {
+    const el = state.shape.elements[index];
+    return el ? (mid(elBounds(el)) || [el.cx, el.cy]) : null;
+  }
+  return null; // bends, trace ends, the jumper and the free-placed parts are
+               // each stored AT their own centre, so there is nothing to shift
+}
+
+// Every centre worth lining up with, split per axis. `skip` names the object
+// being dragged, so it never snaps to the position it is already in.
+function snapTargets(skip) {
+  // Dragging an outline part reshapes the board, so its own bounds centre
+  // would crawl along with the cursor and never be a line to aim at. That
+  // drag lines up on the standard square instead -- the pad square every
+  // minibadge is built around, and what "centred" means for a silhouette.
+  const ob = skip && skip.kind === "shapeel" ? OUT : outlineBounds();
+  // The board centre goes in first: pick() keeps the earliest of equally
+  // close candidates, so a centre line wins any tie against an object's.
+  const xs = [{ at: (ob[0] + ob[2]) / 2, center: true }];
+  const ys = [{ at: (ob[1] + ob[3]) / 2, center: true }];
+  const add = (x, y) => { xs.push({ at: x }); ys.push({ at: y }); };
+  const addC = c => { if (c) add(c[0], c[1]); };
+  // A part of a free-placed unit belongs to that unit: offer neither the part
+  // nor the envelope it is currently stretching.
+  const owner = skip && ADV_KINDS.has(skip.kind)
+    ? { kind: "led", index: skip.index } : skip;
+  const mine = (kind, i) => owner && owner.kind === kind && owner.index === i;
+  const each = (list, kind) => list.forEach((_o, i) => {
+    if (!mine(kind, i)) addC(itemCentre(kind, i));
+  });
+  each(state.art, "art");
+  each(state.texts, "text");
+  each(state.leds, "led");
+  each(state.shape.elements, "shapeel");
+  if (clkActive() && !(skip && skip.kind === "jumper")) {
+    add(state.clk.x != null ? state.clk.x : JUMPER_AT[0],
+        state.clk.y != null ? state.clk.y : JUMPER_AT[1]);
+  }
+  if (owner !== skip) {
+    // Free placement, one part in hand: its siblings are what it usually wants
+    // to line up with -- a resistor centred on its LED, the via on either.
+    const L = state.leds[skip.index];
+    if (L && L.adv) {
+      const g = geomOf(L);
+      if (skip.kind !== "ledbody") add(L.x, L.y);
+      if (skip.kind !== "ledres") add(...unitPoint(L, g.res[0], g.res[1]));
+      if (skip.kind !== "ledvia") add(...unitPoint(L, g.viaF[0], g.viaF[1]));
+    }
+  }
+  return [xs, ys];
+}
+
+// Snap one board point, recording the guide lines it landed on. Callers pass
+// the raw cursor target; the clamping each kind does stays where it is, so a
+// snapped position is still refused wherever an unsnapped one would be.
+function snapXY(x, y, skip, enabled) {
+  snapGuides = [];
+  if (!enabled) return [x, y];
+  const tol = SNAP_PULL_PX / SCALE;
+  const [xs, ys] = snapTargets(skip);
+  const pick = (v, cands, axis) => {
+    let best = null, bd = tol;
+    for (const c of cands) {
+      const d = Math.abs(c.at - v);
+      if (d < bd) { bd = d; best = c; } // strictly closer: first one keeps a tie
+    }
+    if (!best) return Math.round(v / SNAP_GRID) * SNAP_GRID;
+    snapGuides.push({ axis, at: best.at, center: !!best.center });
+    return best.at;
+  };
+  return [pick(x, xs, "x"), pick(y, ys, "y")];
+}
+
+// How far the dragged item's visual centre sits from the position it stores,
+// measured ONCE at pick-up. Locking it there is deliberate: recomputing it per
+// move would let a snapped position feed back into the offset and creep.
+function snapCentreOffset(kind, index, anchorX, anchorY) {
+  const c = itemCentre(kind, index);
+  return c ? [c[0] - anchorX, c[1] - anchorY] : [0, 0];
+}
+
+// Where the thing being dragged actually ended up, in board mm.
+function dragLandedAt() {
+  if (!drag) return null;
+  const L = state.leds[drag.index];
+  switch (drag.kind) {
+    case "led": case "ledbody":
+      return L ? [L.x, L.y] : null;
+    case "ledres": case "ledvia": {
+      if (!L || !L.adv) return null;
+      const [kx, ky] = drag.kind === "ledres" ? ["rx", "ry"] : ["vx", "vy"];
+      // Unit-frame offset back out to the board (the drag's own inverse).
+      const [bx, by] = rotOff(L.adv[kx], L.adv[ky], L.rot || 0);
+      return [L.x + bx, L.y + by];
+    }
+    case "text": { const t = state.texts[drag.index]; return t ? [t.x, t.y] : null; }
+    case "art": { const a = state.art[drag.index]; return a ? [a.cx, a.cy] : null; }
+    case "shapeel": {
+      const el = state.shape.elements[drag.index];
+      return el ? [el.cx, el.cy] : null;
+    }
+    case "jumper": return [state.clk.x, state.clk.y];
+    case "lednode": {
+      const n = L && (L[NODE_KEYS[drag.trace || "run"]] || [])[drag.node];
+      return n ? [n[0], n[1]] : null;
+    }
+    case "jumpernode": {
+      const n = (state.clk[JNODE_KEYS[drag.trace || "link"]] || [])[drag.node];
+      return n ? [n[0], n[1]] : null;
+    }
+    default: return null;
+  }
+}
+
+// A snapped position still has to survive the clamping each kind does -- a
+// board edge, another unit in the way, an offset that would exceed its reach.
+// Drop the guides the object did not actually land on, or the canvas would
+// draw a line through a part that is sitting somewhere else. The tolerance
+// covers the 0.05 mm rounding the advanced part offsets go through.
+function keepLandedGuides() {
+  if (!snapGuides.length) return;
+  const at = dragLandedAt();
+  if (!at) return;
+  // The guide marks where the item's CENTRE ended up, so that is what has to
+  // be on the line -- the stored anchor can be a whole resistor away from it.
+  const off = drag.cOff || [0, 0];
+  const centre = [at[0] + off[0], at[1] + off[1]];
+  snapGuides = snapGuides.filter(g =>
+    Math.abs((g.axis === "x" ? centre[0] : centre[1]) - g.at) < 0.03);
 }
 
 // ---- interaction ----
@@ -5313,7 +5543,8 @@ function attachPointer(cv, side) {
     }
     if (hit) {
       drag = { kind: hit.kind, index: hit.index, trace: hit.trace,
-               node: hit.node, dx: hit.x - mx, dy: hit.y - my };
+               node: hit.node, dx: hit.x - mx, dy: hit.y - my,
+               cOff: snapCentreOffset(hit.kind, hit.index, hit.x, hit.y) };
       if (hit.kind === "ledterm") {
         // Enumerate the legal destinations once, at pick-up: the move
         // handler snaps to the nearest of these and nothing else.
@@ -5377,9 +5608,23 @@ function attachPointer(cv, side) {
       return;
     }
     const [mx, my] = boardCoords(cv, e, mirror);
+    // Kinds that snap call snapXY (which rewrites the guides); the ones that
+    // cannot -- the trace endpoints, which snap to legal pads instead -- must
+    // still not leave a previous move's guides on screen.
+    snapGuides = [];
+    // Snapping works on the item's centre and hands back the anchor that puts
+    // it there, so what lands on a guide is what the user sees, not the
+    // internal point the object happens to be stored by.
+    const cOff = drag.cOff || [0, 0];
+    const snap = (x, y, skip) => {
+      const [sx, sy] = snapXY(x + cOff[0], y + cOff[1], skip, snapActive(e));
+      return [sx - cOff[0], sy - cOff[1]];
+    };
     if (drag.kind === "led") {
       const L = state.leds[drag.index];
-      const [nx, ny] = clampLedFor(L, mx + drag.dx, my + drag.dy);
+      const [sx, sy] = snap(mx + drag.dx, my + drag.dy,
+                            { kind: "led", index: drag.index });
+      const [nx, ny] = clampLedFor(L, sx, sy);
       if (!ledPosOk(L, drag.index)) {
         // Already stranded (e.g. a cut landed on it, with nowhere to auto-
         // relocate): move freely so the user can pull it onto solid board.
@@ -5416,8 +5661,9 @@ function attachPointer(cv, side) {
       }
     } else if (drag.kind === "jumper") {
       const ob = outlineBounds();
-      const nx = Math.min(Math.max(mx + drag.dx, ob[0] + 1), ob[2] - 1);
-      const ny = Math.min(Math.max(my + drag.dy, ob[1] + 1), ob[3] - 1);
+      const [jsx, jsy] = snap(mx + drag.dx, my + drag.dy, { kind: "jumper" });
+      const nx = Math.min(Math.max(jsx, ob[0] + 1), ob[2] - 1);
+      const ny = Math.min(Math.max(jsy, ob[1] + 1), ob[3] - 1);
       if (jumperConflict()) {
         // Already stranded (a unit landed on it, or the shape changed):
         // move freely so the user can pull it somewhere legal.
@@ -5434,24 +5680,30 @@ function attachPointer(cv, side) {
       const L = state.leds[drag.index];
       const kk = NODE_KEYS[drag.trace || "run"];
       if (L && L[kk] && L[kk][drag.node]) {
+        const [bx, by] = snap(mx + drag.dx, my + drag.dy, null);
         L[kk] = L[kk].map((n, k) => k === drag.node
-          ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, mx + drag.dx)),
-             Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, my + drag.dy))]
+          ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, bx)),
+             Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, by))]
           : n);
       }
     } else if (drag.kind === "jumpernode") {
       const kk = JNODE_KEYS[drag.trace || "link"];
       if (state.clk[kk] && state.clk[kk][drag.node]) {
+        const [bx, by] = snap(mx + drag.dx, my + drag.dy, null);
         state.clk[kk] = state.clk[kk].map((n, k) => k === drag.node
-          ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, mx + drag.dx)),
-             Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, my + drag.dy))]
+          ? [Math.max(OUT[0] + 0.35, Math.min(OUT[2] - 0.35, bx)),
+             Math.max(OUT[1] + 0.35, Math.min(OUT[3] - 0.35, by))]
           : n);
       }
     } else if (drag.kind === "ledres" || drag.kind === "ledvia") {
       const L = state.leds[drag.index];
       if (L && L.adv) {
-        // Board point -> unit-frame offset (undo the unit rotation).
-        const [ox, oy] = rotOff(mx + drag.dx - L.x, my + drag.dy - L.y, -(L.rot || 0));
+        // Board point -> unit-frame offset (undo the unit rotation). Snapping
+        // happens on the board point, so a part lines up with what the user
+        // can see rather than with its own rotated frame.
+        const [px, py] = snap(mx + drag.dx, my + drag.dy,
+                              { kind: drag.kind, index: drag.index });
+        const [ox, oy] = rotOff(px - L.x, py - L.y, -(L.rot || 0));
         const cl = v => Math.min(20, Math.max(-20, Math.round(v * 20) / 20));
         if (drag.kind === "ledres") { L.adv.rx = cl(ox); L.adv.ry = cl(oy); }
         else { L.adv.vx = cl(ox); L.adv.vy = cl(oy); }
@@ -5467,15 +5719,18 @@ function attachPointer(cv, side) {
         // let the pinned parts push the LED around.
         const s = unitSafe();
         const [phx, phy] = partHalf(L, "led");
-        const nx = Math.min(Math.max(mx + drag.dx, s[0] + phx), s[2] - phx);
-        const ny = Math.min(Math.max(my + drag.dy, s[1] + phy), s[3] - phy);
+        const [bsx, bsy] = snap(mx + drag.dx, my + drag.dy,
+                                { kind: "ledbody", index: drag.index });
+        const nx = Math.min(Math.max(bsx, s[0] + phx), s[2] - phx);
+        const ny = Math.min(Math.max(bsy, s[1] + phy), s[3] - phy);
         const [ux, uy] = rotOff(nx - L.x, ny - L.y, -(L.rot || 0));
         const rx = L.adv.rx - ux, ry = L.adv.ry - uy;
         const vx = L.adv.vx - ux, vy = L.adv.vy - uy;
         // refuse the move if a counter-shift would exceed the offset reach
         // (the part would start dragging along instead of staying put).
-        // No grid-snapping here: the compensation must be exact or the
-        // resistor/via creep as the LED moves.
+        // Snapping moves the LED's target, never these offsets: they are
+        // derived from wherever it landed and are not rounded on their own,
+        // or the resistor/via would creep as the LED moves.
         if ([rx, ry, vx, vy].every(v => v >= -20 && v <= 20)) {
           L.adv.rx = rx; L.adv.ry = ry;
           L.adv.vx = vx; L.adv.vy = vy;
@@ -5486,24 +5741,33 @@ function attachPointer(cv, side) {
     } else if (drag.kind === "text") {
       const t = state.texts[drag.index];
       const ob = outlineBounds();
-      t.x = Math.min(Math.max(mx + drag.dx, Math.min(0.8, ob[0] + 0.8)), Math.max(19.5, ob[2] - 0.8));
-      t.y = Math.min(Math.max(my + drag.dy, ob[1] + 0.8), ob[3] - 0.8);
+      const [tsx, tsy] = snap(mx + drag.dx, my + drag.dy,
+                              { kind: "text", index: drag.index });
+      t.x = Math.min(Math.max(tsx, Math.min(0.8, ob[0] + 0.8)), Math.max(19.5, ob[2] - 0.8));
+      t.y = Math.min(Math.max(tsy, ob[1] + 0.8), ob[3] - 0.8);
       t.auto = false; // the user owns this position now; never move it for them
     } else if (drag.kind === "art") {
       const a = state.art[drag.index];
       const ab = artBoard();
-      a.cx = Math.min(Math.max(mx + drag.dx, ab[0]), ab[2]);
-      a.cy = Math.min(Math.max(my + drag.dy, ab[1]), ab[3]);
+      const [asx, asy] = snap(mx + drag.dx, my + drag.dy,
+                              { kind: "art", index: drag.index });
+      a.cx = Math.min(Math.max(asx, ab[0]), ab[2]);
+      a.cy = Math.min(Math.max(asy, ab[1]), ab[3]);
     } else if (drag.kind === "shapeel") {
       const el = state.shape.elements[drag.index];
-      el.cx = Math.min(Math.max(mx + drag.dx, EXTENT[0] + 2), EXTENT[2] - 2);
-      el.cy = Math.min(Math.max(my + drag.dy, EXTENT[1] + 2), EXTENT[3] - 2);
+      const [esx, esy] = snap(mx + drag.dx, my + drag.dy,
+                              { kind: "shapeel", index: drag.index });
+      el.cx = Math.min(Math.max(esx, EXTENT[0] + 2), EXTENT[2] - 2);
+      el.cy = Math.min(Math.max(esy, EXTENT[1] + 2), EXTENT[3] - 2);
       // The parts compose client-side during the drag; the exact outline
       // (pad tabs included) is re-fetched on release.
     } else if (drag.kind === "rotate") {
       const a1 = Math.atan2(my - drag.cy, mx - drag.cx) * 180 / Math.PI;
       let rot = ((drag.rot0 + a1 - drag.a0) % 360 + 360) % 360;
-      rot = e.shiftKey ? Math.round(rot / 15) * 15 % 360 : Math.round(rot);
+      // Snapping on gives the same 15° steps Shift has always given; Alt (which
+      // inverts the toggle) is the way back to a free angle.
+      rot = e.shiftKey || snapActive(e)
+        ? Math.round(rot / SNAP_ROT) * SNAP_ROT % 360 : Math.round(rot);
       if (drag.tkind === "led") {
         const L = state.leds[drag.index];
         if (L) { L.rot = rot; [L.x, L.y] = clampLedFor(L, L.x, L.y); }
@@ -5565,10 +5829,12 @@ function attachPointer(cv, side) {
         }
       }
     }
+    keepLandedGuides(); // only draw a guide the object is really sitting on
     draw();
   });
   cv.addEventListener("pointerup", () => {
     if (!drag) return;
+    snapGuides = []; // guides belong to the gesture, not to the board
     _noviaCache = new Map(); _noviaPrev = new Map();
     _clkCache = new Map(); _clkPrev = new Map();
     _linkCache = { sig: null, route: null };
@@ -5932,6 +6198,18 @@ function cssRGB(rgb) {
   return `rgb(${r},${g},${b})`;
 }
 
+// What to say about an SVG whose paint the exact parser will refuse. Said
+// once here so the toast and the layer card cannot drift apart. It is not a
+// warning: the board still gets smooth edges, the user just deserves to know
+// the paths were not used exactly -- the panel used to claim they were.
+function approxNote(reason) {
+  return `This SVG paints with ${reason}, which is not one flat colour per `
+    + "shape, so the board is traced from a rendered copy of it instead of "
+    + "from the vector paths. Edges still come out as curves, within about "
+    + "0.04 mm of the artwork \u2014 there is nothing to fix.";
+}
+
+
 function renderArtList() {
   picking = null;
   artHL = null;
@@ -6039,6 +6317,7 @@ function renderArtList() {
         <div><button class="tool flipb">${a.flip ? "Unmirror" : "Mirror"}</button></div>
         <div><button class="tool repb" title="Swap the picture, keep position/size/transform">Change image…</button></div>
       </div>
+      ${a.approx ? `<div class="sub approxnote" title="${approxNote(a.approx)}">Traced from a rendered copy: this SVG paints with ${a.approx}, not flat colours.</div>` : ""}
       <div class="sub">Magic wand: retarget one connected region <button class="qm" tabindex="-1" data-tip="wand" title="How the wand works">?</button></div>
       <div class="row">
         <div><select class="wandm">${Object.entries(WAND_MATS).map(([v, l]) => opt(v, l, "bare")).join("")}</select></div>
@@ -6855,6 +7134,35 @@ $("addart").addEventListener("click", () => {
 // SVGs also get rasterized in the browser (native rendering): the PNG is
 // the local preview and the server's fallback for SVGs whose paint the
 // exact vector parser can't represent (gradients, patterns).
+
+// Which of those the file actually uses, or "" for none.
+//
+// svgart.py refuses a paint that is not one flat colour and the server then
+// traces the rendered copy instead. That is a good outcome -- traced edges
+// land within ~0.04 mm of the artwork -- but it used to happen in silence,
+// while this panel went on claiming the paths were used exactly. The check
+// mirrors svgart's rule as closely as a browser can: a paint reference that
+// resolves to a gradient or pattern element, from either the attribute or an
+// inline style. A gradient sitting unused in <defs> is not reported, because
+// the server would not refuse the file for it either.
+function svgApproxReason(doc) {
+  const refs = new Set();
+  for (const el of doc.querySelectorAll("*")) {
+    for (const prop of ["fill", "stroke"]) {
+      const paint = el.getAttribute(prop) || el.style?.[prop] || "";
+      const m = /^\s*url\(['"]?#([^'")\s]+)/.exec(paint);
+      if (m) refs.add(m[1]);
+    }
+  }
+  for (const id of refs) {
+    const target = doc.getElementById(id);
+    const tag = target?.tagName?.toLowerCase() || "";
+    if (tag === "lineargradient" || tag === "radialgradient") return "gradients";
+    if (tag === "pattern") return "a pattern fill";
+  }
+  return "";
+}
+
 async function svgObjectUrl(f) {
   const doc = new DOMParser().parseFromString(await f.text(), "image/svg+xml");
   const svg = doc.documentElement;
@@ -6863,7 +7171,11 @@ async function svgObjectUrl(f) {
     svg.setAttribute("width", vb[2] || 512);
     svg.setAttribute("height", vb[3] || 512);
   }
-  return URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], {type: "image/svg+xml"}));
+  return {
+    url: URL.createObjectURL(
+      new Blob([new XMLSerializer().serializeToString(svg)], {type: "image/svg+xml"})),
+    approx: svgApproxReason(doc),
+  };
 }
 // Shared loader. SVGs upload as-is (the server uses their exact vector
 // paths), plus a browser-rasterized PNG that doubles as the local preview
@@ -6891,6 +7203,7 @@ async function loadImageFile(f, cb) {
     fr.readAsDataURL(f);
   });
   const img = new Image();
+  let approx = "";   // set below, before the decode this handler waits on
   img.onload = () => {
     let src = img, iw = img.naturalWidth || 512, ih = img.naturalHeight || 512;
     if (isSvg) {
@@ -6901,12 +7214,12 @@ async function loadImageFile(f, cb) {
       cnv.getContext("2d").drawImage(img, 0, 0, cnv.width, cnv.height);
       src = cnv; iw = cnv.width; ih = cnv.height;
       cnv.toBlob(b => b ? once({
-        upload: f, isSvg: true, dataUrl,
+        upload: f, isSvg: true, dataUrl, approx,
         raster: new File([b], f.name.replace(/\.svg$/i, "") + ".png", { type: "image/png" }),
         src, iw, ih,
       }) : failed(), "image/png");
     } else {
-      once({ upload: f, raster: null, isSvg: false, dataUrl, src, iw, ih });
+      once({ upload: f, raster: null, isSvg: false, dataUrl, approx: "", src, iw, ih });
     }
     URL.revokeObjectURL(img.src);
   };
@@ -6914,7 +7227,13 @@ async function loadImageFile(f, cb) {
   // A hostile or truncated SVG can throw in the parser before there is an <img>
   // to fail; without this the caller waits on a promise nothing will settle.
   try {
-    img.src = isSvg ? await svgObjectUrl(f) : URL.createObjectURL(f);
+    if (isSvg) {
+      const parsed = await svgObjectUrl(f);
+      approx = parsed.approx;
+      img.src = parsed.url;
+    } else {
+      img.src = URL.createObjectURL(f);
+    }
   } catch (e) {
     failed();
   }
@@ -6939,16 +7258,17 @@ $("artfile").addEventListener("change", () => {
   }
   loadImageFile(f, r => {
     if (!r) return; // unreadable; loadImageFile already said so
-    const { upload, raster, isSvg, dataUrl, src, iw, ih } = r;
+    const { upload, raster, isSvg, dataUrl, approx, src, iw, ih } = r;
     const { palette, fewColors } = extractPalette(src, iw, ih);
     if (target !== null && state.art[target]) {
-      setStatus(`Swapped the image for ${f.name}.`);
+      setStatus(`Swapped the image for ${f.name}.`
+        + (approx ? " " + approxNote(approx) : ""));
       // Swap the picture but keep the layer's placement, size, and
       // rotate/mirror. The color palette and wand picks belong to the old
       // image's pixels, so they reset to the new image's own colors.
       const a = state.art[target];
       Object.assign(a, {
-        file: upload, raster, isSvg, srcData: dataUrl, fname: f.name,
+        file: upload, raster, isSvg, srcData: dataUrl, fname: f.name, approx,
         orig: src, img: src, ow: iw, oh: ih, iw, ih,
         mode: fewColors ? "palette" : "threshold", palette, overrides: [],
       });
@@ -6959,7 +7279,7 @@ $("artfile").addEventListener("change", () => {
       return;
     }
     const a = {
-      file: upload, raster, isSvg, srcData: dataUrl, side: "front",
+      file: upload, raster, isSvg, srcData: dataUrl, side: "front", approx,
       fname: f.name, orig: src, img: src, ow: iw, oh: ih, iw, ih,
       cx: 10.16, cy: 10.16, wmm: 14, threshold: 128, invert: false,
       material: "silk", caches: null,
@@ -6970,7 +7290,8 @@ $("artfile").addEventListener("change", () => {
     state.art.push(a);
     renderArtList();
     draw();
-    setStatus(`Added ${f.name}: ${a.mode === "palette" ? "assign a material per color" : "tune the threshold"} below.`);
+    setStatus(`Added ${f.name}: ${a.mode === "palette" ? "assign a material per color" : "tune the threshold"} below.`
+      + (approx ? " " + approxNote(approx) : ""));
   });
 });
 
@@ -7007,7 +7328,11 @@ function renderShapeOpts() {
         <button class="del" title="Remove">&times;</button></span></div>
       <select class="op" title="Add or cut">${opt("add", "Adds board material", el.op)}${opt("cut", "Cuts a hole", el.op)}</select>
       ${isImg ? `
-        <div class="sub">Dark ${el.isSvg ? "shapes become board (exact vector outline)" : "pixels become board"}; drag it on the front view</div>
+        <div class="sub">Dark ${el.isSvg
+            ? (el.approx
+                ? `shapes become board (traced from a rendered copy: this SVG paints with ${el.approx})`
+                : "shapes become board (exact vector outline)")
+            : "pixels become board"}; drag it on the front view</div>
         <div class="row" style="margin-top:6px"><div><button class="tool chimg">Change image…</button></div></div>
         <div class="sub">Threshold <span class="etv">${el.threshold}</span></div>
         <input type="range" class="eth" min="1" max="254" value="${el.threshold}">
@@ -7092,7 +7417,7 @@ $("shapefile").addEventListener("change", () => {
   if (!f || target === null) return;
   loadImageFile(f, r => {
     if (!r) return; // unreadable; loadImageFile already said so
-    const { upload, raster, isSvg, dataUrl, src, iw, ih } = r;
+    const { upload, raster, isSvg, dataUrl, approx, src, iw, ih } = r;
     let el = target === "new" ? null : state.shape.elements[target];
     if (!el) {
       outlineAddCheck = { rings: ringSig(state.shape.rings), label: f.name };
@@ -7101,7 +7426,8 @@ $("shapefile").addEventListener("change", () => {
       state.shape.elements.push(el);
       outlineAddCheck.el = el;
     }
-    Object.assign(el, { file: upload, raster, isSvg, srcData: dataUrl, fname: f.name, orig: src, ow: iw, oh: ih });
+    Object.assign(el, { file: upload, raster, isSvg, srcData: dataUrl, approx,
+                        fname: f.name, orig: src, ow: iw, oh: ih });
     computeElGrid(el);
     renderShapeOpts();
     requestOutline(true);
@@ -7109,7 +7435,8 @@ $("shapefile").addEventListener("change", () => {
       setStatus(`${f.name} has no dark pixels at this threshold, so it adds `
         + "nothing to the outline; try Invert or raise the threshold.", true);
     } else {
-      setStatus(`${f.name} added to the outline; dark pixels become board.`);
+      setStatus(`${f.name} added to the outline; dark pixels become board.`
+        + (approx ? " " + approxNote(approx) : ""));
     }
   });
 });
@@ -7833,10 +8160,11 @@ const TIPS = {
     copper stripes, a glowing visor, and a stencil name.</p><ul>
     <li>Drag anything on either view; dashed ghosts live on the other side and can be grabbed here too.</li>
     <li>Click to select, then: <b>arrows</b> nudge (Shift = 1 mm), <b>Delete</b> removes, corner squares resize art and text, the round knob rotates (Shift snaps 15°), <b>double-click</b> = +90°.</li>
+    <li><b>SNAP</b> (top bar, on by default) pulls a drag onto the board's centre lines — pink guide — or onto the centre of anything else placed (blue), and onto a 0.5 mm grid when neither is near; rotation then steps 15°. What lines up is the middle of the thing you are dragging, not the point it hangs from, so a whole LED unit centres as the box you can see. Hold <b>Alt</b> while dragging to ignore it for one move. Arrow-key nudges are never snapped.</li>
   </ul>` },
   shape: { title: "Step 1: a helmet-shaped board", img: "parts.webp", html: `<ul>
     <li><b>+ Silhouette…</b> turns a picture into the board: dark pixels become material, so the badge IS the helmet. Raise the threshold if bright details get punched out.</li>
-    <li>Parts stack; switch one to <b>Cuts a hole</b> to punch openings. SVGs trace exactly; <b>Edge smoothing</b> melts raster pixel stairs.</li>
+    <li>Parts stack; switch one to <b>Cuts a hole</b> to punch openings. SVGs trace exactly unless they paint with gradients — the part says so when that happens; <b>Edge smoothing</b> melts raster pixel stairs.</li>
   </ul>` },
   pins: { title: "Connector pins: keep only what you use", img: "pins.webp", html: `<ul>
     <li>Each row carries 3V3 + GND, so one row alone powers every LED — untick the top row and the helmet's crown stays clean.</li>
@@ -7845,7 +8173,7 @@ const TIPS = {
   art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
     <li>The same helmet PNG, added as artwork, loads in <b>By color</b> mode with a material guessed per color — check every row and fix the guesses (here the body is set to <i>Ignore</i>: plain soldermask).</li>
     <li>Hover a color row to light up exactly which pixels it controls.</li>
-    <li>PNG/JPG snap to a 0.18 mm grid; SVG art stays exact at any size.</li>
+    <li>Art reaches the board as curves, not squares: a PNG or JPG is traced around its colors, and an SVG is taken straight from its own vector paths — or traced from a rendered copy, if it paints with gradients, which the layer tells you.</li>
     <li><b>Cut through board</b> removes the board itself — a real hole through copper, mask and laminate. The connector pads always keep a tab of board, and parts get moved off the hole (or flagged) automatically.</li>
   </ul>` },
   wand: { title: "Step 3: the visor, with the magic wand", img: "wand.webp", html: `<ul>
@@ -7865,7 +8193,7 @@ const TIPS = {
     <li><b>In line</b> is a thin strip (fits behind the visor); 0805 is the minibadge standard. The Layout and Size selects carry the rest.</li>
   </ul>` },
   placement: { title: "When the standard layouts don't fit", img: "placement.webp", html: `<ul>
-    <li><b>Move parts freely</b> unlocks the LED, resistor, and via to drag one by one; the card warns if a spot would short copper.</li>
+    <li><b>Move parts freely</b> unlocks the LED, resistor, and via to drag one by one; the card warns if a spot would short copper. With <b>SNAP</b> on, each part lines up on its own — squared up on the LED it belongs to, or on either of its siblings.</li>
     <li><b>No power via</b> runs a surface trace to a connector pad instead: drag its &#9670; endpoint — every legal target lights up — or double-click it to go back to automatic.</li>
     <li><b>Reverse mount</b> and <b>LED on the other side</b> shine through the board; each explains itself on the card as you tick it.</li>
   </ul>` },
@@ -7929,6 +8257,28 @@ function applyTheme(t) {
 }
 $("themebtn").addEventListener("click", () => {
   applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
+});
+
+// Snapping is a workbench preference, not part of the design: it survives a
+// reload but is never written into a saved design file, so opening someone
+// else's badge cannot change how your cursor behaves.
+function applySnap(on, remember = true) {
+  snapOn = !!on;
+  // Writing the default back on load would freeze today's default into every
+  // browser that ever opened the app; only a real choice is stored.
+  if (remember) {
+    try { localStorage.setItem("bm-snap", snapOn ? "1" : "0"); } catch (e) {}
+  }
+  const b = $("snapbtn");
+  b.classList.toggle("on", snapOn);
+  b.setAttribute("aria-pressed", snapOn ? "true" : "false");
+}
+$("snapbtn").addEventListener("click", () => {
+  applySnap(!snapOn);
+  setStatus(snapOn
+    ? "Snapping on: drags line up on the board centre lines, on anything else"
+      + " placed, or on a 0.5 mm grid. Rotation steps 15°. Hold Alt to ignore it."
+    : "Snapping off: drags follow the cursor exactly.");
 });
 
 const PANEL_TABS = { shape: "tab-shape", art: "tab-art", leds: "tab-leds", text: "tab-text" };
@@ -8394,6 +8744,7 @@ function applyDesign(d, assets) {
     const r = assets.get("el" + i);
     if (r) {
       Object.assign(el, { file: r.upload, raster: r.raster, isSvg: r.isSvg,
+                          approx: r.approx,  // re-sniffed, not saved
                           srcData: e.srcData, fname: e.fname, orig: r.src, ow: r.iw, oh: r.ih });
       computeElGrid(el);
     }
@@ -8416,6 +8767,7 @@ function applyDesign(d, assets) {
     if (!r) return; // a layer with no picture behind it is not a layer
     const a = {
       file: r.upload, raster: r.raster, isSvg: r.isSvg, srcData: s.srcData,
+      approx: r.approx,   // re-sniffed from the restored bytes, not saved
       fname: s.fname, orig: r.src, img: r.src, ow: r.iw, oh: r.ih, iw: r.iw, ih: r.ih,
       cx: s.cx, cy: s.cy, wmm: s.wmm, threshold: s.threshold, invert: s.invert,
       material: s.material, caches: null, mode: s.mode,
@@ -8670,6 +9022,7 @@ $("designfile").addEventListener("change", async () => {
 let savedTheme = "dark";
 try { savedTheme = localStorage.getItem("bm-theme") || "dark"; } catch (e) {}
 applyTheme(savedTheme);
+applySnap(snapOn, false); // reflect the preference; do not re-store it
 showPanel("shape");
 renderShapeOpts();
 renderPinGrid();

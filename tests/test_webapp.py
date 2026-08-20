@@ -2606,3 +2606,205 @@ def test_the_jumper_via_choice_never_strands_a_far_face_blinker(client):
     assert not any(v.net == v3 for v in b.vias), (
         "a 3V3 via shipped although the user chose the traced hookup; the "
         "board carries a drill the design turned off")
+
+
+# ---------------------------------------------------------------------------
+# Traced art: an uploaded picture reaches the board as polygons, not as a grid
+# of pixel squares. The metrics below are calibrated (see the numbers quoted in
+# each test) against the pixel-rect path this replaced.
+# ---------------------------------------------------------------------------
+
+def _disc_png(px: int = 600, margin: int = 20) -> bytes:
+    """An opaque circle: the one shape whose true edge a test can recompute."""
+    img = Image.new("RGBA", (px, px), (0, 0, 0, 0))
+    ImageDraw.Draw(img).ellipse((margin, margin, px - margin, px - margin),
+                                fill=(0, 0, 0, 255))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _block_png(px: int = 400) -> bytes:
+    img = Image.new("RGBA", (px, px), (0, 0, 0, 255))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _art_rings(board: str, layer: str) -> list[list[tuple[float, float]]]:
+    """Every ``gr_poly`` ring on one layer, in board mm."""
+    import re
+
+    out = []
+    for pts, lay in re.findall(
+            r"\(gr_poly \(pts ((?:\(xy [-\d. ]+\) ?)+)\)[^\n]*?\(layer \"([^\"]+)\"\)",
+            board):
+        if lay == layer:
+            out.append([(float(x) - pcb_mod.ORIGIN, float(y) - pcb_mod.ORIGIN)
+                        for x, y in re.findall(r"\(xy ([-\d.]+) ([-\d.]+)\)", pts)])
+    return out
+
+
+def _axis_aligned_fraction(ring: list[tuple[float, float]]) -> float:
+    """How much of a ring's perimeter runs along the sampling grid's axes.
+
+    This is the staircase's signature and the reason the metric is a ratio
+    rather than a length: a region tiled out of axis-aligned rectangles scores
+    exactly 1.0 whatever its size, while a traced curve scores near zero
+    because only the odd chord happens to be level or plumb.
+    """
+    import math
+
+    total = axis = 0.0
+    for i, (x0, y0) in enumerate(ring):
+        x1, y1 = ring[(i + 1) % len(ring)]
+        seg = math.hypot(x1 - x0, y1 - y0)
+        if not seg:
+            continue
+        total += seg
+        if abs(x1 - x0) < 1e-9 or abs(y1 - y0) < 1e-9:
+            axis += seg
+    return axis / total if total else 0.0
+
+
+def _radial_spread(ring: list[tuple[float, float]], cx: float, cy: float) -> float:
+    """Widest minus narrowest radius of a ring about a point.
+
+    Zero for a true circle, whatever its radius -- so it measures roundness
+    without the test having to know how big the placed artwork came out.
+    """
+    import math
+
+    r = [math.hypot(x - cx, y - cy) for x, y in ring]
+    return max(r) - min(r)
+
+
+def _rect_rings(rings) -> int:
+    """Rings that are a bare axis-aligned rectangle -- one pixel-grid tile."""
+    return sum(1 for r in rings
+               if len(r) == 4 and _axis_aligned_fraction(r) == 1.0)
+
+
+#: Roundness a ring must hold to print as a circle rather than as steps. A fab
+#: registers silkscreen to about +/-0.15 mm and its ink spreads ~0.05 mm, so a
+#: ring rounder than this cannot be told from a true circle on the finished
+#: board. Stated here, not imported: the point is to fail if the tracer's own
+#: tolerances are ever loosened past what the fab can hide. Measured: 0.083 mm
+#: and 0.075 mm for the two cases below, against 0.174 mm and 0.168 mm on the
+#: 0.18 mm pixel path, which is the regression this guards.
+ROUND_ENOUGH_MM = 0.12
+
+
+@pytest.mark.webapp
+@pytest.mark.parametrize(
+    "label,art,layer",
+    [
+        # Defaults on purpose only for the first case; the second moves off
+        # every one of them: palette instead of threshold, exposed copper
+        # instead of silkscreen, the back face instead of the front, and a
+        # rotation that is not a multiple of 90 (which resamples the upload
+        # through logo._transpose before it is ever classified).
+        ("threshold-silk-front", {"mode": "threshold", "material": "silk",
+                                  "rot": 0}, "F.SilkS"),
+        ("palette-copper-back-rot45",
+         {"mode": "palette", "rot": 45, "side": "back",
+          "palette": [{"rgb": [0, 0, 0], "material": "copper"}]}, "B.Mask"),
+    ],
+)
+def test_a_curved_raster_edge_reaches_the_board_as_a_curve_not_pixel_steps(
+        client, label, art, layer):
+    """A round logo prints round.
+
+    An uploaded picture is classified on a sampling grid, but the cells are
+    evidence for a boundary -- not squares of ink to print. When they are
+    printed as squares the badge carries a visible staircase on every curve
+    and every diagonal, which is what the user sees on the fabbed board and
+    in the 3D preview, and no amount of DRC notices it.
+    """
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps(_params(
+                  name="round", leds=[], texts=[],
+                  art=[{"cx": 10.16, "cy": 10.16, "w": 9.0, **art}])),
+              "art0": (io.BytesIO(_disc_png()), "disc.png")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200, resp.get_json()
+    board = zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "round/round.kicad_pcb").decode()
+    rings = _art_rings(board, layer)
+    assert rings, f"{label}: no art polygon on {layer}"
+    assert _rect_rings(rings) == 0, (
+        f"{label}: {_rect_rings(rings)} of {len(rings)} rings are plain "
+        "axis-aligned rectangles -- the circle was tiled out of pixel squares")
+    edge = max(rings, key=len)
+    assert _axis_aligned_fraction(edge) < 0.5, (
+        f"{label}: {_axis_aligned_fraction(edge):.0%} of the outline runs "
+        "along the sampling axes; a traced circle runs across them")
+    assert _radial_spread(edge, 10.16, 10.16) <= ROUND_ENOUGH_MM, (
+        f"{label}: the outline wanders {_radial_spread(edge, 10.16, 10.16):.3f} "
+        f"mm in radius, past the {ROUND_ENOUGH_MM} mm a fab could hide")
+
+
+@pytest.mark.webapp
+def test_raster_art_carved_around_a_unit_keeps_the_keepouts_own_curve(client):
+    """Art that has to dodge a blinker dodges it along the part's real shape.
+
+    The carve used to drop whole grid cells whose centres a keepout covered,
+    so the notch around a round part came out as steps and could leave ink up
+    to half a cell inside the keepout -- silk creeping onto a pad. Off-default
+    on purpose: a full-face silk layer (not a small logo) around a placed unit.
+    """
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps(_params(
+                  name="carve", texts=[],
+                  leds=[{"x": 10.16, "y": 10.16, "color": "red"}],
+                  art=[{"mode": "threshold", "material": "silk",
+                        "cx": 10.16, "cy": 10.16, "w": 14.0}])),
+              "art0": (io.BytesIO(_block_png()), "block.png")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 200, resp.get_json()
+    board = zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "carve/carve.kicad_pcb").decode()
+    rings = _art_rings(board, "F.SilkS")
+    assert rings, "no silk art survived the carve"
+    assert _rect_rings(rings) == 0, (
+        f"{_rect_rings(rings)} of {len(rings)} silk rings are plain pixel "
+        "rectangles: the layer arrived as a mosaic, not as a carved shape")
+    # The outer boundary of a square layer IS axis-aligned; the carve is what
+    # has to run across the axes, so a mostly-but-not-wholly axial ring is the
+    # signature of a real curve here. The pixel path measured 1.00.
+    edge = max(rings, key=len)
+    assert _axis_aligned_fraction(edge) < 0.9, (
+        "the whole silk boundary runs along the sampling axes, so the notch "
+        "around the unit is a staircase rather than the part's own outline")
+
+
+@pytest.mark.webapp
+def test_the_preview_resolves_artwork_at_the_pitch_the_tracer_samples_it_at():
+    """What the editor draws for a picture is as fine as what gets fabbed.
+
+    The canvas classifies an uploaded image itself, in JavaScript, and draws
+    the result; the server classifies the same image and traces polygons from
+    it. Two copies of one number, and if the browser's copy is coarser the
+    editor shows a staircase the board will not have -- or, worse, is finer
+    and promises detail the board drops. Both directions are the same defect:
+    the user approves a badge they were not shown.
+    """
+    import re
+    from pathlib import Path
+
+    from minibadge_designer import logo, pcb as pcb_for_path
+
+    html = (Path(pcb_for_path.__file__).parent / "templates" / "index.html").read_text()
+    m = re.search(r"const TRACE_PIXEL_MM = ([\d.]+), MAX_TRACE_COLS = (\d+);", html)
+    assert m, "the canvas no longer declares the tracer's sampling pitch at all"
+    assert float(m.group(1)) == logo.TRACE_PIXEL_MM, (
+        f"the preview classifies art at {m.group(1)} mm while the board is "
+        f"traced from {logo.TRACE_PIXEL_MM} mm cells")
+    assert int(m.group(2)) == logo.MAX_TRACE_COLS, (
+        f"the preview caps art at {m.group(2)} cells across and the server at "
+        f"{logo.MAX_TRACE_COLS}: on artwork wider than the cap the two "
+        "disagree about how much detail survives")
