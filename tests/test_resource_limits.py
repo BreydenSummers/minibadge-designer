@@ -237,6 +237,114 @@ def test_one_outline_allowance_is_shared_across_all_its_elements(post_generate):
 
 
 # ---------------------------------------------------------------------------
+# The allowance on tracing art
+# ---------------------------------------------------------------------------
+
+#: How many separate polygons an art layer arrives as when it was traced, at
+#: most. A traced layer is whole shapes -- the ring test below traces to a
+#: dozen -- while an untraced one is one polygon per merged cell run, which
+#: for the same image is thousands. Anywhere between is not a case the code
+#: can produce, so this separates the two regimes with three orders of
+#: magnitude of daylight and needs no tuning.
+TRACED_POLY_CEILING = 200
+
+
+def _rings_png(px: int = 900, step: int = 40, pen: int = 8) -> bytes:
+    """Concentric rings: lots of boundary in little area.
+
+    Boundary is what tracing pays for (the cells get unioned and opened), so
+    this is the shape that spends the allowance fastest -- and, at a 0.1 mm
+    pen on a 16 mm badge, it is also finer than a fab prints, which is the
+    class of artwork the allowance is allowed to give up on.
+    """
+    ys, xs = np.indices((px, px))
+    r = np.hypot(xs - px / 2, ys - px / 2)
+    mask = (r % step) < pen
+    return _png(px, px, lambda xs_, ys_: mask)
+
+
+def _art_poly_counts(resp, layer: str = "F.SilkS") -> tuple[int, int]:
+    """(polygons that are a bare axis-aligned rectangle, polygons that are not).
+
+    A printed sampling cell is a 4-point axis-aligned rectangle; a traced
+    boundary is neither. Counting both is what tells "this layer degraded"
+    from "this layer emitted nothing", which an assertion on one number alone
+    cannot. Restricted to one layer: the board outline and the pad tabs are
+    polygons too, and rectangular ones at that.
+    """
+    import re
+    import zipfile
+
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    board = zf.read(next(n for n in zf.namelist()
+                         if n.endswith(".kicad_pcb"))).decode()
+    rect = other = 0
+    for pts, lay in re.findall(
+            r"\(gr_poly \(pts ((?:\(xy [-\d. ]+\) ?)+)\)[^\n]*?\(layer \"([^\"]+)\"\)",
+            board):
+        if lay != layer:
+            continue
+        xy = [(float(x), float(y))
+              for x, y in re.findall(r"\(xy ([-\d.]+) ([-\d.]+)\)", pts)]
+        axial = all(a[0] == b[0] or a[1] == b[1]
+                    for a, b in zip(xy, xy[1:] + xy[:1]))
+        if len(xy) == 4 and axial:
+            rect += 1
+        else:
+            other += 1
+    return rect, other
+
+
+@pytest.mark.slow  # 0.9 s: proving the rule needs the ACCEPTED eight-layer case
+@pytest.mark.webapp
+def test_one_art_tracing_allowance_is_shared_across_every_layer(post_generate):
+    """Eight art layers cannot each spend the tracing ceiling.
+
+    Tracing a layer costs a union and an opening over its sampling cells, and
+    a badge may carry eight layers: measured, eight copies of the rings below
+    took `/generate` from 0.48 s to 4.07 s on an unauthenticated route. The
+    allowance therefore belongs to the classification pass, not to the layer.
+
+    What makes this safe to cap is the fallback. Over the allowance, a layer
+    is printed from its cells instead -- the pixel path that shipped before
+    tracing existed -- so the eight-layer request must still come back 200
+    with art on the board. Refusing it would take away a badge the user could
+    make yesterday, which is the failure this test also rules out.
+    """
+    rings = _rings_png()
+
+    def _request(count):
+        return post_generate(
+            {"name": "rings", "leds": [], "texts": [],
+             "art": [{"cx": 10.16, "cy": 10.16, "w": 16.0, "mode": "threshold",
+                      "material": "silk"} for _ in range(count)]},
+            files={f"art{i}": (rings, "r.png") for i in range(count)})
+
+    one = _request(1)
+    assert one.status_code == 200, f"one layer was refused: {one.get_json()}"
+    rect, traced = _art_poly_counts(one)
+    assert traced, "one layer inside the allowance emitted no traced shape"
+    assert rect + traced <= TRACED_POLY_CEILING, (
+        f"{rect + traced} polygons for one layer inside the allowance: that is "
+        "cell-count order, so it was printed from its cells, not traced")
+    one.close()
+
+    many = _request(webapp.MAX_ART)
+    assert many.status_code == 200, (
+        f"{webapp.MAX_ART} layers of art the app accepted one of came back "
+        f"{many.status_code}: the allowance must degrade, never refuse")
+    rect_many, traced_many = _art_poly_counts(many)
+    assert rect_many > TRACED_POLY_CEILING, (
+        f"every one of {webapp.MAX_ART} layers was traced ({rect_many} "
+        f"rectangles, {traced_many} traced shapes): the allowance is being "
+        "spent per layer, so eight layers can buy eight times the ceiling")
+    assert traced_many, (
+        "no layer was traced at all; the allowance is too small to trace even "
+        "the first layer of a design")
+    many.close()
+
+
+# ---------------------------------------------------------------------------
 # The complexity ceiling on SVG
 # ---------------------------------------------------------------------------
 

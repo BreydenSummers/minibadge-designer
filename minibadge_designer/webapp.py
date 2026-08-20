@@ -16,8 +16,11 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import pcb, svgart, textpoly
 from .logo import (
+    BOARD as logo_BOARD,
     EDGE_MARGIN,
     MAX_PALETTE,
+    MAX_TRACE_COLS,
+    TRACE_PIXEL_MM,
     CircleKeepout,
     ImageTooLarge,
     RectKeepout,
@@ -758,6 +761,136 @@ def _svg_classify(
     return mats
 
 
+#: Half the width of the thinnest ink the tracer keeps. The sampling pitch is
+#: no longer the fab's minimum feature (it is 0.06 mm, a third of it), so a
+#: one-cell whisker in the artwork would otherwise reach the board as 0.06 mm
+#: of silk that no fab can print. A morphological opening by this radius
+#: deletes anything thinner than 0.08 mm, and rounds the stair corners on the
+#: way through. Measured cost of the rounding: 0.04 mm off a right-angle
+#: corner, 0.08 mm off a star's point. Measured benefit: a traced circle sits
+#: 0.037 mm from the true one, against 0.044 mm unopened, on 185 vertices
+#: instead of 261. Raising it past ~0.075 (silk's 0.15 mm floor) starts
+#: eating detail a fab would have printed.
+TRACE_OPEN_MM = 0.04
+
+#: Douglas-Peucker tolerance for the traced boundary, which is what turns the
+#: residual 0.06 mm staircase into chords. Nothing here is free but nothing
+#: here is expensive: over 0.02-0.10 mm the circle test moves between 0.037
+#: and 0.079 mm of error, while the vertex count moves 20x. This sits at the
+#: knee -- and it is well under 0.15 mm, so it cannot round off a corner the
+#: fab could have resolved.
+TRACE_SIMPLIFY_MM = 0.03
+
+#: Rect coordinates are rounded to 4 decimals, and the ~1e-4 mm seams would
+#: keep neighbouring rows as separate polygons (slicing art into ribbons).
+#: Grow each cell by enough to close that and no more: the 0.02 mm used for
+#: board silhouettes is 200x what the rounding needs, and it fattened every
+#: traced edge by 0.04 mm.
+TRACE_SEAM_MM = 0.002
+
+
+#: Sampling cells one classification pass may trace, shared by every art
+#: layer in it. Tracing is not priced like printing: the cost is in unioning
+#: the cells and opening the result, so it is *boundary* complexity that
+#: bites, not area. Measured on one 19 mm layer of concentric 0.1 mm rings --
+#: 5 881 cells -- the union costs 186 ms and the opening 161 ms, and eight
+#: such layers took a `/generate` from 0.48 s to 4.07 s. `/generate` and
+#: `/outline` are unauthenticated, and `/outline` runs on every edit, so the
+#: work is capped.
+#:
+#: Set from the other end too: a real three-colour logo at 14 mm samples to
+#: ~250 cells, so all eight layers of any design a person would actually
+#: build fit inside this with room to spare. What does not fit is artwork
+#: carrying detail finer than a fab could print in the first place.
+#:
+#: Unlike `MAX_OUTLINE_RECTS`, blowing this allowance is not a refusal: the
+#: layer falls back to the pixel path -- printing its cells as rectangles,
+#: exactly as this app did before tracing existed. So no design becomes
+#: un-makeable and none gets slower than it used to be; a pathological one
+#: just keeps the staircase it always had.
+MAX_ART_TRACE_RECTS = 4_000
+
+
+class _TraceBudget:
+    """Per-pass allowance of sampling cells, shared across art layers."""
+
+    def __init__(self, total: int = MAX_ART_TRACE_RECTS):
+        self.left = total
+
+    def spend(self, n: int) -> None:
+        self.left = max(0, self.left - n)
+
+    def fits(self, cells: int) -> bool:
+        return cells <= self.left
+
+
+def _trace_material(rects: list[tuple[float, float, float, float]]):
+    """Merged sampling cells -> one smooth polygon of the same region.
+
+    The cells are boundary evidence, not ink: unioned, opened by
+    `TRACE_OPEN_MM` (which drops sub-fab whiskers and rounds the stair
+    corners) and simplified, a staircase of 0.06 mm cells becomes the curve
+    the artwork actually drew. Returns a possibly-empty geometry.
+    """
+    from shapely.geometry import box as sbox
+    from shapely.ops import unary_union
+
+    pad = TRACE_SEAM_MM
+    g = unary_union([sbox(x - pad, y - pad, x + w + pad, y + h + pad)
+                     for x, y, w, h in rects])
+    r = TRACE_OPEN_MM
+    g = g.buffer(-r, quad_segs=6).buffer(r, quad_segs=6)
+    return g.simplify(TRACE_SIMPLIFY_MM)
+
+
+def _raster_classify(data: bytes, budget: "_TraceBudget | None" = None,
+                     **kw):
+    """Raster twin of `_svg_classify`: material -> traced geometry.
+
+    Returns a {material: geometry} dict, or -- when `budget` has no allowance
+    left for this layer -- the `ClassifiedImage` grid itself, which every
+    caller already knows how to print as rectangles.
+
+    Same classifier as the pixel path -- same palette snapping, same luma
+    threshold, same magic-wand flood fill -- but sampled three times finer
+    and handed to `_trace_material`, so what reaches the board is a polygon
+    per material instead of a grid of 0.18 mm squares. Keepouts are left to
+    the caller, which cuts them out of the geometry exactly; the pixel path
+    could only drop whole cells whose centers they covered, which both
+    stepped the notch and left ink up to half a cell inside it.
+
+    This is the path every uploaded image takes, including an SVG whose paint
+    the exact parser refuses (gradients, patterns) or whose detail would cost
+    minutes to flatten. Those fall back to pixels no longer -- only to a trace
+    of the browser's own render of the same file.
+    """
+    board = kw.get("board", logo_BOARD)
+
+    def sample(pitch: float):
+        ci = classify_image(data, pixel_mm=pitch, max_cols=MAX_TRACE_COLS, **kw)
+        per = {m: grid_to_rects(ci, m, [], board=board) for m in pcb.ART_MATERIALS}
+        return per, sum(len(r) for r in per.values())
+
+    per, cells = sample(TRACE_PIXEL_MM)
+    if budget is not None:
+        if not budget.fits(cells):
+            # Out of allowance: hand back the grid itself and let the caller
+            # print its cells, which is what shipped before tracing existed.
+            # Not charged -- an untraced layer costs the request nothing but
+            # the sample above, and charging it would tax the layers after it
+            # for work that never happened.
+            return classify_image(data, **kw)
+        budget.spend(cells)
+    mats: dict[str, object] = {}
+    for material, rects in per.items():
+        if not rects:
+            continue
+        g = _trace_material(rects)
+        if not g.is_empty:
+            mats[material] = g
+    return mats
+
+
 OUTLINE_COLS = 480  # outline classification grid (~0.25 mm pixels at 119 mm)
 
 
@@ -1073,7 +1206,7 @@ def _art_uploads() -> tuple[dict, dict]:
 
 
 def _classify_art_entry(i: int, meta: dict, art_board, uploads: dict,
-                        rasters: dict):
+                        rasters: dict, budget: "_TraceBudget | None" = None):
     """Classify one art layer from the request into its material regions.
 
     Returns (source, window, art_side) — `source` is a {material: geometry}
@@ -1177,7 +1310,8 @@ def _classify_art_entry(i: int, meta: dict, art_board, uploads: dict,
                 if isinstance(exc, _TooComplex):
                     raise
                 raise ValueError("could not parse an SVG artwork layer") from None
-    return classify_image(data, **mode_kw, **common), window, art_side
+    return (_raster_classify(data, budget=budget, **mode_kw, **common),
+            window, art_side)
 
 
 def _uses_cut(meta) -> bool:
@@ -1356,11 +1490,12 @@ def outline_preview():
             board = _art_board_of(rings)
             art_uploads, art_rasters = _art_uploads()
             sources = []
+            budget = _TraceBudget()
             for i, meta in enumerate(art_meta):
                 if not _uses_cut(meta):
                     continue
                 entry = _classify_art_entry(i, meta, board, art_uploads,
-                                            art_rasters)
+                                            art_rasters, budget)
                 if entry is not None:
                     sources.append(entry[0])
             cut_geom = _art_cut_geometry(sources, board)
@@ -1792,8 +1927,10 @@ def _generate_impl(render: bool):
 
     def _classify_all(board):
         out = []
+        budget = _TraceBudget()
         for i, meta in enumerate(art_meta):
-            entry = _classify_art_entry(i, meta, board, art_uploads, art_rasters)
+            entry = _classify_art_entry(i, meta, board, art_uploads,
+                                        art_rasters, budget)
             if entry is not None:
                 out.append((i, *entry))
         return out
