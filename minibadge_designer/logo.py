@@ -1,7 +1,7 @@
-"""Convert artwork images into per-material rectangles.
+"""Sample artwork images into per-material grids of rectangles.
 
-An image is downsampled to ~0.18 mm pixels and classified per pixel in one
-of two modes:
+An image is downsampled to a grid and classified per cell in one of two
+modes:
 
 - threshold: flatten onto white, grayscale, threshold; every "on" pixel
   belongs to a single material (the classic one-color logo path).
@@ -13,6 +13,16 @@ of two modes:
 Classification is separate from rect generation because material rects
 need different keepouts (windows avoid all parts; silk avoids mask
 openings), which the caller resolves across layers.
+
+What the caller does with the rects decides what the grid pitch means, and
+there are two callers:
+
+- art (`webapp._raster_classify`) samples at `TRACE_PIXEL_MM` and traces the
+  rects into one polygon per material, so a cell is evidence about where a
+  boundary runs and never prints as a square;
+- board silhouettes sample at `PIXEL_MM` and print what they get, so there a
+  cell is the smallest feature the shape can have -- which is why that pitch
+  sits at the fab's minimum and this one does not have to.
 
 The web UI runs identical math client-side for the live preview, so what
 you see is what gets fabbed.
@@ -27,6 +37,15 @@ from PIL import Image
 
 PIXEL_MM = 0.18          # target artwork "pixel" size; >= typical 0.15 mm min feature
 MAX_COLS = 192           # grid cap; binds only for artwork wider than ~34 mm
+
+#: Sampling pitch for the tracing path, which does not print its cells: they
+#: are boundary evidence for a polygon, so the fab's minimum feature is no
+#: longer the floor and the pitch can be as fine as the cost allows. Measured
+#: on a 16 mm layer, this pitch classifies in ~16 ms and traces in ~35 ms, and
+#: lands a traced circle within 0.036 mm of the true one (0.154 mm at 0.18 mm,
+#: which is the staircase this replaces).
+TRACE_PIXEL_MM = 0.06
+MAX_TRACE_COLS = 480     # cost ceiling; 28.8 mm of art at the pitch above
 EDGE_MARGIN = 0.5        # keep artwork off the board edge
 BOARD = (0.16, 0.16, 20.16, 20.16)
 MAX_PALETTE = 6
@@ -146,7 +165,8 @@ def _open_rgba(image_bytes: bytes, resample=Image.LANCZOS) -> Image.Image:
 
 
 def _fit(
-    img: Image.Image, width_mm: float, board, max_cols: int = MAX_COLS
+    img: Image.Image, width_mm: float, board, max_cols: int = MAX_COLS,
+    pixel_mm: float = PIXEL_MM,
 ) -> tuple[float, float, int, int]:
     width_mm = max(2.0, min(width_mm, board[2] - board[0] - 2 * EDGE_MARGIN))
     aspect = img.height / img.width
@@ -155,7 +175,7 @@ def _fit(
     if height_mm > max_h:
         height_mm = max_h
         width_mm = height_mm / aspect
-    cols = min(max_cols, max(1, round(width_mm / PIXEL_MM)))
+    cols = min(max_cols, max(1, round(width_mm / pixel_mm)))
     rows = max(1, round(height_mm * cols / width_mm))
     return width_mm, height_mm, cols, rows
 
@@ -219,6 +239,7 @@ def classify_image(
     overrides: list[tuple[float, float, str]] | None = None,
     board: tuple[float, float, float, float] = BOARD,
     max_cols: int = MAX_COLS,
+    pixel_mm: float = PIXEL_MM,
 ) -> ClassifiedImage:
     # Palette mode uses NEAREST: flat-color art must keep exact colors, or
     # anti-aliased boundary pixels snap to the wrong palette entry and leave
@@ -226,7 +247,7 @@ def classify_image(
     # for its own bounding reduction, so pass it in before opening.
     resample = Image.NEAREST if mode == "palette" else Image.LANCZOS
     img = _transpose(_open_rgba(image_bytes, resample), rot, flip)
-    width_mm, height_mm, cols, rows = _fit(img, width_mm, board, max_cols)
+    width_mm, height_mm, cols, rows = _fit(img, width_mm, board, max_cols, pixel_mm)
     resized = img.resize((cols, rows), resample)
     px = resized.load()
 

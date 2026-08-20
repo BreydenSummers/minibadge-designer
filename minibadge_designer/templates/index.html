@@ -851,6 +851,12 @@ const pairCaptionAt = k => {
 const powerMissing = () => ["3V3", "GND"].filter(
   net => !activePads().some(p => p[2] === net));
 const PIXEL_MM = 0.18, MAX_COLS = 192, EDGE = 0.5;
+// The tracer's sampling pitch (logo.py TRACE_PIXEL_MM / MAX_TRACE_COLS). Art
+// classification happens here, not on the 0.18 mm board grid: the cells are
+// boundary evidence for a polygon, not squares of ink, so the preview has to
+// resolve them as finely as the server does or it draws stairs the board
+// will not have.
+const TRACE_PIXEL_MM = 0.06, MAX_TRACE_COLS = 480;
 const UNIT_SAFE = [0.7, 0.7, 19.62, 19.62]; // standard square, inset from edge
 // Keepouts around each connector pad pair (pad copper + pour clearance).
 // Units may use the rest of the strip, including between the two pairs.
@@ -3641,12 +3647,13 @@ function floodFill(classes, cols, rows, seed) { // 4-connected, like logo.py
 function rebuildArt(a) {
   if (isShapeArt(a)) { a.empty = false; a.caches = null; return; }
   const d = artDims(a);
-  // SVG layers become exact vector geometry on the board, so their preview
-  // classifies at near-native resolution instead of the 0.18 mm board grid.
-  if (a.isSvg) {
-    d.cols = Math.max(d.cols, Math.min(768, a.iw));
-    d.rows = Math.max(1, Math.round(d.cols * d.h / d.w));
-  }
+  // Every image layer becomes polygons on the board -- an SVG from its own
+  // vector paths, a raster from a traced contour of this same classification
+  // -- so the preview classifies at the tracer's pitch, or at the SVG's own
+  // resolution where that is finer still, and never on the board grid.
+  const traceCols = Math.min(MAX_TRACE_COLS, Math.max(1, Math.round(d.w / TRACE_PIXEL_MM)));
+  d.cols = Math.max(d.cols, a.isSvg ? Math.min(768, Math.max(traceCols, a.iw)) : traceCols);
+  d.rows = Math.max(1, Math.round(d.cols * d.h / d.w));
   const src = document.createElement("canvas");
   src.width = d.cols; src.height = d.rows;
   const sctx = src.getContext("2d", { willReadFrequently: true });
@@ -3844,11 +3851,15 @@ function drawArtLayer(c, a, mat, viewSide) {
   const cache = a.caches && a.caches[mat];
   if (!cache) return;
   const d = artDims(a);
-  // Raster layers show their true board pixels (nearest-neighbor); SVG
-  // layers are exact on the board, so their preview scales smoothly too.
-  c.imageSmoothingEnabled = !!a.isSvg;
-  c.drawImage(cache, mm2px(a.cx - d.w / 2), mm2px(a.cy - d.h / 2), d.w * SCALE, d.h * SCALE);
+  // Both kinds of art reach the board as polygons now, so neither has board
+  // pixels to show: scale the classification smoothly and the preview edge
+  // reads like the traced curve instead of a staircase the board never gets.
+  // (The one case this flatters is art dense enough to exhaust the server's
+  // tracing allowance, which does ship as rectangles -- webapp.MAX_ART_TRACE_RECTS.
+  // Nothing a badge would carry gets close, and the preview cannot know which
+  // side of the allowance a layer landed on without doing the trace itself.)
   c.imageSmoothingEnabled = true;
+  c.drawImage(cache, mm2px(a.cx - d.w / 2), mm2px(a.cy - d.h / 2), d.w * SCALE, d.h * SCALE);
 }
 
 // Server-side art keepouts, mirrored for the preview: decor (silk/copper)
@@ -6187,6 +6198,18 @@ function cssRGB(rgb) {
   return `rgb(${r},${g},${b})`;
 }
 
+// What to say about an SVG whose paint the exact parser will refuse. Said
+// once here so the toast and the layer card cannot drift apart. It is not a
+// warning: the board still gets smooth edges, the user just deserves to know
+// the paths were not used exactly -- the panel used to claim they were.
+function approxNote(reason) {
+  return `This SVG paints with ${reason}, which is not one flat colour per `
+    + "shape, so the board is traced from a rendered copy of it instead of "
+    + "from the vector paths. Edges still come out as curves, within about "
+    + "0.04 mm of the artwork \u2014 there is nothing to fix.";
+}
+
+
 function renderArtList() {
   picking = null;
   artHL = null;
@@ -6294,6 +6317,7 @@ function renderArtList() {
         <div><button class="tool flipb">${a.flip ? "Unmirror" : "Mirror"}</button></div>
         <div><button class="tool repb" title="Swap the picture, keep position/size/transform">Change image…</button></div>
       </div>
+      ${a.approx ? `<div class="sub approxnote" title="${approxNote(a.approx)}">Traced from a rendered copy: this SVG paints with ${a.approx}, not flat colours.</div>` : ""}
       <div class="sub">Magic wand: retarget one connected region <button class="qm" tabindex="-1" data-tip="wand" title="How the wand works">?</button></div>
       <div class="row">
         <div><select class="wandm">${Object.entries(WAND_MATS).map(([v, l]) => opt(v, l, "bare")).join("")}</select></div>
@@ -7111,6 +7135,34 @@ $("addart").addEventListener("click", () => {
 // the local preview and the server's fallback for SVGs whose paint the
 // exact vector parser can't represent (gradients, patterns).
 
+// Which of those the file actually uses, or "" for none.
+//
+// svgart.py refuses a paint that is not one flat colour and the server then
+// traces the rendered copy instead. That is a good outcome -- traced edges
+// land within ~0.04 mm of the artwork -- but it used to happen in silence,
+// while this panel went on claiming the paths were used exactly. The check
+// mirrors svgart's rule as closely as a browser can: a paint reference that
+// resolves to a gradient or pattern element, from either the attribute or an
+// inline style. A gradient sitting unused in <defs> is not reported, because
+// the server would not refuse the file for it either.
+function svgApproxReason(doc) {
+  const refs = new Set();
+  for (const el of doc.querySelectorAll("*")) {
+    for (const prop of ["fill", "stroke"]) {
+      const paint = el.getAttribute(prop) || el.style?.[prop] || "";
+      const m = /^\s*url\(['"]?#([^'")\s]+)/.exec(paint);
+      if (m) refs.add(m[1]);
+    }
+  }
+  for (const id of refs) {
+    const target = doc.getElementById(id);
+    const tag = target?.tagName?.toLowerCase() || "";
+    if (tag === "lineargradient" || tag === "radialgradient") return "gradients";
+    if (tag === "pattern") return "a pattern fill";
+  }
+  return "";
+}
+
 async function svgObjectUrl(f) {
   const doc = new DOMParser().parseFromString(await f.text(), "image/svg+xml");
   const svg = doc.documentElement;
@@ -7119,7 +7171,11 @@ async function svgObjectUrl(f) {
     svg.setAttribute("width", vb[2] || 512);
     svg.setAttribute("height", vb[3] || 512);
   }
-  return URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(svg)], {type: "image/svg+xml"}));
+  return {
+    url: URL.createObjectURL(
+      new Blob([new XMLSerializer().serializeToString(svg)], {type: "image/svg+xml"})),
+    approx: svgApproxReason(doc),
+  };
 }
 // Shared loader. SVGs upload as-is (the server uses their exact vector
 // paths), plus a browser-rasterized PNG that doubles as the local preview
@@ -7147,6 +7203,7 @@ async function loadImageFile(f, cb) {
     fr.readAsDataURL(f);
   });
   const img = new Image();
+  let approx = "";   // set below, before the decode this handler waits on
   img.onload = () => {
     let src = img, iw = img.naturalWidth || 512, ih = img.naturalHeight || 512;
     if (isSvg) {
@@ -7157,12 +7214,12 @@ async function loadImageFile(f, cb) {
       cnv.getContext("2d").drawImage(img, 0, 0, cnv.width, cnv.height);
       src = cnv; iw = cnv.width; ih = cnv.height;
       cnv.toBlob(b => b ? once({
-        upload: f, isSvg: true, dataUrl,
+        upload: f, isSvg: true, dataUrl, approx,
         raster: new File([b], f.name.replace(/\.svg$/i, "") + ".png", { type: "image/png" }),
         src, iw, ih,
       }) : failed(), "image/png");
     } else {
-      once({ upload: f, raster: null, isSvg: false, dataUrl, src, iw, ih });
+      once({ upload: f, raster: null, isSvg: false, dataUrl, approx: "", src, iw, ih });
     }
     URL.revokeObjectURL(img.src);
   };
@@ -7170,7 +7227,13 @@ async function loadImageFile(f, cb) {
   // A hostile or truncated SVG can throw in the parser before there is an <img>
   // to fail; without this the caller waits on a promise nothing will settle.
   try {
-    img.src = isSvg ? await svgObjectUrl(f) : URL.createObjectURL(f);
+    if (isSvg) {
+      const parsed = await svgObjectUrl(f);
+      approx = parsed.approx;
+      img.src = parsed.url;
+    } else {
+      img.src = URL.createObjectURL(f);
+    }
   } catch (e) {
     failed();
   }
@@ -7195,16 +7258,17 @@ $("artfile").addEventListener("change", () => {
   }
   loadImageFile(f, r => {
     if (!r) return; // unreadable; loadImageFile already said so
-    const { upload, raster, isSvg, dataUrl, src, iw, ih } = r;
+    const { upload, raster, isSvg, dataUrl, approx, src, iw, ih } = r;
     const { palette, fewColors } = extractPalette(src, iw, ih);
     if (target !== null && state.art[target]) {
-      setStatus(`Swapped the image for ${f.name}.`);
+      setStatus(`Swapped the image for ${f.name}.`
+        + (approx ? " " + approxNote(approx) : ""));
       // Swap the picture but keep the layer's placement, size, and
       // rotate/mirror. The color palette and wand picks belong to the old
       // image's pixels, so they reset to the new image's own colors.
       const a = state.art[target];
       Object.assign(a, {
-        file: upload, raster, isSvg, srcData: dataUrl, fname: f.name,
+        file: upload, raster, isSvg, srcData: dataUrl, fname: f.name, approx,
         orig: src, img: src, ow: iw, oh: ih, iw, ih,
         mode: fewColors ? "palette" : "threshold", palette, overrides: [],
       });
@@ -7215,7 +7279,7 @@ $("artfile").addEventListener("change", () => {
       return;
     }
     const a = {
-      file: upload, raster, isSvg, srcData: dataUrl, side: "front",
+      file: upload, raster, isSvg, srcData: dataUrl, side: "front", approx,
       fname: f.name, orig: src, img: src, ow: iw, oh: ih, iw, ih,
       cx: 10.16, cy: 10.16, wmm: 14, threshold: 128, invert: false,
       material: "silk", caches: null,
@@ -7226,7 +7290,8 @@ $("artfile").addEventListener("change", () => {
     state.art.push(a);
     renderArtList();
     draw();
-    setStatus(`Added ${f.name}: ${a.mode === "palette" ? "assign a material per color" : "tune the threshold"} below.`);
+    setStatus(`Added ${f.name}: ${a.mode === "palette" ? "assign a material per color" : "tune the threshold"} below.`
+      + (approx ? " " + approxNote(approx) : ""));
   });
 });
 
@@ -7263,7 +7328,11 @@ function renderShapeOpts() {
         <button class="del" title="Remove">&times;</button></span></div>
       <select class="op" title="Add or cut">${opt("add", "Adds board material", el.op)}${opt("cut", "Cuts a hole", el.op)}</select>
       ${isImg ? `
-        <div class="sub">Dark ${el.isSvg ? "shapes become board (exact vector outline)" : "pixels become board"}; drag it on the front view</div>
+        <div class="sub">Dark ${el.isSvg
+            ? (el.approx
+                ? `shapes become board (traced from a rendered copy: this SVG paints with ${el.approx})`
+                : "shapes become board (exact vector outline)")
+            : "pixels become board"}; drag it on the front view</div>
         <div class="row" style="margin-top:6px"><div><button class="tool chimg">Change image…</button></div></div>
         <div class="sub">Threshold <span class="etv">${el.threshold}</span></div>
         <input type="range" class="eth" min="1" max="254" value="${el.threshold}">
@@ -7348,7 +7417,7 @@ $("shapefile").addEventListener("change", () => {
   if (!f || target === null) return;
   loadImageFile(f, r => {
     if (!r) return; // unreadable; loadImageFile already said so
-    const { upload, raster, isSvg, dataUrl, src, iw, ih } = r;
+    const { upload, raster, isSvg, dataUrl, approx, src, iw, ih } = r;
     let el = target === "new" ? null : state.shape.elements[target];
     if (!el) {
       outlineAddCheck = { rings: ringSig(state.shape.rings), label: f.name };
@@ -7357,7 +7426,8 @@ $("shapefile").addEventListener("change", () => {
       state.shape.elements.push(el);
       outlineAddCheck.el = el;
     }
-    Object.assign(el, { file: upload, raster, isSvg, srcData: dataUrl, fname: f.name, orig: src, ow: iw, oh: ih });
+    Object.assign(el, { file: upload, raster, isSvg, srcData: dataUrl, approx,
+                        fname: f.name, orig: src, ow: iw, oh: ih });
     computeElGrid(el);
     renderShapeOpts();
     requestOutline(true);
@@ -7365,7 +7435,8 @@ $("shapefile").addEventListener("change", () => {
       setStatus(`${f.name} has no dark pixels at this threshold, so it adds `
         + "nothing to the outline; try Invert or raise the threshold.", true);
     } else {
-      setStatus(`${f.name} added to the outline; dark pixels become board.`);
+      setStatus(`${f.name} added to the outline; dark pixels become board.`
+        + (approx ? " " + approxNote(approx) : ""));
     }
   });
 });
@@ -8093,7 +8164,7 @@ const TIPS = {
   </ul>` },
   shape: { title: "Step 1: a helmet-shaped board", img: "parts.webp", html: `<ul>
     <li><b>+ Silhouette…</b> turns a picture into the board: dark pixels become material, so the badge IS the helmet. Raise the threshold if bright details get punched out.</li>
-    <li>Parts stack; switch one to <b>Cuts a hole</b> to punch openings. SVGs trace exactly; <b>Edge smoothing</b> melts raster pixel stairs.</li>
+    <li>Parts stack; switch one to <b>Cuts a hole</b> to punch openings. SVGs trace exactly unless they paint with gradients — the part says so when that happens; <b>Edge smoothing</b> melts raster pixel stairs.</li>
   </ul>` },
   pins: { title: "Connector pins: keep only what you use", img: "pins.webp", html: `<ul>
     <li>Each row carries 3V3 + GND, so one row alone powers every LED — untick the top row and the helmet's crown stays clean.</li>
@@ -8102,7 +8173,7 @@ const TIPS = {
   art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
     <li>The same helmet PNG, added as artwork, loads in <b>By color</b> mode with a material guessed per color — check every row and fix the guesses (here the body is set to <i>Ignore</i>: plain soldermask).</li>
     <li>Hover a color row to light up exactly which pixels it controls.</li>
-    <li>PNG/JPG snap to a 0.18 mm grid; SVG art stays exact at any size.</li>
+    <li>Art reaches the board as curves, not squares: a PNG or JPG is traced around its colors, and an SVG is taken straight from its own vector paths — or traced from a rendered copy, if it paints with gradients, which the layer tells you.</li>
     <li><b>Cut through board</b> removes the board itself — a real hole through copper, mask and laminate. The connector pads always keep a tab of board, and parts get moved off the hole (or flagged) automatically.</li>
   </ul>` },
   wand: { title: "Step 3: the visor, with the magic wand", img: "wand.webp", html: `<ul>
@@ -8673,6 +8744,7 @@ function applyDesign(d, assets) {
     const r = assets.get("el" + i);
     if (r) {
       Object.assign(el, { file: r.upload, raster: r.raster, isSvg: r.isSvg,
+                          approx: r.approx,  // re-sniffed, not saved
                           srcData: e.srcData, fname: e.fname, orig: r.src, ow: r.iw, oh: r.ih });
       computeElGrid(el);
     }
@@ -8695,6 +8767,7 @@ function applyDesign(d, assets) {
     if (!r) return; // a layer with no picture behind it is not a layer
     const a = {
       file: r.upload, raster: r.raster, isSvg: r.isSvg, srcData: s.srcData,
+      approx: r.approx,   // re-sniffed from the restored bytes, not saved
       fname: s.fname, orig: r.src, img: r.src, ow: r.iw, oh: r.ih, iw: r.iw, ih: r.ih,
       cx: s.cx, cy: s.cy, wmm: s.wmm, threshold: s.threshold, invert: s.invert,
       material: s.material, caches: null, mode: s.mode,

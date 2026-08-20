@@ -4470,3 +4470,85 @@ def test_a_free_placed_part_lines_up_on_its_own_units_led(ui, part):
     assert not guides, "guides outlive the gesture that drew them"
     ui.assert_clean(f"snap a free-placed {part} onto its LED")
 
+
+# ===========================================================================
+# Telling the user when an SVG's paint cannot be used exactly
+#
+# `svgart` uses an SVG's own vector paths only while every paint is one flat
+# colour; a gradient or a pattern sends the layer down the raster tracer
+# instead.  That fallback is fine for the badge -- traced edges land within
+# ~0.04 mm of the artwork -- but it used to be invisible, while the art panel
+# went on saying the paths were used exactly.  Nothing on the server tells the
+# browser which path a layer took, so the panel decides for itself, and the
+# only thing that makes that honest is agreeing with the parser.
+# ===========================================================================
+_GRADIENT_DEFS = ('<defs><linearGradient id="g">'
+                  '<stop offset="0" stop-color="#fff"/>'
+                  '<stop offset="1" stop-color="#888"/></linearGradient></defs>')
+
+#: (label, SVG body) -- the four ways the answer can go, including both ways
+#: it can go wrong. `unused-defs` and `style-attribute` are the cases a naive
+#: check gets backwards: one has a gradient element and no gradient paint, the
+#: other has gradient paint and no gradient attribute.
+_PAINT_CASES = [
+    ("flat-fills",
+     '<circle cx="50" cy="50" r="40" fill="#111"/>'
+     '<circle cx="50" cy="40" r="20" fill="#fff"/>'),
+    ("unused-defs",
+     _GRADIENT_DEFS + '<circle cx="50" cy="50" r="40" fill="#111"/>'),
+    ("fill-attribute",
+     _GRADIENT_DEFS + '<circle cx="50" cy="50" r="40" fill="url(#g)"/>'),
+    ("style-attribute",
+     _GRADIENT_DEFS + '<circle cx="50" cy="50" r="40" style="fill:url(#g)"/>'),
+]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("label,body", _PAINT_CASES, ids=[c[0] for c in _PAINT_CASES])
+def test_the_art_panel_promises_exact_vector_paths_only_when_svgart_agrees(
+        ui, make_svg, label, body):
+    """The panel's claim about an upload matches what the parser will do to it.
+
+    Two implementations of one rule: `svgart.svg_color_regions` decides it on
+    the server, `svgApproxReason` in the browser decides it at upload time
+    from the parsed document. Whichever way they disagree the user is misled
+    -- promised exact paths they will not get, or warned off a file that was
+    going to be traced exactly -- so the test asserts them equal rather than
+    asserting either one's answer.
+    """
+    from minibadge_designer import svgart
+
+    svg = make_svg(body)
+    try:
+        svgart.svg_color_regions(svg)
+        server_is_exact = True
+    except ValueError:
+        server_is_exact = False
+
+    ui.show_panel("art")
+    ui.page.set_input_files(
+        "#artfile", files=[{"name": f"{label}.svg", "mimeType": "image/svg+xml",
+                            "buffer": svg}], timeout=ELEMENT_TIMEOUT)
+    ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+    reason = ui.js("() => state.art[0].approx || ''")
+    panel_is_exact = not reason
+
+    assert panel_is_exact == server_is_exact, (
+        f"{label}: the parser would {'use' if server_is_exact else 'refuse'} "
+        f"these paths exactly and the panel says "
+        f"{'exact' if panel_is_exact else reason!r}; one of the two is lying "
+        "to the user about the artwork on their badge")
+
+    # And the news has to reach the user, not just the layer object.
+    note = ui.card("artlist", 0).locator(".approxnote")
+    if server_is_exact:
+        assert note.count() == 0, (
+            f"{label}: the card warns about paint the parser accepts")
+    else:
+        assert note.count() == 1 and "traced" in note.inner_text().lower(), (
+            f"{label}: nothing on the card says the paths were not used "
+            f"exactly (found {note.count()} notes)")
+        assert ui.has_toast("traced from a rendered copy"), (
+            f"{label}: the upload said nothing at the moment it happened: "
+            f"{ui.toast_texts()}")
+    ui.assert_clean()
