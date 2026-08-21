@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import unicodedata
 import time
 import zipfile
 
@@ -528,7 +529,22 @@ def _add_security_headers(resp):
 
 
 def _slug(name: str) -> str:
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", name.strip()).strip("._-")
+    """A project name reduced to something KiCad and every filesystem accept.
+
+    Accents are folded rather than deleted, because deleting them turns a name
+    into noise: "unicode" is a usable folder, "n_c_d" (what stripping
+    non-ASCII leaves of "\u00fcn\u00efc\u00f8d\u00e9") is not. Scripts that do not decompose
+    to ASCII at all -- Japanese, Cyrillic, Greek -- leave nothing to fold, and
+    those fall back to the default the same way an empty name does, which is
+    the honest outcome: a meaningless slug is worse than a generic one.
+
+    No minimum length: "v2" is a real project name, and the fold is what
+    rescues the case this was written for, so a length rule would only cost
+    short names their own titles.
+    """
+    folded = unicodedata.normalize("NFKD", name.strip())
+    folded = "".join(c for c in folded if not unicodedata.combining(c))
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "_", folded).strip("._-")
     return slug or "minibadge"
 
 

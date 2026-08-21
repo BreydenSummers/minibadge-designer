@@ -15,6 +15,30 @@ def _spec(n_leds=2, rects=None):
     )
 
 
+def _bom_rows(bom: str) -> dict:
+    """BOM.csv keyed by reference, parsed strictly.
+
+    Strict on purpose: an unquoted comma anywhere in a Value or Notes string
+    shifts every later column, and `csv.DictReader` would hide it in a
+    ``None`` key rather than complain. Whoever calls this gets told instead.
+    """
+    import csv
+    import io
+
+    reader = csv.reader(io.StringIO(bom))
+    header = next(reader)
+    rows = {}
+    for fields in reader:
+        if not fields:
+            continue
+        assert len(fields) == len(header), (
+            f"BOM row has {len(fields)} fields, header has {len(header)}: "
+            f"{fields!r} -- an unescaped comma shifts the columns and an "
+            "assembly house reads the wrong package against the reference")
+        rows[fields[0]] = dict(zip(header, fields))
+    return rows
+
+
 def _balanced(sexpr: str) -> bool:
     depth = 0
     in_str = False
@@ -315,14 +339,128 @@ def test_deterministic_output():
 
 
 def test_bom_and_readme():
+    """The parts list names each part the way it is ordered, and defers the
+    resistance to the builder.
+
+    Value is the column a human orders from, so it has to carry colour AND
+    package for an LED. It must NOT carry a resistance: the right value depends
+    on the forward voltage of the LED actually bought, and a number printed
+    here reads as settled -- a builder who solders 120 ohm against a 3.2 V
+    white LED gets a badge that barely lights. The suggestion lives in Notes,
+    labelled as a suggestion, with the arithmetic in README.txt.
+    """
     spec = _spec()
     spec.leds[1].side = "back"
     bom = pcb.generate_bom(spec)
-    assert "D1,LED red,LED 0805 (2012 metric),front" in bom
-    assert "D2,LED blue,LED 0805 (2012 metric),back" in bom
-    assert "220 ohm" in bom and "120 ohm" in bom
+    rows = _bom_rows(bom)
+
+    d1, d2 = rows["D1"], rows["D2"]
+    assert "red" in d1["Value"] and "0805" in d1["Value"], d1
+    assert d1["Side"] == "front" and d2["Side"] == "back"
+    assert "blue" in d2["Value"] and "0805" in d2["Value"], d2
+
+    for ref in ("R1", "R2"):
+        r = rows[ref]
+        assert not re.search(r"\d+\s*ohm", r["Value"]), (
+            f"{ref} presents a resistance as settled in the column a builder "
+            f"orders from: {r['Value']!r}")
+        assert "README" in r["Value"], (
+            f"{ref} must point at the section that explains how to pick it")
+        assert re.search(r"\d+ ohm suits", r["Notes"]), (
+            f"{ref} lost its starting-point suggestion: {r['Notes']!r}")
+
+    # The pins the badge plugs in with are a part you have to buy, and no
+    # other file in the zip mentions them.
+    assert "J1" in rows, "the parts list never mentions the header pins"
+    assert "header" in rows["J1"]["Value"].lower()
+
     readme = pcb.generate_readme(spec)
     assert "lukejenkins/minibadge" in readme and "Press B" in readme
+    # The two documents must agree about the same LED: a builder reading the
+    # README table and a builder reading BOM Notes buy the same resistor.
+    for ref, led in (("R1", spec.leds[0]), ("R2", spec.leds[1])):
+        ma = f"{pcb.suggested_current_ma(led.color):.1f} mA"
+        assert ma in rows[ref]["Notes"] and ma in readme, (
+            f"{ref}: BOM and README disagree about the current for a "
+            f"{led.color} LED ({ma})")
+
+
+@pytest.mark.parametrize("spec_name,spec_factory", [
+    # The Notes column is assembled from optional clauses, and the wordiest
+    # combinations are where a separator gets typed as a comma. Each case
+    # moves off the 0805/front/stacked/all-pins defaults in a different way.
+    ("reverse-and-farled", lambda: pcb.BadgeSpec(
+        name="n", leds=[pcb.Led(10.16, 10.16, "red", size="1206", reverse=True),
+                        pcb.Led(6.0, 14.0, "white", side="back", farled=True)])),
+    ("through-hole", lambda: pcb.BadgeSpec(
+        name="n", leds=[pcb.Led(6.5, 8.0, "green", size="3mm"),
+                        pcb.Led(13.0, 8.0, "yellow", size="5x2mm", rot=90)])),
+    ("clk-jumper", lambda: pcb.BadgeSpec(
+        name="n", clk_jumper=True,
+        leds=[pcb.Led(6.0, 8.0, "blue", clk=True),
+              pcb.Led(14.0, 8.0, "orange")])),
+    ("clk-traced-and-novia", lambda: pcb.BadgeSpec(
+        name="n", clk_jumper=False,
+        leds=[pcb.Led(6.0, 8.0, "blue", clk=True, novia=True)])),
+    ("one-pair-only", lambda: pcb.BadgeSpec(
+        name="n", pins=("7", "8"), leds=[pcb.Led(10.0, 10.0, "red")])),
+    ("no-leds", lambda: pcb.BadgeSpec(name="n", leds=[])),
+])
+def test_the_bom_stays_a_six_column_file_however_wordy_its_notes_get(
+        spec_name, spec_factory):
+    """Every BOM row carries exactly the columns its header declares.
+
+    BOM.csv is the one file in the zip a person feeds to something else -- a
+    spreadsheet, or an assembly house's importer. The Notes and Value strings
+    are built by concatenating optional clauses, so one comma typed as a
+    separator shifts every later column: the package lands under Side and the
+    quantity under Footprint, and the order comes back wrong or rejected.
+    Nothing else in the suite reads this file as a table.
+    """
+    rows = _bom_rows(pcb.generate_bom(spec_factory()))
+    assert rows, f"{spec_name}: the BOM has no rows at all"
+    for ref, row in rows.items():
+        assert row["Reference"] == ref
+        assert row["Qty"].isdigit(), (
+            f"{spec_name}: {ref} has {row['Qty']!r} in the Qty column, which "
+            "is where a shifted comma shows up first")
+
+
+def test_the_readme_flags_a_colour_the_rail_cannot_drive_brightly():
+    """The resistor guidance warns about low-headroom LEDs only when the board
+    actually has one.
+
+    Blue, green and white sit within ~0.3 V of the 3V3 rail, so the resistor
+    barely sets the current and the LED's own Vf bin does. A builder who sizes
+    those from the datasheet's 20 mA figure gets a badge that looks dead. The
+    contrast case is the point: on a red-only board the same warning would be
+    noise, and noise is what stops people reading the file.
+    """
+    warm = pcb.generate_readme(pcb.BadgeSpec(
+        name="warm", leds=[pcb.Led(6.0, 8.0, "red"), pcb.Led(14.0, 8.0, "yellow")]))
+    cool = pcb.generate_readme(pcb.BadgeSpec(
+        name="cool", leds=[pcb.Led(6.0, 8.0, "red"), pcb.Led(14.0, 8.0, "white")]))
+
+    # The method is stated on every board: it is what makes the BOM's blank
+    # resistance actionable.
+    for readme in (warm, cool):
+        assert "Vf" in readme
+        assert re.search(r"R = \([\d.]+ V - Vf\) / I", readme), (
+            "the README no longer shows how to size the resistor, and the BOM "
+            "deliberately does not carry a value")
+
+    assert "white" in cool.split("Choosing the series resistor")[1], cool
+    assert "Vf spread" in cool, "a white LED on 3V3 needs the headroom warning"
+    assert "Vf spread" not in warm, (
+        "a red/yellow board has ~1.3 V of headroom; warning about Vf spread "
+        "there trains the reader to skip the section")
+
+    # The suggestion is a real calculation, not a fixed string: a colour with
+    # less headroom must be shown drawing less current.
+    assert (pcb.suggested_current_ma("white")
+            < pcb.suggested_current_ma("red") / 2), (
+        "white is shown drawing as much as red, so the table is not reading "
+        "the forward voltages it claims to")
 
 
 @pytest.mark.parametrize("layout,size,rot", [
