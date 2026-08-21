@@ -516,8 +516,16 @@ def _r(dx: float, dy: float, ang: float) -> tuple[float, float]:
     return (dx * math.cos(t) - dy * math.sin(t),
             dx * math.sin(t) + dy * math.cos(t))
 
+# Series resistor per LED colour: a STARTING POINT, not a specification.
+#
+# The right value depends on the LED you actually buy, and the board cannot
+# know it: forward voltage varies by part and by bin, and on a 3.3 V rail it
+# is what decides the current. These are sized for the typical Vf of each
+# colour at a few mA (see LED_VF), which is a polite draw on a rail the whole
+# minibadge chain shares. Both the BOM and README.txt say so and show the
+# arithmetic, so the builder confirms the value against their own datasheet
+# rather than trusting a number stamped on a board.
 LED_COLORS = {
-    # color -> (series resistor, typical forward voltage note)
     "red": "220",
     "orange": "220",
     "yellow": "220",
@@ -525,6 +533,30 @@ LED_COLORS = {
     "blue": "120",
     "white": "120",
 }
+
+# Typical forward voltage per colour, in volts, at the low currents this board
+# runs (a few mA) -- NOT the datasheet figure at 20 mA, which is 0.1-0.3 V
+# higher. Used only to show the builder the assumption behind LED_COLORS.
+LED_VF = {
+    "red": 2.0,
+    "orange": 2.1,
+    "yellow": 2.1,
+    "green": 3.0,
+    "blue": 3.0,
+    "white": 3.1,
+}
+RAIL_V = 3.3   # the 3V3 connector pins are the only supply this board uses
+
+
+def suggested_current_ma(color: str) -> float:
+    """Current the suggested resistor gives at the typical Vf for that colour.
+
+    Stated so the BOM can show what the starting value assumes. Blue, green
+    and white sit close to the rail voltage, so this number moves a lot with
+    the real part -- which is exactly what the README tells the builder.
+    """
+    ohms = float(LED_COLORS.get(color, "220"))
+    return max(RAIL_V - LED_VF.get(color, 2.0), 0.0) / ohms * 1000.0
 
 
 @dataclass
@@ -3937,10 +3969,24 @@ def generate_pcb(spec: BadgeSpec) -> str:
 def generate_project(name: str) -> str:
     # min_copper_edge_clearance 0.2: the official minibadge connector pads sit
     # 0.235 mm from the outline, so KiCad's 0.25 default false-flags them.
-    # min_text_height 0.6: the printed pin captions are 0.6 mm silk, small
-    # but well within what fabs print, and it is also the floor the UI holds
-    # user text to (webapp.TEXT_SIZE_MM) -- _text_items thickens the pen at
-    # that end so the stroke clears min_text_thickness too.
+    # min_text_height 0.6: the printed pin captions are 0.6 mm silk with a
+    # 0.11 mm pen, and it is also the floor the UI holds user text to
+    # (webapp.TEXT_SIZE_MM) -- _text_items thickens the pen at that end so the
+    # stroke clears min_text_thickness too.
+    #
+    # Both numbers are BELOW a cheap fab's published silkscreen minimums
+    # (JLCPCB: 1.0 mm text height, 0.15 mm line width), so expect the pad
+    # captions to print faint rather than crisp. They cannot be made bigger
+    # where they sit, and the binding constraint is width, not height
+    # (measured 2026-08-20 off the plotted silk gerber): the widest caption,
+    # "VBAT GND", already inks 4.310 mm across a 4.84 mm pad plate, leaving
+    # 0.251 mm to the board edge -- a 25 % size bump puts ink past the edge.
+    # Vertically there is 0.855 mm between the pad copper (y 2.145) and the
+    # LED-unit keepout (y 3.0) and the ink is 0.710 mm of it. Fattening the
+    # pen alone makes it worse, not better: at 0.6 mm cap height a 0.15 mm
+    # stroke is a 0.25 ratio, which closes up the counters of B/8/0.
+    # Enlarging them means shorter labels or moving them off the pad strip
+    # into where user art and LED units live -- a redesign, not a tweak.
     # lib_footprint_issues ignored: all footprints are embedded in the board.
     return (
         "{\n"
@@ -3987,19 +4033,41 @@ def generate_bom(spec: BadgeSpec) -> str:
             note += f"; mounts on the {far} face (via in each pad)"
         if led.novia:
             if led.term and led.term[0] == "unit":
-                note += f"; no via, chained onto LED D{int(led.term[1]) + 1}'s pad"
+                note += (f"; no via - chained onto LED "
+                         f"D{int(led.term[1]) + 1}'s pad")
             else:
-                note += "; no via, wired to a connector pad"
+                note += "; no via - wired to a connector pad"
         if led.clk and clk is not None:
             note += ("; blinks with the badge CLK (via the JP1 jumper)"
                      if clk["jumper"]
                      else "; blinks with the badge CLK (wired to pin 9)")
         led_side = ("front" if side == "back" else "back") if led.farled else side
-        lines.append(f"D{i + 1},LED {led.color},{fp},{led_side},1,{note}")
-        r = LED_COLORS.get(led.color, "220")
+        # Value names the part the way you order it: colour AND package. The
+        # Footprint column carries the same package for KiCad's benefit; the
+        # duplication is deliberate, because a builder reads one column.
         lines.append(
-            f"R{i + 1},{r} ohm,R {rpkg} ({PKG_METRIC.get(rpkg, '')} metric),{side},1,"
-            f"series resistor for D{i + 1}"
+            f"D{i + 1},LED {led.color} {pkg},{fp},{led_side},1,{note}")
+        r = LED_COLORS.get(led.color, "220")
+        # No resistance in the Value column: it is a choice the builder makes
+        # from their LED's datasheet, and a number here reads as settled.
+        lines.append(
+            f"R{i + 1},resistor {rpkg} (choose - see README.txt),"
+            f"R {rpkg} ({PKG_METRIC.get(rpkg, '')} metric),{side},1,"
+            f"series resistor for D{i + 1}; {r} ohm suits a typical "
+            f"{led.color} LED at about {suggested_current_ma(led.color):.1f} mA"
+        )
+    # The pins that plug into the host badge are a part you have to buy, and
+    # nothing else in the package said so. One 1x02 header per kept pad pair.
+    pairs = active_pairs(spec.pins)
+    if pairs:
+        kept = "pins " + " / ".join(
+            "+".join(q for q in PAD_PAIRS[k]["pins"] if q in spec.pins)
+            for k in pairs)
+        lines.append(
+            f"J1,male header 1x02 2.54 mm pitch,minibadge connector "
+            f"(0.95 mm plated holes),back,{len(pairs)},"
+            f"solders into the kept pad pair(s) ({kept}) and plugs into the "
+            "host badge; break a 0.1 inch strip to length"
         )
     return "\n".join(lines) + "\n"
 
@@ -4030,6 +4098,54 @@ def generate_readme(spec: BadgeSpec, slug: str | None = None) -> str:
         if spec.finish == "hasl"
         else "ENIG (shiny GOLD pads and copper art)"
     )
+    # Per-LED suggestion table. Built from the colours actually on the board,
+    # so the builder reads their own parts rather than a generic chart.
+    if spec.leds:
+        rows = "\n".join(
+            f"  D{i + 1}  {led.color:<6s} Vf about {LED_VF.get(led.color, 2.0):.1f} V"
+            f"  ->  {LED_COLORS.get(led.color, '220'):>3s} ohm gives about "
+            f"{suggested_current_ma(led.color):.1f} mA"
+            for i, led in enumerate(spec.leds))
+        low_headroom = sorted({led.color for led in spec.leds
+                               if RAIL_V - LED_VF.get(led.color, 2.0) <= 0.35})
+    else:
+        rows = "  (no LEDs on this board)"
+        low_headroom = []
+    headroom_note = ""
+    if low_headroom:
+        headroom_note = (
+            "\n\nYour " + " / ".join(low_headroom) + " LED(s) sit within about "
+            "0.3 V of the 3V3 rail, so\nthe resistor barely controls the "
+            "current: the LED's own Vf spread does.\nA part binned at 3.2 V is "
+            "visibly dimmer than one at 2.9 V on the same\nresistor, and going "
+            "below ~47 ohm buys little. If you want those colours\nbright, buy "
+            "LEDs specified at 2 mA (modern parts are efficient down there)\n"
+            "or measure one from the reel you actually receive before "
+            "committing a batch.")
+    resistor_desc = f"""Choosing the series resistor
+----------------------------
+BOM.csv gives each resistor's package but not its resistance, because the
+right value depends on the LED you buy, not on the board. The supply is the
+badge's 3V3 rail, so:
+
+    R = ({RAIL_V} V - Vf) / I
+
+Vf is your LED's forward voltage AT THE CURRENT YOU INTEND, not the datasheet
+headline at 20 mA -- that figure is 0.1-0.3 V higher and will size the
+resistor wrong. Choose I first: 2-6 mA reads bright indoors and keeps a whole
+chain of minibadges polite on a rail they all share. That is what these
+suggestions assume:
+
+{rows}
+
+Round to the nearest value in your parts drawer; more ohms means dimmer. The
+resistor package matches its LED for SMD units (an 0603 LED gets an 0603
+resistor); a through-hole LED gets an 0805.{headroom_note}
+
+The standard's +VBATT pin (3.3-5 V) exists for brighter LEDs, but this board
+never connects it: tying VBATT to 3V3 would back-feed the host's battery rail.
+Running LEDs from VBATT is a hand-wiring job, not a setting here.
+"""
     clk = clk_info(spec)
     if clk is None:
         clk_desc = ("Power comes from the badge's 3V3 pins. VBATT, CLK, and "
@@ -4111,6 +4227,12 @@ reverse-mount LED over a via/hole.
 
 {clk_desc}
 
+The badge also needs the pins it plugs in with: a 1x02 male 0.1 inch header
+per kept pad pair, soldered into the 0.95 mm holes from the BACK so the pins
+point away from the front face. BOM.csv lists them; nothing on the board
+itself tells you how many, so count the pad pairs you kept.
+
+{resistor_desc}
 Artwork materials
 -----------------
 Silkscreen art is white ink. "Exposed copper" art is a soldermask opening

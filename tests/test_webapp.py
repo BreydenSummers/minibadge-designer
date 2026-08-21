@@ -134,8 +134,15 @@ def test_led_sides_pass_through_and_sanitize(client):
     )
     zf = zipfile.ZipFile(io.BytesIO(resp.data))
     bom = zf.read("sides/BOM.csv").decode()
-    assert "D1,LED red,LED 0805 (2012 metric),back" in bom
-    assert "D2,LED blue,LED 0805 (2012 metric),front" in bom
+    # The Side column is this test's subject: "back" must survive the round
+    # trip and "sideways" must fall back to front. Read the column rather than
+    # matching a whole row, so a change to how a part is named does not read
+    # as a side-handling regression.
+    sides = {row.split(",")[0]: row.split(",")[3]
+             for row in bom.strip().splitlines()[1:]}
+    assert sides["D1"] == "back" and sides["R1"] == "back"
+    assert sides["D2"] == "front" and sides["R2"] == "front"
+    assert "red" in bom and "blue" in bom
 
 
 def test_overlapping_leds_get_nudged_apart(client):

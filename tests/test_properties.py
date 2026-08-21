@@ -573,9 +573,22 @@ def test_generating_the_same_spec_twice_is_byte_identical(spec):
 @given(specs(n_leds=(0, 3)))
 @BOARD
 def test_the_bom_has_exactly_two_rows_per_led(spec):
-    """One LED, one series resistor -- an assembler orders from this file."""
-    rows = pcb.generate_bom(spec).strip().splitlines()
-    assert len(rows) == 1 + 2 * len(spec.leds)
+    """One LED, one series resistor -- an assembler orders from this file.
+
+    Stated as a pairing rather than a total row count: the file also lists the
+    connector header, and on a CLK board the solder jumper, so a total would
+    have to be edited every time an unrelated line item is added -- and would
+    still pass if a resistor row were swapped for a second header row.
+    """
+    refs = [row.split(",", 1)[0]
+            for row in pcb.generate_bom(spec).strip().splitlines()[1:]]
+    for i in range(len(spec.leds)):
+        assert f"D{i + 1}" in refs, f"LED {i + 1} is missing from the BOM"
+        assert f"R{i + 1}" in refs, (
+            f"LED {i + 1} has no series resistor row; the assembler orders a "
+            "bare LED and it sits across the rail")
+    assert len([r for r in refs if r.startswith("D")]) == len(spec.leds)
+    assert len([r for r in refs if r.startswith("R")]) == len(spec.leds)
     pcb.generate_readme(spec)          # must not raise on any legal spec
 
 
