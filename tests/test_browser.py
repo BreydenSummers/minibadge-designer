@@ -4552,3 +4552,172 @@ def test_the_art_panel_promises_exact_vector_paths_only_when_svgart_agrees(
             f"{label}: the upload said nothing at the moment it happened: "
             f"{ui.toast_texts()}")
     ui.assert_clean()
+
+
+# ===========================================================================
+# What the editor tells you before the download refuses you
+#
+# Every unbuildable state in this app is meant to be visible before Download:
+# blockingProblems() plus a canvas marker.  Two things escaped that contract —
+# an image bigger than the server will decode (accepted here, refused there),
+# and a width the board cannot fit (kept in the box, thrown away on the way to
+# the canvas).  A third thing, the carve, is not an error at all: it is a rule
+# the app applies to everyone's artwork and never mentioned anywhere.
+# ===========================================================================
+def _add_art(ui, upload):
+    ui.show_panel("art")
+    ui.page.set_input_files("#artfile", files=[upload], timeout=ELEMENT_TIMEOUT)
+
+
+@pytest.mark.browser
+def test_an_image_the_server_will_not_decode_is_refused_where_it_is_chosen(
+        ui, make_png):
+    """An upload too big to build is turned away at the moment it is picked.
+
+    The browser decodes the file to draw it, so it knows the pixel count before
+    the layer exists — the same number `logo.MAX_INPUT_PIXELS` refuses. Letting
+    it in meant the editor drew a layer, reported no problems, and then /bundle
+    answered 400 on the one click the user could not undo by editing.
+    """
+    over = make_png(size=(5200, 5200))     # 27 Mpx, just over the 24 Mpx cap
+    under = make_png(size=(2000, 2000))    # 4 Mpx, comfortably inside it
+
+    _add_art(ui, {"name": "over.png", "mimeType": "image/png", "buffer": over})
+    # Wait for the upload to RESOLVE either way -- a layer or a message -- so a
+    # regression fails on the assertion below rather than on a wait timeout.
+    ui.page.wait_for_function(
+        """() => state.art.length > 0
+             || [...document.querySelectorAll('#toasts .toast')]
+                  .some(t => /megapixel/.test(t.textContent))""",
+        timeout=UPLOAD_TIMEOUT)
+    assert ui.js("() => state.art.length") == 0, (
+        "a layer was created for an image the server will refuse; the editor "
+        "is promising a board it cannot build")
+    msg = next(t for t in ui.toast_texts() if "megapixel" in t)
+    for owed in ("5200", "27", "24"):
+        assert owed in msg, (
+            f"the refusal does not say {owed}: it has to name the size, the "
+            f"limit and the gap, or the user cannot act on it — got {msg!r}")
+
+    # The contrast case: a big-but-usable image must still be accepted, or this
+    # guard is just a smaller cap than the one it mirrors.
+    _add_art(ui, {"name": "under.png", "mimeType": "image/png", "buffer": under})
+    ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+    ui.assert_clean()
+
+
+@pytest.mark.browser
+def test_a_width_the_board_cannot_fit_says_what_it_actually_drew(ui, logo):
+    """The width control stops keeping a number the board threw away.
+
+    The slider's range is the range for the largest custom outline, so on the
+    standard badge everything past ~19 mm is fitted down by artDims and the
+    typed number is left standing. The number is worth keeping — the board can
+    still grow — but not silently: a user tuning by number was tuning nothing.
+    """
+    _add_art(ui, logo)
+    ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+    page = ui.page
+
+    def note():
+        found = page.eval_on_selector_all(
+            "#artlist .clampnote:not([hidden])",
+            "els => els.map(e => e.textContent.replace(/\\s+/g, ' '))")
+        return found[0] if found else None
+
+    def set_width(mm):
+        box = page.query_selector("#artlist input.wdn")
+        box.fill(str(mm))
+        box.dispatch_event("change")
+        page.wait_for_timeout(150)
+
+    set_width(14)
+    assert note() is None, (
+        "a width the board fits is annotated as clamped; the note has to mean "
+        "something when it appears")
+    set_width(60)
+    said = note()
+    assert said, ("60 mm of artwork on a 20 mm board draws at 19 mm and the "
+                  "card says nothing about it")
+    drawn = ui.js("() => artDims(state.art[0]).w")
+    assert f"{drawn:.1f}" in said, (
+        f"the note must state the width actually drawn ({drawn:.1f} mm): {said!r}")
+    assert "60" in said, (
+        f"the note must account for the number still in the box: {said!r}")
+    # And it goes away again, so it tracks the design rather than latching.
+    set_width(12)
+    assert note() is None, "the note outlived the condition it describes"
+    ui.assert_clean()
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("material,shown", [("silk", True), ("copper", True),
+                                            ("glow", False), ("cut", False)])
+def test_the_art_card_says_ink_keeps_off_pads_when_the_layer_paints_ink(
+        ui, logo, material, shown):
+    """The carve is stated on the layer it applies to.
+
+    Silkscreen and copper are trimmed where pads, captions and parts sit, and
+    the starting design already carries a unit — so the first badge anyone
+    builds can arrive with a bite out of its logo. Nothing in the UI or in any
+    of the ten tips said so; the user just saw damage. Windows and cuts are not
+    ink and are not carved, so they must NOT claim they are.
+    """
+    _add_art(ui, logo)
+    ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
+    page = ui.page
+    # threshold mode gives the layer one material select to drive
+    page.query_selector("#artlist select.mode").select_option("threshold")
+    page.wait_for_timeout(200)
+    page.query_selector("#artlist select.m").select_option(material)
+    page.wait_for_timeout(250)
+
+    lines = page.eval_on_selector_all(
+        "#artlist .item .sub",
+        "els => els.map(e => e.textContent.replace(/\\s+/g, ' '))")
+    says = [ln for ln in lines if "keep clear" in ln or "cannot sit on solder" in ln]
+    assert bool(says) is shown, (
+        f"material={material}: the carve note is "
+        f"{'missing' if shown else 'claimed'} — lines were {lines}")
+    if shown:
+        for owed in ("pads", "part"):
+            assert owed in says[0], (
+                f"the note has to name what the ink keeps off ({owed}): {says[0]!r}")
+    ui.assert_clean()
+
+
+@pytest.mark.browser
+def test_the_illustrated_help_can_be_reached_without_a_mouse(ui):
+    """Every `?` tip is reachable by keyboard.
+
+    These tips are the app's whole explanation mechanism — the carve, the
+    materials, the pin rules all live in them — and they were skipped by the
+    tab order outright (`tabindex="-1"` on all twelve). Escape already closes
+    them, so nothing else about the flow needed changing.
+    """
+    page = ui.page
+    page.evaluate("() => { document.body.setAttribute('tabindex', '-1');"
+                  " document.body.focus(); }")
+    reached = None
+    for i in range(1, 13):
+        page.keyboard.press("Tab")
+        page.wait_for_timeout(40)
+        if page.evaluate("() => document.activeElement.classList.contains('qm')"):
+            reached = i
+            break
+    assert reached, ("no help button took focus in twelve tabs from the "
+                     "document start; the tips are mouse-only")
+    # #tippop is position:fixed, so offsetParent is null even while it shows:
+    # measure what the user sees instead.
+    shown = """() => { const d = document.querySelector('#tippop');
+        if (!d) return false;
+        const b = d.getBoundingClientRect();
+        return getComputedStyle(d).display !== 'none' && b.width > 0 && b.height > 0; }"""
+    page.keyboard.press("Enter")
+    page.wait_for_timeout(400)
+    assert page.evaluate(shown), (
+        "the focused help button did not open its tip on Enter")
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(300)
+    assert not page.evaluate(shown), "Escape did not close the tip"
+    ui.assert_clean()

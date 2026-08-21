@@ -398,17 +398,25 @@
      sat over the centred view selector and swallowed its clicks, so this
      one is pinned to the corner AND the container is pointer-transparent —
      only the toast cards themselves take clicks, never the box around them. */
+  /* Anchored to the window's bottom-right, not the canvas zone's top-left.
+     Top-left covered the front board's own pads and captions -- which is
+     exactly what the bridging and "no board under this unit" messages are
+     about, so the app hid the thing it was pointing at. Measured: bottom-right
+     is clear of both boards and the legend at 1400x1000 and 1500x1000. It
+     cannot be clear everywhere -- once the window narrows enough to stack the
+     boards they fill the zone with 30-60 px gutters, so no 300 px card fits
+     beside them -- but a card there covers the middle of a board rather than
+     the detail being described, and every status clears itself (6 s, 15 s for
+     errors). `fixed` keeps the stack still while the zone scrolls
+     internally. */
   #toasts {
-    position: absolute; top: 12px; left: 12px; z-index: 4;
+    position: fixed; bottom: 12px; right: 12px; z-index: 4;
     width: 320px; max-width: calc(100% - 24px); max-height: 45%; overflow-y: auto;
     display: flex; flex-direction: column; gap: 6px;
     pointer-events: none;
   }
   /* Below ~1450px the centred view selector reaches into the stack's column;
      drop the stack under the selector row so a card can never sit on it. */
-  @media (max-width: 1450px) {
-    #toasts { top: 56px; }
-  }
   #toasts:empty { display: none; }
   .toast { pointer-events: auto; }
   .toast {
@@ -616,13 +624,13 @@
       <rect x="10.5" y="12.9" width="3" height="3" fill="#ff5147"/>
     </svg><span>minibadge&thinsp;<em>designer</em></span></div>
   <input type="text" id="name" value="my-minibadge" maxlength="40" title="Project name (used for the zip and its files)">
-  <button class="qm" tabindex="-1" data-tip="basics" title="Getting around">?</button>
+  <button class="qm" data-tip="basics" title="Getting around">?</button>
   <button id="themebtn" title="Toggle light/dark">◐</button>
   <button id="snapbtn" aria-pressed="true" title="Snap while dragging: the board's centre lines, the centre of anything else placed, else a 0.5 mm grid. Rotation steps 15°. Hold Alt to ignore it for one move.">SNAP</button>
   <button id="openbtn" title="Open a design file saved earlier (or drop one anywhere on the page)">⬆ Open<span class="dlx"> design</span></button>
   <input type="file" id="designfile" accept=".json,application/json" hidden>
   <button id="download" title="Choose what to download: the KiCad project, the Gerber fab package, the design file, or any combination">⬇ Download<span class="dlx">…</span></button>
-  <button class="qm" tabindex="-1" data-tip="download" title="What you get">?</button>
+  <button class="qm" data-tip="download" title="What you get">?</button>
 </div>
 <div id="dlbox" role="dialog" aria-modal="true" aria-labelledby="dlboxh">
   <div class="card">
@@ -678,7 +686,7 @@
   <aside id="listpanel">
     <div id="panelscroll">
     <div class="panel" id="panel-shape">
-      <h3>Board characteristics <button class="qm" tabindex="-1" data-tip="shape" title="How board shapes work">?</button></h3>
+      <h3>Board characteristics <button class="qm" data-tip="shape" title="How board shapes work">?</button></h3>
       <div class="row fabrow" style="margin-bottom:8px">
         <div><div class="sub" style="margin-top:0">Mask color</div>
           <select id="mask" title="Soldermask color">
@@ -700,12 +708,12 @@
       <div class="sub" style="margin-top:0">Board shape</div>
       <input type="file" id="shapefile" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml,.svg">
       <div id="shapeopts"></div>
-      <label class="field">Connector pins <button class="qm" tabindex="-1" data-tip="pins" title="Which pins to keep">?</button></label>
+      <label class="field">Connector pins <button class="qm" data-tip="pins" title="Which pins to keep">?</button></label>
       <div id="pingrid"></div>
       <div class="sub" id="pinnote">Untick any pin your design doesn't need.</div>
     </div>
     <div class="panel" id="panel-art">
-      <h3>Artwork layers <button class="qm" tabindex="-1" data-tip="art" title="How artwork works">?</button><button id="addart" class="add">+ Image</button><button id="addartshape" class="add" title="Add a basic shape layer (great for light windows)">+ Shape ▾</button></h3>
+      <h3>Artwork layers <button class="qm" data-tip="art" title="How artwork works">?</button><button id="addart" class="add">+ Image</button><button id="addartshape" class="add" title="Add a basic shape layer (great for light windows)">+ Shape ▾</button></h3>
       <input type="file" id="artfile" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml,.svg">
       <div id="shapemenu">
         <button data-kind="circle">● Circle</button>
@@ -717,12 +725,12 @@
       <div id="artlist"></div>
     </div>
     <div class="panel" id="panel-leds">
-      <h3>LEDs <button class="qm" tabindex="-1" data-tip="leds" title="How LEDs work">?</button><button id="addled" class="add">+ Add LED</button></h3>
+      <h3>LEDs <button class="qm" data-tip="leds" title="How LEDs work">?</button><button id="addled" class="add">+ Add LED</button></h3>
       <div id="ledlist"></div>
       <div id="clkopts"></div>
     </div>
     <div class="panel" id="panel-text">
-      <h3>Text <button class="qm" tabindex="-1" data-tip="text" title="Fonts and materials">?</button><button id="addtext" class="add">+ Add text</button></h3>
+      <h3>Text <button class="qm" data-tip="text" title="Fonts and materials">?</button><button id="addtext" class="add">+ Add text</button></h3>
       <div id="textlist"></div>
     </div>
     </div>
@@ -782,7 +790,7 @@
       <span class="lg"><span class="lgchip" data-mat="cut"></span>Cut</span>
       <span class="lg"><span class="lgdash"></span>other side</span>
       <span class="lg"><span class="lgchip" id="viachip" style="background:#cfa435;border-radius:50%"></span>via</span>
-      <button class="qm" tabindex="-1" data-tip="materials" title="What the materials mean">?</button>
+      <button class="qm" data-tip="materials" title="What the materials mean">?</button>
     </div>
   </div>
 </div>
@@ -857,6 +865,12 @@ const PIXEL_MM = 0.18, MAX_COLS = 192, EDGE = 0.5;
 // resolve them as finely as the server does or it draws stairs the board
 // will not have.
 const TRACE_PIXEL_MM = 0.06, MAX_TRACE_COLS = 480;
+// logo.MAX_INPUT_PIXELS. The browser has already decoded the file by the time
+// the loader sees it, so it knows the size the server is about to refuse: an
+// upload over this used to be accepted here, drawn on the board, and then
+// turned away by /generate at download time -- the one unbuildable state the
+// editor did not catch up front.
+const MAX_INPUT_PIXELS = 24000000;
 const UNIT_SAFE = [0.7, 0.7, 19.62, 19.62]; // standard square, inset from edge
 // Keepouts around each connector pad pair (pad copper + pour clearance).
 // Units may use the rest of the strip, including between the two pairs.
@@ -6202,6 +6216,45 @@ function cssRGB(rgb) {
 // once here so the toast and the layer card cannot drift apart. It is not a
 // warning: the board still gets smooth edges, the user just deserves to know
 // the paths were not used exactly -- the panel used to claim they were.
+// Whether a layer paints ink (as opposed to opening a window or cutting), and
+// so gets carved around pads and parts. The carve is the app's most surprising
+// invisible rule -- it fires on the very first badge, because the starting
+// design already has a unit on it -- and until now nothing in the UI or in any
+// of the ten tips mentioned it: the user just saw a bite out of their logo.
+function usesInk(a) {
+  const mats = a.mode === "palette"
+    ? (a.palette || []).map(e => e.material)
+    : [a.material];
+  for (const o of a.overrides || []) mats.push(o.material);
+  return mats.some(m => m === "silk" || m === "copper");
+}
+
+// The width slider's range is the range for the biggest custom outline, so on
+// a 20 mm badge most of its travel does nothing: the artwork is fitted to the
+// board (artDims) and the number is left alone. Standing condition, not an
+// event, so it belongs on the card rather than in a toast -- and it is a note,
+// not a refusal: nothing stops the user asking for 119 mm on a board that may
+// yet grow.
+function clampText(a) {
+  if (isShapeArt(a) || !a.iw) return "";
+  const drawn = artDims(a).w;
+  if (a.wmm - drawn < 0.05) return "";
+  const ab = artBoard();
+  return `Drawn at ${drawn.toFixed(1)} mm \u2014 as wide as this artwork fits on a `
+    + `${(ab[2] - ab[0]).toFixed(0)} mm board. The number stays at ${a.wmm} for when the `
+    + "board grows.";
+}
+// The node is always in the card so the width handler can refresh it in place:
+// a width edit calls draw(), not renderArtList(), and re-rendering the card
+// mid-drag would take the slider out from under the pointer.
+function showClamp(root, a) {
+  const el = root.querySelector(".clampnote");
+  if (!el) return;
+  const t = clampText(a);
+  el.textContent = t;
+  el.hidden = !t;
+}
+
 function approxNote(reason) {
   return `This SVG paints with ${reason}, which is not one flat colour per `
     + "shape, so the board is traced from a rendered copy of it instead of "
@@ -6311,20 +6364,23 @@ function renderArtList() {
         <div class="check"><input type="checkbox" class="inv" id="inv${i}"${a.invert ? " checked" : ""}><label for="inv${i}">Invert</label></div>`}
       <div class="sub">Width (mm)</div>
       ${pairHTML("wd", 3, 119, 0.5, a.wmm)}
+      <div class="sub clampnote" hidden></div>
       <div class="sub">Rotation (&deg;, clockwise); double-click the layer on the board for +90</div>
       ${dialHTML("rots", a.rot)}
       <div class="row" style="margin-top:6px">
         <div><button class="tool flipb">${a.flip ? "Unmirror" : "Mirror"}</button></div>
         <div><button class="tool repb" title="Swap the picture, keep position/size/transform">Change image…</button></div>
       </div>
+      ${usesInk(a) ? `<div class="sub">Silkscreen and copper keep clear of the connector pads, their captions, and any part on this face \u2014 ink cannot sit on solder, so art underneath one is trimmed away.</div>` : ""}
       ${a.approx ? `<div class="sub approxnote" title="${approxNote(a.approx)}">Traced from a rendered copy: this SVG paints with ${a.approx}, not flat colours.</div>` : ""}
-      <div class="sub">Magic wand: retarget one connected region <button class="qm" tabindex="-1" data-tip="wand" title="How the wand works">?</button></div>
+      <div class="sub">Magic wand: retarget one connected region <button class="qm" data-tip="wand" title="How the wand works">?</button></div>
       <div class="row">
         <div><select class="wandm">${Object.entries(WAND_MATS).map(([v, l]) => opt(v, l, "bare")).join("")}</select></div>
         <div><button class="tool wandb">Pick region</button></div>
       </div>
       <div class="ovchips">${chips}</div>`;
     div.querySelector(".fname").textContent = `${i + 1}. ${a.fname}`;
+    showClamp(div, a);
     const rebuild = () => {
       rebuildArt(a);
       draw();
@@ -6378,7 +6434,7 @@ function renderArtList() {
     };
     const inv = div.querySelector(".inv");
     if (inv) inv.onchange = e => { a.invert = e.target.checked; rebuild(); };
-    bindPair(div, "wd", v => { a.wmm = v; draw(); });
+    bindPair(div, "wd", v => { a.wmm = v; showClamp(div, a); draw(); });
     bindDial(div, "rots", v => {
       a.rot = v;
       applyTransform(a); rebuildArt(a); draw();
@@ -6817,7 +6873,7 @@ function renderLedList() {
       ${(PKG[L.size] || PKG["0805"]).drill && !L.reverse ? `<div class="sub">Leads pass through; solder on the far face. Short lead toward the bar.</div>` : ""}
       <div class="sub">Rotation (&deg;)</div>
       ${dialHTML("r", L.rot)}
-      <div class="check" style="margin-top:6px"><input type="checkbox" class="clk" id="clk${i}"${L.clk ? " checked" : ""}${pinOn("9") ? "" : " disabled"}><label for="clk${i}">Blink with the badge clock (CLK)</label> <button class="qm" tabindex="-1" data-tip="clk" title="How blinking works">?</button></div>
+      <div class="check" style="margin-top:6px"><input type="checkbox" class="clk" id="clk${i}"${L.clk ? " checked" : ""}${pinOn("9") ? "" : " disabled"}><label for="clk${i}">Blink with the badge clock (CLK)</label> <button class="qm" data-tip="clk" title="How blinking works">?</button></div>
       ${L.clk && pinOn("9")
         ? `<div class="sub">${state.clk.jumper
             ? `Routes to the solder jumper on the ${state.clk.side === "back" ? "back" : "front"}.`
@@ -6832,7 +6888,7 @@ function renderLedList() {
           return on.length
             ? ` <span class="advon">· ${on.join(" · ")}</span>`
             : ` <span class="advsum">· reverse mount, routing, placement</span>`;
-        })()} <button class="qm" tabindex="-1" data-tip="placement" title="Free placement and routing">?</button></summary>
+        })()} <button class="qm" data-tip="placement" title="Free placement and routing">?</button></summary>
         <div class="check"><input type="checkbox" class="rev" id="rev${i}"${L.reverse ? " checked" : ""}><label for="rev${i}">Reverse mount (shines through the board)</label></div>
         ${L.reverse ? `<div class="sub">Solder upside-down over the hole; glows out the ${L.side === "back" ? "front" : "back"}. 1206 only.</div>` : ""}
         <div class="check" style="margin-top:6px"><input type="checkbox" class="nvia" id="nvia${i}"${L.novia ? " checked" : ""}><label for="nvia${i}">No power via</label></div>
@@ -6984,7 +7040,7 @@ function renderClkOpts() {
   const needsVia = state.leds.some(L => L.clk && L.side === farFace);
   wrap.innerHTML = `
     <div class="item">
-      <div class="itemhead"><span>CLK hookup <button class="qm" tabindex="-1" data-tip="clk" title="How blinking works">?</button></span></div>
+      <div class="itemhead"><span>CLK hookup <button class="qm" data-tip="clk" title="How blinking works">?</button></span></div>
       <div class="check"><input type="radio" name="clkhook" class="cj" id="clkjump"${state.clk.jumper ? " checked" : ""}><label for="clkjump">Solder jumper (choose when soldering)</label></div>
       <div class="check"><input type="radio" name="clkhook" class="ct" id="clktrace"${state.clk.jumper ? "" : " checked"}><label for="clktrace">Direct trace to pin 9 (always blinks)</label></div>
       ${state.clk.jumper ? `
@@ -7218,6 +7274,12 @@ async function loadImageFile(f, cb) {
         raster: new File([b], f.name.replace(/\.svg$/i, "") + ".png", { type: "image/png" }),
         src, iw, ih,
       }) : failed(), "image/png");
+    } else if (iw * ih > MAX_INPUT_PIXELS) {
+      // Same numbers and the same reason the server gives, one step earlier.
+      failed(`${f.name} is ${iw} \u00d7 ${ih} pixels `
+        + `(${Math.round(iw * ih / 1e6)} megapixels), over the `
+        + `${MAX_INPUT_PIXELS / 1e6} megapixel limit. A badge is 20 mm across, so a `
+        + "few hundred pixels per side is plenty \u2014 scale the picture down and try again.");
     } else {
       once({ upload: f, raster: null, isSvg: false, dataUrl, approx: "", src, iw, ih });
     }
@@ -8173,6 +8235,7 @@ const TIPS = {
   art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
     <li>The same helmet PNG, added as artwork, loads in <b>By color</b> mode with a material guessed per color — check every row and fix the guesses (here the body is set to <i>Ignore</i>: plain soldermask).</li>
     <li>Hover a color row to light up exactly which pixels it controls.</li>
+    <li><b>Ink keeps off solder.</b> Silkscreen and copper are trimmed away where the connector pads, their captions, or a part on that face sit — so a logo placed under a blinker arrives with a bite out of it. Move the layer or the part if you want it whole; nothing is lost from the file.</li>
     <li>Art reaches the board as curves, not squares: a PNG or JPG is traced around its colors, and an SVG is taken straight from its own vector paths — or traced from a rendered copy, if it paints with gradients, which the layer tells you.</li>
     <li><b>Cut through board</b> removes the board itself — a real hole through copper, mask and laminate. The connector pads always keep a tab of board, and parts get moved off the hole (or flagged) automatically.</li>
   </ul>` },

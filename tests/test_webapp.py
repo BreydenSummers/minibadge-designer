@@ -134,8 +134,15 @@ def test_led_sides_pass_through_and_sanitize(client):
     )
     zf = zipfile.ZipFile(io.BytesIO(resp.data))
     bom = zf.read("sides/BOM.csv").decode()
-    assert "D1,LED red,LED 0805 (2012 metric),back" in bom
-    assert "D2,LED blue,LED 0805 (2012 metric),front" in bom
+    # The Side column is this test's subject: "back" must survive the round
+    # trip and "sideways" must fall back to front. Read the column rather than
+    # matching a whole row, so a change to how a part is named does not read
+    # as a side-handling regression.
+    sides = {row.split(",")[0]: row.split(",")[3]
+             for row in bom.strip().splitlines()[1:]}
+    assert sides["D1"] == "back" and sides["R1"] == "back"
+    assert sides["D2"] == "front" and sides["R2"] == "front"
+    assert "red" in bom and "blue" in bom
 
 
 def test_overlapping_leds_get_nudged_apart(client):
@@ -2808,3 +2815,47 @@ def test_the_preview_resolves_artwork_at_the_pitch_the_tracer_samples_it_at():
         f"the preview caps art at {m.group(2)} cells across and the server at "
         f"{logo.MAX_TRACE_COLS}: on artwork wider than the cap the two "
         "disagree about how much detail survives")
+
+
+@pytest.mark.webapp
+@pytest.mark.parametrize(
+    "name,expect",
+    [
+        # An accented name folds to the letters it is made of, rather than
+        # losing them: this is the case that made "n_c_d" out of a real word.
+        ("naïve café", "naive_cafe"),
+        ("Grüße", "Gru_e"),
+        # Nothing to fold: a script that does not decompose to ASCII leaves an
+        # empty slug, and a generic folder beats a meaningless one.
+        ("名前", "minibadge"),
+        ("Ω", "minibadge"),
+        # Off the defaults in the other direction: short names keep their own
+        # title (a length floor would have eaten these), and the sanitiser's
+        # existing duties still hold.
+        ("v2", "v2"),
+        ("../../etc/passwd", "etc_passwd"),
+    ],
+)
+def test_a_project_name_reaches_the_zip_as_something_its_owner_can_recognise(
+        client, project_files, name, expect):
+    """The folder in the download is named after the badge, not after whatever
+    survived an ASCII filter.
+
+    The KiCad project's folder and file names have to be portable, so they are
+    slugged; the question is what happens to the characters that cannot survive
+    that. Dropping them turned "ünïcødé" into "n_c_d" — a name its owner cannot
+    recognise on their own disk, which is the same failure as naming the folder
+    at random.
+    """
+    resp = client.post(
+        "/generate",
+        data={"params": json.dumps(_params(name=name))},
+        content_type="multipart/form-data",
+    )
+    files = project_files(resp)
+    folders = {n.split("/")[0] for n in files if "/" in n}
+    assert folders == {expect}, (
+        f"{name!r} produced {folders}, not {expect!r}: the download is named "
+        "something its owner would not recognise")
+    assert f"{expect}/{expect}.kicad_pcb" in files, (
+        f"the board file inside is not named {expect} either")
