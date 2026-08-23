@@ -1393,6 +1393,15 @@ function requestOutline(immediate) {
       s.ringsRev = (s.ringsRev || 0) + 1;
     }
     const moved = relocateStrandedLeds();
+    // A new outline can take the board out from under the jumper (a cut over
+    // its corner, a shape that no longer reaches it). Units first, then the
+    // jumper yields -- the same order the server uses, and the same reason:
+    // without it the canvas keeps drawing the jumper on board that is gone
+    // while the server puts it somewhere else entirely.
+    if (jumperYielded()) {
+      setStatus("The CLK jumper moved onto the new shape; its rail via went "
+        + "with it.");
+    }
     renderTextList(); // edge/hole warnings track the new outline
     // The server answering /outline is not an edit. draw() is where the design
     // gets marked unsaved, so drawing on a reply used to mark a design dirty
@@ -3232,6 +3241,27 @@ function relocateJumper() {
       }
     }
   }
+}
+// Run the walk and say whether the jumper actually moved.
+//
+// Every path that reshapes a blinking unit has to call this, not just the ones
+// that create the situation from nothing. `relocateJumper` was wired only to
+// the events that switch the hookup on (the blink tick, the hookup radio, the
+// jumper's own side and rotation); a unit that changed PACKAGE, LAYOUT,
+// ROTATION or SIDE afterwards grew onto the jumper with nothing re-running it.
+// The server yields the jumper regardless -- units are placed first -- so the
+// canvas went on drawing it where it no longer goes. Measured through the UI
+// on a blinking 0805 on the back at (10, 15): stepping the package to 1206
+// moved the shipped jumper (and its rail via) 0.71 mm off what the preview
+// showed, and from 0603 the same step left NO legal spot at all, so the
+// preview stayed happy while Download failed on the server's refusal.
+function jumperYielded() {
+  const before = clkActive() && state.clk.jumper ? clkInfo() : null;
+  if (!before) return false;
+  relocateJumper();
+  const after = clkInfo();
+  return !!after && (Math.abs(after.jumper[0] - before.jumper[0]) > 1e-9
+                     || Math.abs(after.jumper[1] - before.jumper[1]) > 1e-9);
 }
 // A unit may not park on the jumper either: the server would then move the
 // JUMPER and the shipped board would no longer match the preview.
@@ -6600,6 +6630,15 @@ function blockingProblems() {
     out.push(["an LED blinks with CLK but connector pin 9 is dropped", "pins", -1]);
   }
   {
+    // No legal spot left for the jumper is a refusal on the server ("no room
+    // for the CLK jumper on this board"), so it has to be one here too. The
+    // standing warning already says to drag it clear; without this the
+    // download went ahead, the server either moved the jumper somewhere the
+    // preview never showed or refused outright, and the user got no warning
+    // that the button was going to fail.
+    if (jumperConflict()) {
+      out.push(["the CLK jumper has nowhere clear to sit", "jumper", -1]);
+    }
     const lk = clkLink();
     if (lk && lk.tight) out.push(["the CLK jumper can't reach pin 9", "led", -1]);
     const v3l = clkV3Link();
@@ -6945,6 +6984,11 @@ function renderLedList() {
             + "with room (it's outlined red) or undo the change.", true);
         }
       }
+      // The unit has settled; now the jumper yields to it, as on the server.
+      if (jumperYielded()) {
+        setStatus(`The CLK jumper moved clear of LED ${i + 1}; its rail via `
+          + "went with it.");
+      }
       refreshWarnings();
     };
     div.querySelector(".itemhead button").onclick = () => {
@@ -6955,7 +6999,16 @@ function renderLedList() {
     // Re-render the card: the side decides whether the back-visibility note
     // belongs there, so leaving the old markup up contradicts the control.
     div.querySelector(".s").onchange = e => {
-      L.side = e.target.value; pushApart(i); renderLedList(); draw();
+      L.side = e.target.value; pushApart(i);
+      // Not routed through `reposition`, so it needs the jumper yield of its
+      // own: a unit that changes face keeps its footprint and can still be
+      // the thing the jumper has to get out from under.
+      const moved = jumperYielded();
+      renderLedList(); draw();
+      if (moved) {
+        setStatus(`The CLK jumper moved clear of LED ${i + 1}; its rail via `
+          + "went with it.");
+      }
     };
     bindDial(div, "r", v => { L.rot = v; reposition(); draw(); });
     div.querySelector(".l").onchange = e => { L.layout = e.target.value; reposition(); draw(); };
@@ -6974,8 +7027,14 @@ function renderLedList() {
       L.clk = e.target.checked;
       if (!L.clk) delete L.cnodes; // the supply run those bends shaped is gone
       // Enabling CLK may drop the jumper onto a unit that was already
-      // there; the jumper yields, like it does on the server.
-      relocateJumper();
+      // there; the jumper yields, like it does on the server. Say so: it can
+      // travel most of the board (a back unit sitting over the jumper's home
+      // pushes it ~9 mm up), and a via appearing in open board with no
+      // explanation reads as the app inventing copper.
+      if (jumperYielded()) {
+        setStatus("The CLK jumper moved clear of the LEDs; its rail via went "
+          + "with it, and it can be dragged anywhere clear.");
+      }
       renderLedList(); reposition(); draw(); m3dStale("CLK routing changed");
     };
     div.querySelector(".farled").onchange = e => {
@@ -7083,7 +7142,12 @@ function renderClkOpts() {
   const viaBox = wrap.querySelector(".jvia");
   if (viaBox) viaBox.onchange = e => {
     state.clk.via = e.target.checked;
+    // The rail via and its stub ARE jumper copper: turning them on grows the
+    // jumper toward whatever sits above it, which can make its own spot
+    // illegal. Same yield as any other change to that footprint.
+    const moved = jumperYielded();
     renderLedList(); draw(); m3dStale("CLK via changed");
+    if (moved) setStatus("The CLK jumper moved to make room for its rail via.");
   };
   // Same relocate the canvas gesture runs: a turn can swing the CLK/3V3
   // captions off the board, and the jumper is placed by the app, not pinned.

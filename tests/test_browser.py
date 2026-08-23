@@ -4721,3 +4721,148 @@ def test_the_illustrated_help_can_be_reached_without_a_mouse(ui):
     page.wait_for_timeout(300)
     assert not page.evaluate(shown), "Escape did not close the tip"
     ui.assert_clean()
+
+
+#: Controls that change the room a unit claims *after* the CLK hookup is on,
+#: which is the half `relocateJumper` was never wired to. Crowding the board
+#: so that NO legal spot is left was tried as a fourth case and dropped: the
+#: same handler relocates the unit first, so the jumper never ends up
+#: stranded that way and the case proved nothing the three below do not.
+_RESHAPE = [("package", ".pk", "1206"), ("layout", ".l", "inline"),
+            ("side", ".s", "front")]
+
+
+def _built_jumper(client, params, slug="jumperparity"):
+    """Where the BOARD puts the CLK jumper, for a design the page just built.
+
+    Returns ``(position, None)`` or ``(None, error)``: a refusal is an answer
+    too -- it means the download promised nothing -- and the caller decides
+    which of those the guarantee allows.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+
+    params = dict(params, name=slug)
+    resp = client.post("/generate", data={"params": json.dumps(params)})
+    if resp.status_code != 200:
+        return None, resp.get_json().get("error", "")
+    board = invariants.Board(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        f"{slug}/{slug}.kicad_pcb").decode())
+    return next(((x, y) for _n, _l, x, y, ref, _f in board.footprints
+                 if ref == "JP1"), None), None
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("what,sel,value", _RESHAPE,
+                         ids=[r[0] for r in _RESHAPE])
+def test_the_previewed_clk_jumper_is_the_one_the_board_gets(ui, client, what,
+                                                            sel, value):
+    """The preview never shows a CLK jumper the download will not build.
+
+    The jumper is placed by the app, not by the user, and the server always
+    yields it when a unit is in the way -- units are placed first. The canvas
+    mirrors that walk in `relocateJumper`, but it was only wired to the events
+    that turn the hookup ON. Change the unit *afterwards* -- its package,
+    layout or side, or the rail-via tick -- and nothing re-ran it: the canvas
+    kept drawing the jumper at its old spot while the server moved it, so the
+    badge shipped with a via the user was never shown, sitting in the middle
+    of the board. Reported from exactly that: "it seems to be generating
+    unneeded ground vias when the LED is on the back".
+
+    Driven through the real controls on purpose. Writing `state` and calling
+    `draw()` -- the way the parity tests above set their designs -- bypasses
+    the handlers this guards, so it would pass on the broken code.
+
+    Either position agrees with the board, or the download is refused with a
+    reason: a refusal promises nothing, and "no room for the CLK jumper" is
+    what the server says when the walk finds nowhere legal.
+    """
+    import json
+
+    page = ui.page
+    page.click("#tab-leds")
+    # Setup only: one blinking unit on the back, parked over the jumper's home
+    # so that any growth of it collides. The controls do the rest.
+    ui.js("""(led) => {
+        state.leds = [led]; renderLedList(); draw();
+    }""", _js_led(x=10.0, y=15.0, side="back", size="0805", layout="stacked"))
+    row = "#ledlist .item:first-child"
+    page.locator(f"{row} .clk").check()          # this path already yielded
+    before = ui.js("() => clkInfo().jumper")
+
+    page.select_option(f"{row} {sel}", value)    # the path under test
+
+    drawn = ui.js("() => clkInfo().jumper")
+    built, refused = _built_jumper(
+        client, json.loads(ui.js('() => designFormData().get("params")')))
+
+    if refused is not None:
+        # Believed unreachable through the UI (the unit is relocated first),
+        # so this is a guard rather than a covered branch: if it ever does
+        # happen, the editor has to have said so before the click.
+        assert ui.js("() => blockingProblems().map(p => p[0])"), (
+            f"changing the {what} left the server unable to build the board "
+            f"({refused!r}) while the editor reported no blocking problem at "
+            "all: Download fails with no warning")
+        return
+    assert built, "the board carries no CLK jumper at all"
+    gap = max(abs(drawn[0] - built[0]), abs(drawn[1] - built[1]))
+    assert gap <= 0.01, (
+        f"after changing the {what}, the preview draws the CLK jumper at "
+        f"{(round(drawn[0], 2), round(drawn[1], 2))} and the board builds it "
+        f"at {(round(built[0], 2), round(built[1], 2))} -- {gap:.2f} mm apart "
+        f"(it started at {(round(before[0], 2), round(before[1], 2))}); its "
+        "rail via moves with it, so the user approves a board with a via "
+        "somewhere they never saw one")
+
+
+@pytest.mark.browser
+def test_a_new_board_shape_takes_the_previewed_jumper_with_it(ui, client):
+    """Cutting the board under the CLK jumper moves it in the preview too.
+
+    Same guarantee as the reshape cases above, reached the other way: the
+    jumper is placed by the app, and a new outline can take the board out from
+    under it (a cut over its corner, a silhouette that no longer reaches it).
+    `/outline`'s reply already relocates stranded LEDs; the jumper was left
+    where it was, so the canvas drew it on board that no longer existed while
+    the server put it somewhere else and built THAT -- with its rail via, a
+    via the user never saw.
+    """
+    import json
+
+    page = ui.page
+    ui.js("""(led) => { state.leds = [led]; renderLedList(); draw(); }""",
+          _js_led(x=6.0, y=6.0, clk=True))
+    home = ui.js("() => clkInfo().jumper")
+
+    # A cut across the bottom strip, which is where the jumper lives.
+    ui.js("""() => {
+        state.shape.elements = [{kind: 'rect', op: 'cut', cx: 10.16, cy: 19.2,
+                                 w: 12, h: 3.5, rot: 0}];
+        requestOutline(true);
+    }""")
+    page.wait_for_function("() => state.shape.rings !== null",
+                           timeout=GENERATE_TIMEOUT)
+
+    drawn = ui.js("() => clkInfo().jumper")
+    assert (drawn[0], drawn[1]) != (home[0], home[1]), (
+        "the cut removed the board under the jumper and the preview left it "
+        "there; nothing below would tell us whether the two agree by accident")
+    built, refused = _built_jumper(
+        client, json.loads(ui.js('() => designFormData().get("params")')),
+        slug="jumpershape")
+    if refused is not None:
+        assert ui.js("() => blockingProblems().map(p => p[0])"), (
+            f"the shape left the server unable to build the board ({refused!r}) "
+            "while the editor reported no blocking problem: Download fails "
+            "with no warning")
+        return
+    assert built, "the board carries no CLK jumper at all"
+    gap = max(abs(drawn[0] - built[0]), abs(drawn[1] - built[1]))
+    assert gap <= 0.01, (
+        f"after the cut the preview draws the CLK jumper at "
+        f"{(round(drawn[0], 2), round(drawn[1], 2))} and the board builds it "
+        f"at {(round(built[0], 2), round(built[1], 2))} -- {gap:.2f} mm apart")
