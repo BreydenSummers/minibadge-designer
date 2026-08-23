@@ -2017,11 +2017,15 @@ def _generate_impl(render: bool):
 
             # nodes bend the via-less run; anodes/vnodes bend the unit's two
             # internal traces (resistor-to-anode link, pad-to-via stub);
-            # cnodes bend the CLK supply run.
+            # cnodes bend the CLK supply run; bnodes/bfnodes bend the two
+            # perimeter bridges (rail pad's, and the power via's on the far
+            # face).
             nodes = _bends("nodes")
             anodes = _bends("anodes")
             vnodes = _bends("vnodes")
             cnodes = _bends("cnodes")
+            bnodes = _bends("bnodes")
+            bfnodes = _bends("bfnodes")
             clk = bool(raw.get("clk"))
             # Where the via-less run ends: a chosen connector pad or another
             # unit's pad. Shape-checked only: net, kept-pin, face and chain
@@ -2049,14 +2053,16 @@ def _generate_impl(render: bool):
                           size=size, reverse=reverse, novia=novia,
                           nodes=nodes, anodes=anodes, vnodes=vnodes,
                           term=term, farled=farled, adv=adv,
-                          clk=clk, cnodes=cnodes)
+                          clk=clk, cnodes=cnodes,
+                          bnodes=bnodes, bfnodes=bfnodes)
             x, y = pcb.clamp_led_obj(led, safe)
             leds.append(pcb.Led(x=x, y=y, color=color, side=side, rot=rot,
                                 layout=layout, size=size, reverse=reverse,
                                 novia=novia, nodes=nodes, anodes=anodes,
                                 vnodes=vnodes, term=term,
                                 farled=farled, adv=adv,
-                                clk=clk, cnodes=cnodes))
+                                clk=clk, cnodes=cnodes,
+                                bnodes=bnodes, bfnodes=bfnodes))
     except (TypeError, ValueError, AttributeError):
         return {"error": "invalid led parameters"}, 400
     # Placing the units is pure geometry over user-supplied numbers, so a
@@ -2361,13 +2367,21 @@ def _generate_impl(render: bool):
                for x, y, r in pcb.th_pad_circles(led, safe)]
             for side in ("front", "back")
         }
+        # Whether this design has a light window at all, worked out from the
+        # request rather than from spec.art: the art layers do not exist yet
+        # (they are carved with these very bridges in hand), and a pad's
+        # perimeter bridge is only cut when a window could sever it. A window
+        # text counts exactly like window artwork -- it IS a window.
+        window_art = any(t.material in ("glow", "bare") for t in texts) or any(
+            (src if isinstance(src, dict) else getattr(src, "grids", {})).get(m)
+            for _i, src, _w, _s in classified for m in ("glow", "bare"))
         bridges = pcb.unit_bridges(
             pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds,
                           clk_jumper=clk_jumper, jumper=jpos,
                           jumper_rot=jrot, jumper_side=jside,
                           jumper_via=jvia, jumper_nodes=jnodes,
                           jumper_v3nodes=jv3nodes,
-                          jumper_v3pin=jv3pin), safe
+                          jumper_v3pin=jv3pin), safe, windows=window_art
         )
         # A window has to keep clear of anything whose copper it would cut. A glow
         # window cuts both faces, so it avoids every unit. A bare window that opens
@@ -2696,6 +2710,20 @@ def _generate_impl(render: bool):
                             "move the jumper (or the LEDs in the way), or "
                             "switch it back to feeding 3V3 through a via")
             }, 400
+    # A perimeter bridge is editable like any other trace, so its bends can be
+    # dragged somewhere the board cannot carry. Judged on the RESOLVED units
+    # (placement has settled by now) and with the same window answer the
+    # bridges were placed with, or a design with no window would be asked
+    # about bridges it does not cut.
+    for i, layer in pcb.bridge_problems(
+            _dc_replace(spec, leds=resolved), safe, windows=window_art):
+        face = "front" if layer == "F.Cu" else "back"
+        return {
+            "error": f"LED {i + 1}: a bend on its {face}-face bridge to the "
+                     "pour runs too close to other copper (or leaves it no "
+                     "way out to the board edge); drag the bend clear, or "
+                     "select it and press Delete"
+        }, 400
     spec = _dc_replace(spec, leds=resolved)
     slug = _slug(name)
 

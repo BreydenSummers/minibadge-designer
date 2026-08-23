@@ -79,12 +79,20 @@ def test_connector_pads_and_nets():
 
 
 def test_led_units_scale_with_count():
+    window = [pcb.ArtLayer("bare", [(4.0, 9.0, 12.0, 6.0)])]
     for n in (0, 1, 2):
         out = pcb.generate_pcb(_spec(n))
         assert out.count("(via ") == n
         assert len(re.findall(r'footprint "minibadge-designer:', out)) == 2 * n  # LED + resistor
-        # 2 unit traces + 2 perimeter bridges (F 3V3 + B GND) per unit
-        assert out.count("(segment ") == 4 * n
+        # 2 unit traces + the via's own perimeter bridge per unit. The PAD's
+        # bridge is not cut on a board with no window: the pad already sits
+        # in its pour and nothing could sever it (pcb.unit_bridges).
+        assert out.count("(segment ") == 3 * n
+        # Add a window and it appears -- one more segment per unit, and the
+        # count is what says the bridge is per unit rather than per board.
+        spec = _spec(n)
+        spec.art = list(window)
+        assert pcb.generate_pcb(spec).count("(segment ") == 4 * n
     assert '"/LED2_A"' in pcb.generate_pcb(_spec(2))
     assert '"/LED2_A"' not in pcb.generate_pcb(_spec(1))
 
@@ -476,12 +484,22 @@ def test_back_led_lands_on_back_layers(layout, size, rot):
     assert fps == ["B", "B"]
     assert '(layers "B.Cu" "B.Paste" "B.Mask")' in out
     assert '(layers "F.Cu" "F.Paste" "F.Mask")' not in out
-    # Back unit's via carries 3V3 up to the front pour; its own traces live
-    # on B.Cu (2) plus the GND perimeter bridge (1). The only F.Cu segment
-    # is the 3V3 bridge from the via to the ring.
+    # Back unit's via carries 3V3 up to the front pour; its own two traces
+    # live on B.Cu. The only F.Cu segment is the 3V3 bridge from the via to
+    # the ring. Its GND pad gets no bridge here: this board has no window, so
+    # nothing could sever the pad from the pour it already sits in.
     assert re.search(r"\(via .*\(net 1\)", out)
-    assert len(re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\)', out)) == 3, \
-        "a back unit's own traces plus its GND perimeter bridge live on B.Cu"
+    assert len(re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\)', out)) == 2, \
+        "a back unit's own two traces live on B.Cu"
+    # Put a window over it and the GND bridge is cut, because now something
+    # CAN sever the pad: that is the whole condition, checked on the same
+    # unit rather than on a board built for the purpose.
+    windowed = pcb.generate_pcb(pcb.BadgeSpec(
+        leds=[pcb.Led(10.0, 10.0, "green", side="back",
+                      layout=layout, size=size, rot=rot)],
+        art=[pcb.ArtLayer("bare", [(3.0, 3.0, 14.0, 14.0)])]))
+    assert len(re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\)', windowed)) == 3, \
+        "a window can sever the GND pad, so its perimeter bridge is cut"
     # The inline cases are the regression gate for the far-layer bridge scan:
     # inline puts the via 1.0 mm from the resistor pad center, INSIDE that
     # pad's inflated art-keepout quad. When the scan treated the unit's own
@@ -1477,3 +1495,49 @@ def test_one_face_bare_window_leaves_the_other_pour_alone():
                          art=[pcb.ArtLayer("bare", [win], window="through")])
     assert not any(p.contains(at) for p in pcb._fill_geometry("3V3", "F.Cu", spec))
     assert not any(p.contains(at) for p in pcb._fill_geometry("GND", "B.Cu", spec))
+
+
+def test_a_hand_bent_perimeter_bridge_is_built_through_its_bends():
+    """A bridge the user shaped is the bridge the board carries.
+
+    The perimeter bridges were the one piece of routed copper on the board
+    nobody could touch: no bends, and not even drawn in the editor. So a
+    ground trace appeared in the 3D view, running from a unit to the board
+    edge, that its owner had never seen and could not move. They are editable
+    like every other trace now, which is only true if the bends actually reach
+    the board -- and if a bend the router cannot honour is reported rather
+    than quietly straightened, because a trace that ignores where it was put
+    is worse than one that cannot be placed at all.
+    """
+    window = [pcb.ArtLayer("bare", [(3.0, 3.0, 14.0, 14.0)])]
+    bend = (8.975, 14.0)          # straight out of the cathode pad, clear
+    spec = pcb.BadgeSpec(
+        leds=[pcb.Led(10.0, 10.0, "red", side="back", bnodes=(bend,))],
+        art=list(window))
+    pts = pcb.unit_bridges(spec)[0]["B.Cu"]
+    assert pts and len(pts) >= 3, (
+        f"a bend was placed and the route came back as {pts}: the bridge is "
+        "still the straight two-point run, so the bend never reached the board")
+    assert min(abs(px - bend[0]) + abs(py - bend[1]) for px, py in pts) < 1e-6, \
+        f"the bend at {bend} is not one of the route's own points: {pts}"
+    assert not pcb.bridge_problems(spec), \
+        "a bend with clear board around it was reported as unroutable"
+
+    # Every leg reaches the file: the emitter used to write one segment per
+    # bridge, which would have dropped everything past the first bend.
+    out = pcb.generate_pcb(spec)
+    legs = re.findall(
+        r'\(segment \(start ([\d.]+) ([\d.]+)\) \(end ([\d.]+) ([\d.]+)\)'
+        r'[^\n]+\(layer "B\.Cu"\) \(net 2\)', out)
+    assert len(legs) == len(pts) - 1, (
+        f"the route has {len(pts) - 1} legs and the board carries "
+        f"{len(legs)} GND segments on B.Cu")
+
+    # And a bend that drags the trace across the unit's own anode pad is a
+    # problem, named per unit and layer, not silently re-routed.
+    bad = pcb.BadgeSpec(
+        leds=[pcb.Led(10.0, 10.0, "red", side="back", bnodes=((13.0, 12.0),))],
+        art=list(window))
+    assert pcb.bridge_problems(bad) == [(0, "B.Cu")], (
+        "a bend that puts the bridge through the unit's own pad has to be "
+        "reported: the board would ship a short")
