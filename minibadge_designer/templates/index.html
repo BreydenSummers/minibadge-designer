@@ -1048,15 +1048,23 @@ function ensureFont(key) { // lazy @font-face + ink metrics for the preview
 const isShapeArt = a => a.kind && a.kind !== "image";
 const artShapeEl = a => ({ kind: a.kind, cx: a.cx, cy: a.cy, w: a.wmm, h: a.h || a.wmm, rot: a.rot || 0, sides: a.sides || 6 });
 const layerHasMat = (a, mat) => isShapeArt(a) ? a.material === mat : !!(a.caches && a.caches[mat]);
-const usesBare = a => isShapeArt(a) ? a.material === "bare"
-  : (a.mode === "threshold" ? a.material === "bare"
-     : a.palette.some(p => p.material === "bare")) || a.overrides.some(o => o.material === "bare");
+// Does this layer ASK for a material (as drawn, before classification)? Read
+// off the layer's own controls rather than its caches, so it answers the same
+// on a layer whose image has not been classified yet.
+const usesMat = (a, mat) => isShapeArt(a) ? a.material === mat
+  : (a.mode === "threshold" ? a.material === mat
+     : a.palette.some(p => p.material === mat)) || a.overrides.some(o => o.material === mat);
+const usesBare = a => usesMat(a, "bare");
 // Cut-material regions remove the board itself: they subtract from the
 // outline server-side, and the preview punches them out of the board mask.
-const usesCut = a => isShapeArt(a) ? a.material === "cut"
-  : (a.mode === "threshold" ? a.material === "cut"
-     : a.palette.some(p => p.material === "cut")) || a.overrides.some(o => o.material === "cut");
+const usesCut = a => usesMat(a, "cut");
 const artHasCut = () => state.art.some(usesCut);
+// Is there a light window anywhere in this design? A window text IS a window.
+// Mirrors the `has_window` test in pcb.unit_bridges, which is what decides
+// whether a unit's pad gets a perimeter bridge at all.
+const designHasWindow = () =>
+  state.art.some(a => usesMat(a, "glow") || usesMat(a, "bare"))
+  || state.texts.some(t => isWindowText(t));
 // Whether anything at all carves the board away from the standard square:
 // an outline part, or an art layer with cut regions.
 const boardCarved = () => customActive() || artHasCut();
@@ -2186,7 +2194,11 @@ function soften45(pts, ok, owners) {
 // Which Led field holds each trace's hand-placed bends: the via-less run
 // ("run"), the resistor-to-anode link ("a"), the pad-to-via stub ("v"),
 // the CLK supply run ("c").
-const NODE_KEYS = { run: "nodes", a: "anodes", v: "vnodes", c: "cnodes" };
+const NODE_KEYS = { run: "nodes", a: "anodes", v: "vnodes", c: "cnodes",
+                    // The two perimeter bridges: "b" is the one off the rail
+                    // pad (on the unit's own face), "bf" the one off the power
+                    // via (on the far face).
+                    b: "bnodes", bf: "bfnodes" };
 // The jumper's two routed links keep their bends on state.clk instead:
 // "link" is the CLK-pad-to-pin-9 trace, "v3" the 3V3-pad-to-3V3-pin trace.
 const JNODE_KEYS = { link: "nodes", v3: "v3nodes" };
@@ -2968,16 +2980,54 @@ function bridgeRoute(start, ownPieces, skip, obstacles, rings) {
   }
   return null;
 }
+// Mirrors pcb._bridge_leg_clear: one leg's 1.0 mm swath against the copper it
+// has to miss, so a hand-placed bend is judged by the rule that picked the
+// automatic route. `own` has already had the piece the bridge starts from
+// taken out of it.
+function bridgeLegClear(a, b, own, obstacles) {
+  const [ax, ay] = a, [bx, by] = b;
+  const dx = bx - ax, dy = by - ay, ln = Math.hypot(dx, dy);
+  if (ln < 1e-9) return true;
+  const nx = -dy / ln * 0.5, ny = dx / ln * 0.5;
+  const swath = [[ax + nx, ay + ny], [bx + nx, by + ny],
+                 [bx - nx, by - ny], [ax - nx, ay - ny]];
+  return !own.some(q => !polysClear(swath, q, 0))
+    && !obstacles.some(q => !polysClear(swath, q, 0));
+}
+// Mirrors pcb._bridge_through_bends: the bends stay where they were put, the
+// corners between them soften into 45s, and the LAST leg is still routed by
+// the ray scan so a hand-bent bridge ends the same BRIDGE_INSET back from the
+// outline. -> {pts, ok} | null.
+function bridgeThroughBends(start, bends, ownPieces, skip, obstacles, rings) {
+  const last = bends[bends.length - 1];
+  const tail = bridgeRoute([+last[0], +last[1]], ownPieces, skip, obstacles, rings);
+  if (!tail) return null;
+  const raw = [start, ...bends.map(n => [+n[0], +n[1]]), tail[1]];
+  const { pts, owners } = mitre45(raw, () => true, raw.map((_p, i) => i));
+  const own = ownPieces.filter(([lbl]) => !skip.includes(lbl)).map(([, q]) => q);
+  let ok = true;
+  for (let i = 0; i + 1 < pts.length; i++) {
+    if (!bridgeLegClear(pts[i], pts[i + 1], own, obstacles)) ok = false;
+  }
+  return { pts, owners, ok };
+}
 let _bridgeCache = { key: "", map: [] };
-function allBridges() { // {F: seg|null, B: seg|null} per LED, memoized
+function allBridges() { // {F: {pts,ok}|null, B: ...} per LED, memoized
   const key = JSON.stringify([
     state.leds.map(L => [L.x, L.y, L.rot, L.layout, L.size, !!L.reverse, L.side,
                          !!L.novia, !!L.clk, L.adv, L.nodes || null, L.anodes || null,
-                         L.vnodes || null, L.cnodes || null, L.term || null]),
+                         L.vnodes || null, L.cnodes || null, L.term || null,
+                         L.bnodes || null, L.bfnodes || null]),
     state.clk, [...state.pins],
     state.shape.ringsRev || 0,
+    // A pad's bridge exists only while the design has a window, so adding or
+    // removing one changes every bridge on the board -- and this memo used to
+    // key on the units alone, so it answered from a cache built before the
+    // window existed.
+    designHasWindow(),
   ]);
   if (_bridgeCache.key === key) return _bridgeCache.map;
+  const hasWindow = designHasWindow();
   const rings = boardRings();
   const pads = PADS.map(([px, py]) => {
     const hw = 1.225;
@@ -3018,6 +3068,10 @@ function allBridges() { // {F: seg|null, B: seg|null} per LED, memoized
     for (const [layer, spec] of Object.entries(starts)) {
       if (!spec) continue;   // via-less: nothing of this unit on the far layer
       const [lbl, off] = spec;
+      // Mirrors pcb.unit_bridges: a pad already sits in its own pour, so its
+      // bridge is only worth cutting when a window could sever it. A via's
+      // collar can be the only copper tying it to the plane, window or not.
+      if (lbl !== "via" && !hasWindow) continue;
       let own = pieces[i];
       if (lbl === "via") {
         // Mirrors pcb.unit_bridges: this bridge runs on the unit's FAR layer,
@@ -3030,8 +3084,17 @@ function allBridges() { // {F: seg|null, B: seg|null} per LED, memoized
                                        : ["hole"]);
         own = own.filter(([l]) => keep.has(l));
       }
-      out[layer] = bridgeRoute(unitPoint(L, off[0], off[1]), own,
-                               BRIDGE_EXCLUDE[lbl], obstacles, rings);
+      // bfnodes bends the via's bridge, bnodes the rail pad's: the two run on
+      // different faces and are dragged separately, exactly as on the server.
+      const start = unitPoint(L, off[0], off[1]);
+      const bends = (lbl === "via" ? L.bfnodes : L.bnodes) || [];
+      if (bends.length) {
+        out[layer] = bridgeThroughBends(start, bends, own,
+                                        BRIDGE_EXCLUDE[lbl], obstacles, rings);
+        continue;
+      }
+      const seg = bridgeRoute(start, own, BRIDGE_EXCLUDE[lbl], obstacles, rings);
+      out[layer] = seg ? { pts: seg, owners: [0], ok: true } : null;
     }
     return out;
   });
@@ -4014,6 +4077,60 @@ function eraseArtKeepouts(oc, forWindows, unitSide) {
 // _window_mask_covers): each bridge is roofed by a 0.5 mm dam of mask, and a
 // tented via keeps its cap. Paint board-mask strips back over the window
 // pixels (source-atop clips to them); with tenting off the via plates bare.
+// Every bridge that runs on the face being drawn, as copper with its bends.
+//
+// These traces were on the board and nowhere in the editor: a user with a
+// blinking unit on the back saw a ground trace appear in the 3D view running
+// off to the board edge, having never been shown it, and read it as the app
+// inventing copper. Drawn here rather than in drawUnitGeometry because a
+// bridge belongs to a LAYER, not to a part: a unit's far-face bridge runs on
+// the side where the unit itself is only a ghost.
+function drawBridges(c, mirror) {
+  const layer = mirror ? "B" : "F";
+  const bridges = allBridges();
+  const path = (pts) => {
+    c.beginPath();
+    c.moveTo(mm2px(pts[0][0]), mm2px(pts[0][1]));
+    for (let i = 1; i < pts.length; i++) c.lineTo(mm2px(pts[i][0]), mm2px(pts[i][1]));
+    c.stroke();
+  };
+  c.lineCap = "round";
+  for (const br of bridges) {
+    const b = br[layer];
+    if (!b) continue;
+    c.strokeStyle = "rgba(0,0,0,.16)";        // the pour's clearance halo
+    c.lineWidth = (0.3 + 0.7) * SCALE;
+    path(b.pts);
+    // A bend the router cannot honour is drawn in the warning colour instead
+    // of quietly re-routed: the download refuses it by name, and the user has
+    // to see which trace is being complained about.
+    c.strokeStyle = b.ok
+      ? (state.mask === "white" ? "rgba(60,60,60,.25)" : "rgba(255,255,255,.18)")
+      : "rgba(255,90,70,.85)";
+    c.lineWidth = 0.3 * SCALE;
+    path(b.pts);
+  }
+  // Handles last, so they sit on top of every trace.
+  state.leds.forEach((L, i) => {
+    const b = br_key(L, layer);
+    if (!bridges[i][layer]) return;
+    const list = L[NODE_KEYS[b]] || [];
+    for (let k = 0; k < list.length; k++) {
+      const sel = selected && selected.kind === "lednode"
+        && state.leds[selected.index] === L && selected.trace === b
+        && selected.node === k;
+      c.beginPath();
+      c.arc(mm2px(list[k][0]), mm2px(list[k][1]), (sel ? 0.5 : 0.42) * SCALE, 0, 7);
+      c.fillStyle = padCol(); c.fill();
+      c.lineWidth = Math.max(1, (sel ? 0.14 : 0.08) * SCALE);
+      c.strokeStyle = sel ? "#6fb2ff" : "rgba(255,255,255,.85)"; c.stroke();
+    }
+  });
+}
+// Which bend list belongs to the bridge this unit runs on `layer`: the one on
+// the unit's own face starts at its rail pad ("b"), the other at the via.
+const br_key = (L, layer) =>
+  ((L.side === "back") === (layer === "B")) ? "b" : "bf";
 function strokeBridgesInWindows(oc, viewSide) {
   const layer = viewSide === "back" ? "B" : "F";
   const bridges = allBridges();
@@ -4023,11 +4140,11 @@ function strokeBridgesInWindows(oc, viewSide) {
   oc.lineWidth = 0.5 * SCALE;
   oc.lineCap = "butt";
   for (const br of bridges) {
-    const seg = br[layer];
-    if (!seg) continue;
+    const pts = br[layer] && br[layer].pts;
+    if (!pts) continue;
     oc.beginPath();
-    oc.moveTo(mm2px(seg[0][0]), mm2px(seg[0][1]));
-    oc.lineTo(mm2px(seg[1][0]), mm2px(seg[1][1]));
+    oc.moveTo(mm2px(pts[0][0]), mm2px(pts[0][1]));
+    for (let i = 1; i < pts.length; i++) oc.lineTo(mm2px(pts[i][0]), mm2px(pts[i][1]));
     oc.stroke();
   }
   const viaCap = (bx, by) => {
@@ -4741,6 +4858,7 @@ function drawView(canvas, side) {
     else if (farled) drawUnitGeometry(c, led, "led");
     else drawGhostUnit(c, led);
   }
+  drawBridges(c, mirror);
   // selection outline + corner resize handles
   const si = selectionOnView(side, mirror) ? selectionInfo() : null;
   if (si) {
@@ -5095,7 +5213,21 @@ let nodeHint = null;
 // smaller click target than the hint means clicking the thing you can see
 // grabs the LED underneath instead.
 const NODE_HINT_R = 1.6;
-function traceNodeHint(mx, my) {
+// What the trace "+" is allowed to sit on top of. It yields to anything
+// individually grabbable, but not to the broad-area objects a trace inevitably
+// crosses: a unit's own body, the jumper's body, the custom shape part that IS
+// the board, and decor (artwork and text). Decor joined the list with the
+// editable perimeter bridges -- a unit's rail bridge only exists when the
+// design HAS a light window, and a window big enough to matter covers that
+// trace end to end, so every bend on the traces the feature exists for was
+// unreachable. Shared by the hover and the click, which used to keep two
+// copies of it and disagreed the moment one grew.
+const PLUS_PASSES = new Set(["led", "jumper", "shapeel", "art", "text"]);
+// Every bend a unit owns, across all of its editable traces. The card used to
+// add four lists by hand and so under-reported the moment a fifth existed.
+const bendCount = (L) => Object.values(NODE_KEYS)
+  .reduce((n, k) => n + ((L[k] || []).length), 0);
+function traceNodeHint(mx, my, viewSide) {
   // No "+" on or hugging the jumper: several traces terminate on its pads
   // (its own links, a back CLK unit's supply run into the rail via), so
   // their midpoints crowd the body and the hint would steal the grab that
@@ -5113,7 +5245,9 @@ function traceNodeHint(mx, my) {
   for (let i = state.leds.length - 1; i >= 0; i--) {
     const L = state.leds[i];
     const isClk = clkActive() && L.clk;
-    if (!L.adv && !isClk) continue;
+    // No `continue` for a plain unit any more: its perimeter bridges are
+    // bendable even when nothing else about it is.
+
     // Every trace this free-place unit owns: the via-less run, the
     // resistor-to-anode link, (with the via kept) the pad-to-via stub, and
     // a CLK unit's supply run. A back CLK unit's run IS its noviaRoute, but
@@ -5140,7 +5274,19 @@ function traceNodeHint(mx, my) {
       const a = unitTracePts(L, "a");
       traces.push(["a", a.pts, a.owners]);
     }
-    for (const [key, pts, owners] of traces) {
+    // Perimeter bridges are bendable whatever else this unit is: they are
+    // real copper the board ships and the only trace on some boards that the
+    // user has any reason to shape. Only the one on the face being pointed at
+    // -- the other runs on the side where this unit is a ghost.
+    const brs = allBridges()[i] || {};
+    for (const layer of ["F", "B"]) {
+      const b = brs[layer];
+      if (!b || b.pts.length < 2) continue;
+      if (viewSide && (layer === "B") !== (viewSide === "back")) continue;
+      traces.push([br_key(L, layer), b.pts,
+                   b.owners || b.pts.map((_p, n) => n), layer]);
+    }
+    for (const [key, pts, owners, brLayer] of traces) {
       const bends = L[NODE_KEYS[key]] || [];
       if (bends.length >= 8) continue; // the server keeps at most 8
       // An existing handle wins over the "+": mitring makes segments short
@@ -5156,7 +5302,11 @@ function traceNodeHint(mx, my) {
           // Mitring adds corners the user never placed, so translate the
           // segment back to a slot in the bend list before offering there.
           const slot = owners ? owners[k] : k;
-          return { index: i, trace: key, leg: slot, x: cx, y: cy, side: L.side };
+          // A bridge lives on a layer, so its handle belongs to that face --
+          // for a unit's far-face bridge that is the side the unit only
+          // ghosts on, and using L.side there put the "+" on the wrong view.
+          const hintSide = brLayer ? (brLayer === "B" ? "back" : "front") : L.side;
+          return { index: i, trace: key, leg: slot, x: cx, y: cy, side: hintSide };
         }
       }
     }
@@ -5341,16 +5491,25 @@ function attachPointer(cv, side) {
             }
           }
         }
-        if (sameSide) { // hand-placed trace bends, on any trace
-          const keys = L.adv ? ["run", "a", "v", "c"]
-            : (clkActive() && L.clk ? ["c"] : []);
+        { // hand-placed trace bends, on any trace this unit owns
+          const keys = (L.adv ? ["run", "a", "v", "c"]
+            : (clkActive() && L.clk ? ["c"] : [])).filter(() => sameSide);
+          // A bridge's handles are grabbed from the face its trace runs on,
+          // which for the far-face one is the side this unit only ghosts on.
+          const brs = allBridges()[i] || {};
+          for (const layer of ["F", "B"]) {
+            const onThisView = (layer === "B") === (side === "back");
+            if (brs[layer] && onThisView) keys.push(br_key(L, layer));
+          }
           for (const key of keys) {
             const list = L[NODE_KEYS[key]] || [];
             for (let n = list.length - 1; n >= 0; n--) {
               const [nx, ny] = list[n];
               if (Math.hypot(mx - nx, my - ny) < 0.9) {
+                // A bridge handle is grabbed from the face its trace runs on.
+                const isBr = key === "b" || key === "bf";
                 return { kind: "lednode", index: i, trace: key, node: n,
-                         x: nx, y: ny, side: L.side };
+                         x: nx, y: ny, side: isBr ? side : L.side };
               }
             }
           }
@@ -5539,10 +5698,11 @@ function attachPointer(cv, side) {
       return;
     }
     const onHandle = hitAt(mx, my);
-    const plus = onHandle && onHandle.kind !== "led"
-        && onHandle.kind !== "jumper" && onHandle.kind !== "shapeel" ? null
+    // Same broad-area list the hover uses (`PLUS_YIELDS_TO`): a "+" the
+    // pointer can see has to be clickable, and decor covers whole traces.
+    const plus = onHandle && !PLUS_PASSES.has(onHandle.kind) ? null
       : (nodeHint && nodeHint.side === (mirror ? "back" : "front")
-         ? nodeHint : (nodeHint && traceNodeHint(mx, my)));
+         ? nodeHint : (nodeHint && traceNodeHint(mx, my, mirror ? "back" : "front")));
     if (plus && Math.sqrt((mx - plus.x) ** 2 + (my - plus.y) ** 2) < NODE_HINT_R) {
       if (plus.jumper) {
         const kk = JNODE_KEYS[plus.trace || "link"];
@@ -5639,12 +5799,15 @@ function attachPointer(cv, side) {
         const under = hitAt(hx, hy);
         // The "+" yields to anything individually grabbable, but not to the
         // broad-area objects a trace inevitably crosses: a unit's own body,
-        // the jumper's body, and the custom shape part that IS the board
-        // (on a custom outline it sits under every trace, and swallowing
-        // the hint there made bends unreachable anywhere off a part).
-        const nh = (!under || under.kind === "led" || under.kind === "jumper"
-                    || under.kind === "shapeel")
-          ? traceNodeHint(hx, hy) : null;
+        // the jumper's body, the custom shape part that IS the board (on a
+        // custom outline it sits under every trace, and swallowing the hint
+        // there made bends unreachable anywhere off a part), and decor --
+        // artwork and text. Decor joined that list with the bridges: a unit's
+        // rail bridge only exists when the design HAS a light window, and a
+        // window big enough to matter covers the trace end to end, so every
+        // bend on the traces this feature exists for was unreachable.
+        const nh = (!under || PLUS_PASSES.has(under.kind))
+          ? traceNodeHint(hx, hy, wantSide) : null;
         const shown = nh && nh.side === wantSide ? nh : null;
         if ((shown && shown.x) !== (nodeHint && nodeHint.x)
             || (shown && shown.index) !== (nodeHint && nodeHint.index)) {
@@ -6629,6 +6792,16 @@ function blockingProblems() {
   if (state.leds.some(L => L.clk) && !pinOn("9")) {
     out.push(["an LED blinks with CLK but connector pin 9 is dropped", "pins", -1]);
   }
+  // A bridge bend the router cannot honour: the server refuses the download by
+  // name (pcb.bridge_problems), so the button has to refuse it here too.
+  allBridges().forEach((br, i) => {
+    for (const layer of ["F", "B"]) {
+      if (br[layer] && br[layer].ok === false) {
+        out.push([`LED ${i + 1} has a bridge bend too close to other copper`,
+                  "led", i]);
+      }
+    }
+  });
   {
     // No legal spot left for the jumper is a refusal on the server ("no room
     // for the CLK jumper on this board"), so it has to be one here too. The
@@ -6969,7 +7142,8 @@ function renderLedList() {
             <input type="number" class="avx" min="-20" max="20" step="0.05" value="${(+L.adv.vx).toFixed(2)}">
             <input type="number" class="avy" min="-20" max="20" step="0.05" value="${(+L.adv.vy).toFixed(2)}">
           </div>`}
-          ${`<div class="sub">Trace bends: ${(L.nodes || []).length + (L.anodes || []).length + (L.vnodes || []).length + (L.cnodes || []).length}. Hover any of this unit's traces on the canvas to add one (+), drag to move, click to select, Delete to remove.</div>`}` : ""}
+          ` : ""}
+        ${`<div class="sub">Trace bends: ${bendCount(L)}. Hover any of this unit's traces on the canvas to add one (+), drag to move, click to select, Delete to remove. That includes its thin tie to the pour's edge ring, on whichever side the tie runs.</div>`}
       </details>
 `;
     const reposition = () => {
@@ -8328,6 +8502,7 @@ const TIPS = {
     <li><b>Move parts freely</b> unlocks the LED, resistor, and via to drag one by one; the card warns if a spot would short copper. With <b>SNAP</b> on, each part lines up on its own — squared up on the LED it belongs to, or on either of its siblings.</li>
     <li><b>No power via</b> runs a surface trace to a connector pad instead: drag its &#9670; endpoint — every legal target lights up — or double-click it to go back to automatic.</li>
     <li><b>Reverse mount</b> and <b>LED on the other side</b> shine through the board; each explains itself on the card as you tick it.</li>
+    <li>A unit's thin <b>tie to the pour's edge ring</b> bends like any other trace: hover it for the (+), drag the bend, press <b>Delete</b> to drop it. It is cut where the board needs it &mdash; under a light window, which could otherwise cut that pad off the pour, and off a power via on the far side.</li>
   </ul>` },
   clk: { title: "Blinking with the host badge", img: "clk.webp", html: `<ul>
     <li>CLK feeds the LED from the host badge's clock pin instead of steady 3V3, so it pulses in time with the badge.</li>
@@ -8789,6 +8964,8 @@ function normalizeDesign(raw) {
         anodes: (Array.isArray(L.anodes) ? L.anodes : []).map(node).filter(Boolean).slice(0, 8),
         vnodes: (Array.isArray(L.vnodes) ? L.vnodes : []).map(node).filter(Boolean).slice(0, 8),
         cnodes: (Array.isArray(L.cnodes) ? L.cnodes : []).map(node).filter(Boolean).slice(0, 8),
+        bnodes: (Array.isArray(L.bnodes) ? L.bnodes : []).map(node).filter(Boolean).slice(0, 8),
+        bfnodes: (Array.isArray(L.bfnodes) ? L.bfnodes : []).map(node).filter(Boolean).slice(0, 8),
         adv: adv ? {
           rx: _num(adv.rx, 0, -20, 20), ry: _num(adv.ry, 0, -20, 20),
           vx: _num(adv.vx, 0, -20, 20), vy: _num(adv.vy, 0, -20, 20),

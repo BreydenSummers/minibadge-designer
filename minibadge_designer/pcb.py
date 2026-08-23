@@ -584,6 +584,15 @@ class Led:
     # between them starts crossing things the user can see.
     anodes: tuple = ()
     vnodes: tuple = ()
+    # Board-mm bends for the unit's perimeter bridges, same contract again.
+    # A unit can carry two, so they are kept apart by which face the bridge
+    # runs on: bnodes bends the one on the unit's OWN face (off its rail pad,
+    # cut only when the design has a light window), bfnodes the one on the
+    # FAR face (off the power via's collar). Empty means route automatically,
+    # and a bend the router cannot clear is reported rather than quietly
+    # dropped -- see bridge_problems().
+    bnodes: tuple = ()
+    bfnodes: tuple = ()
     # Where the via-less run ends. None = the nearest connector pad carrying
     # the net (the classic choice). ("pad", "16") = that specific connector
     # pad; ("unit", 3) = the same-net pad of another unit on this face, so
@@ -1962,15 +1971,59 @@ def _bridge_route(start, own_pieces, skip_labels, obstacles, rings):
     cands.sort(key=lambda c: (c[0], c[1]))
     for t, _k, dx, dy, ln in cands:
         ex, ey = sx + dx * ln, sy + dy * ln
-        nx, ny = -dy * 0.5, dx * 0.5
-        swath = [(sx + nx, sy + ny), (ex + nx, ey + ny),
-                 (ex - nx, ey - ny), (sx - nx, sy - ny)]
-        if any(_quads_overlap(swath, q) for q in own):
-            continue
-        if any(_quads_overlap(swath, q) for q in obstacles):
-            continue
-        return ((sx, sy), (ex, ey))
+        if _bridge_leg_clear((sx, sy), (ex, ey), own, obstacles):
+            return ((sx, sy), (ex, ey))
     return None
+
+
+def _bridge_leg_clear(a, b, own, obstacles) -> bool:
+    """Does one leg of a bridge miss every piece of copper it must clear?
+
+    The leg's 1.0 mm swath (TRACK_W plus pour clearance either side) against
+    the same quads the ray scan uses, so a hand-placed bend is judged by
+    exactly the rule that picked the automatic route -- `own` has already had
+    the piece the bridge starts from taken out of it.
+    """
+    import math
+
+    ax, ay = a
+    bx, by = b
+    dx, dy = bx - ax, by - ay
+    ln = math.hypot(dx, dy)
+    if ln < 1e-9:
+        return True
+    nx, ny = -dy / ln * 0.5, dx / ln * 0.5
+    swath = [(ax + nx, ay + ny), (bx + nx, by + ny),
+             (bx - nx, by - ny), (ax - nx, ay - ny)]
+    return not any(_quads_overlap(swath, q) for q in own) and not any(
+        _quads_overlap(swath, q) for q in obstacles)
+
+
+def _bridge_through_bends(start, bends, own, skip_labels, obstacles, rings):
+    """Bridge polyline from `start` through hand-placed bends. -> (pts, ok).
+
+    The bends are kept exactly where they were put and only the corners
+    between them soften into 45s, the same contract as every other editable
+    trace here (`unit_trace_pts`). The LAST leg is still routed by the ray
+    scan, from the final bend, so a hand-bent bridge ends the same
+    BRIDGE_INSET back from the outline that an automatic one does -- the user
+    aims the trace, the router still finishes it legally.
+
+    `ok` is False when a leg runs into copper it has to clear, or when no
+    exit to the ring is left from the final bend. The polyline comes back
+    either way (except with no exit at all, where there is nothing to draw):
+    the caller refuses the download and shows the user what they asked for,
+    rather than quietly routing somewhere else.
+    """
+    tail = _bridge_route(bends[-1], own, skip_labels, obstacles, rings)
+    if tail is None:
+        return None, False
+    kept = [q for lbl, q in own if lbl not in skip_labels]
+    raw = [tuple(start)] + [(float(bx), float(by)) for bx, by in bends] + [tail[1]]
+    pts = mitre45(raw, lambda _u, _v: True)
+    ok = all(_bridge_leg_clear(a, b, kept, obstacles)
+             for a, b in zip(pts, pts[1:]))
+    return pts, ok
 
 
 def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
@@ -2114,14 +2167,71 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     return leds, sorted(problems)
 
 
-def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
-    """Per unit: {i: {"F.Cu": seg | None, "B.Cu": seg | None}} in board mm.
+def unit_bridges(spec: BadgeSpec, safe=None, windows: bool | None = None) -> dict:
+    """Per unit: {i: {"F.Cu": pts | None, "B.Cu": pts | None}} in board mm.
 
     F bridges carry 3V3, B bridges carry GND; each starts at the pad or
     via that feeds the unit on that layer, so a window that fully encircles
     the unit can no longer strand its copper island. A None means no clear
     straight path existed; the caller falls back to the reserved corridor.
+
+    A bridge off a PAD is only cut when the design actually has a light
+    window, because a pad already sits in its own pour: without a window
+    there is nothing that could sever it from the ring, and the trace is
+    0.3 mm of copper doing nothing but showing. Measured before making it
+    conditional -- suppressing every bridge across the whole invariant
+    corpus and the kicad-cli DRC battery leaves exactly two boards failing,
+    and both are boards where a window crosses a unit; every other row
+    (each clock hookup, each package, rotation, novia, farled, custom
+    outline, pin subset) stays DRC-clean with no unconnected items.
+
+    A bridge off a VIA is cut regardless. Its start is a collar on the
+    unit's far face, and there the plane may not reach it at all: dropping
+    those refused a far-side LED with no power via whose download had been
+    DRC-clean (tests/test_webapp.py:
+    test_a_far_side_led_without_its_power_via_still_downloads).
+
+    `windows` overrides the answer for callers that know it before the art
+    layers exist -- the webapp works its window materials out from the
+    classified uploads and the texts, then places these bridges long before
+    it has an ArtLayer to show for it. Left None, `spec.art` decides, which
+    is what every generate-time caller wants.
+
+    Each value is a POLYLINE, two points when the route is automatic and one
+    per hand-placed bend beyond that (Led.bnodes / Led.bfnodes). Use
+    :func:`bridge_problems` to find bends the router could not honour.
     """
+    out: dict = {}
+    for i, layer, pts, _ok in _bridge_routes(spec, safe, windows):
+        out.setdefault(i, {})[layer] = pts
+    for i in range(len(spec.leds)):
+        out.setdefault(i, {})
+    return out
+
+
+def bridge_problems(spec: BadgeSpec, safe=None,
+                    windows: bool | None = None) -> list:
+    """[(unit index, layer)] for every bridge whose BENDS cannot be honoured.
+
+    Only hand-placed bends can land here: an automatic route that finds no
+    exit is not a user error, it is the reserved window corridor doing its
+    job. A bend that puts the trace into other copper, or that leaves no way
+    out to the ring, is a request the board cannot carry -- the caller refuses
+    the download and names the unit, exactly as it does for a via-less run
+    whose bends went tight.
+    """
+    return [(i, layer) for i, layer, _pts, ok in _bridge_routes(spec, safe, windows)
+            if not ok]
+
+
+def _bridge_routes(spec: BadgeSpec, safe=None, windows: bool | None = None):
+    """Yield (unit index, layer, polyline | None, bends_ok) per bridge cut.
+
+    The shared body behind :func:`unit_bridges` and :func:`bridge_problems`:
+    one pass, so the two can never disagree about which bridges exist.
+    """
+    has_window = (windows if windows is not None
+                  else any(a.material in ("glow", "bare") for a in spec.art))
     rings = spec.outline if spec.outline else [
         [(OUTLINE[0], OUTLINE[1]), (OUTLINE[2], OUTLINE[1]),
          (OUTLINE[2], OUTLINE[3]), (OUTLINE[0], OUTLINE[3])]
@@ -2145,7 +2255,6 @@ def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
     all_pieces = [unit_copper_pieces(led, safe, spec.pins, spec.leds,
                                      spec.outline, clk=clk)
                   for led in spec.leds]
-    out: dict = {}
     for i, led in enumerate(spec.leds):
         g = led_geometry(led)
         x, y = clamp_led_obj(led, safe)
@@ -2170,11 +2279,14 @@ def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
             # unit's res_in carries CLK (bridging it to the 3V3 ring would be
             # a dead short), and a back unit's 3V3 via is gone entirely.
             starts.pop("F.Cu", None)
+        if not has_window:
+            # Nothing can sever a pad from the ring on this board, so the
+            # only bridge worth its copper is one that starts at a via.
+            starts = {k: v for k, v in starts.items() if v[0] == "via"}
         obstacles = pads + [q for j, ps in enumerate(all_pieces) if j != i
                             for _lbl, q in ps]
         th = "drill" in PKG[g["pkg"]]
         far = bool(led.farled) and not g["hole"] and not th
-        out[i] = {}
         for layer, (lbl, off) in starts.items():
             own = all_pieces[i]
             if lbl == "via":
@@ -2191,9 +2303,17 @@ def unit_bridges(spec: BadgeSpec, safe=None) -> dict:
                 keep = {"hole"} | ({"pad_led_k", "pad_led_a"} if th or far
                                    else set())
                 own = [(lb, q) for lb, q in own if lb in keep]
-            out[i][layer] = _bridge_route(
-                pt(off), own, _BRIDGE_EXCLUDE[lbl], obstacles, rings)
-    return out
+            # bfnodes bends the via's bridge, bnodes the rail pad's: the two
+            # run on different faces and are dragged separately on the canvas.
+            bends = led.bfnodes if lbl == "via" else led.bnodes
+            if bends:
+                yield (i, layer, *_bridge_through_bends(
+                    pt(off), bends, own, _BRIDGE_EXCLUDE[lbl], obstacles,
+                    rings))
+                continue
+            seg = _bridge_route(pt(off), own, _BRIDGE_EXCLUDE[lbl],
+                                obstacles, rings)
+            yield i, layer, (list(seg) if seg else None), True
 
 
 def resolve_overlap(
@@ -3995,15 +4115,20 @@ def generate_pcb(spec: BadgeSpec) -> str:
         body.append(_led_unit(i, led, nets, safe, spec.pins, spec.leds,
                               spec.outline, spec.tenting, clk))
         for layer, net in (("F.Cu", "3V3"), ("B.Cu", "GND")):
-            seg = bridges.get(i, {}).get(layer)
-            if seg is None:
+            pts = bridges.get(i, {}).get(layer)
+            if pts is None:
                 continue  # webapp reserves the old corridor instead
-            (ax, ay), (bx, by) = seg
-            body.append(
-                f"  (segment (start {_n(ORIGIN + ax)} {_n(ORIGIN + ay)}) "
-                f"(end {_n(ORIGIN + bx)} {_n(ORIGIN + by)}) (width {_n(TRACK_W)}) "
-                f'(layer "{layer}") (net {nets[net]}) (tstamp {_ts(f"bridge-{i}-{layer}")}))'
-            )
+            # One segment per leg: a bridge is a two-point run until its owner
+            # drags bends into it (Led.bnodes / bfnodes), and then it is a
+            # polyline like every other editable trace on the board.
+            for n, ((ax, ay), (bx, by)) in enumerate(zip(pts, pts[1:])):
+                body.append(
+                    f"  (segment (start {_n(ORIGIN + ax)} {_n(ORIGIN + ay)}) "
+                    f"(end {_n(ORIGIN + bx)} {_n(ORIGIN + by)}) "
+                    f"(width {_n(TRACK_W)}) "
+                    f'(layer "{layer}") (net {nets[net]}) '
+                    f'(tstamp {_ts(f"bridge-{i}-{layer}-{n}")}))'
+                )
 
     if spec.outline:
         for ri, ring in enumerate(spec.outline):
