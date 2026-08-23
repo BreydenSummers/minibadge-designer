@@ -241,12 +241,39 @@ def test_svg_glow_window_cuts_pours_exactly():
     assert "gr_poly" not in out  # glow draws nothing
 
 
-def test_art_layer_holes_become_slits():
-    donut = [[
-        [(5.0, 5.0), (15.0, 5.0), (15.0, 15.0), (5.0, 15.0)],
-        [(8.0, 8.0), (12.0, 8.0), (12.0, 12.0), (8.0, 12.0)],
-    ]]
-    out = pcb._art_vector_items(donut, "F.SilkS", "t")
-    assert len(out) == 1
-    # One simple polygon whose ring dips through the former hole region.
-    assert out[0].count("(xy") > 8
+def test_a_ring_of_artwork_prints_as_a_ring():
+    """Ink on the whole band, none in the middle, and no hairline across it.
+
+    A ``gr_poly`` cannot carry a hole, so a holed shape has to be broken up --
+    and *how* is not the guarantee. This asserted the old mechanism instead
+    (one polygon, more than eight vertices, its ring dipping through the void),
+    which said nothing about what reached the board and went red when the
+    mechanism changed with the artwork unaffected.
+
+    What reaches the board is the guarantee: the band inked whole, the void
+    left clear. The old answer scored a 0.02 mm slit from the void out through
+    the band -- no fab prints a dam that thin, but KiCad plots and renders one,
+    which is how it was noticed, as a line drawn across the "4" of a badge.
+    """
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    outer = [(5.0, 5.0), (15.0, 5.0), (15.0, 15.0), (5.0, 15.0)]
+    void = [(8.0, 8.0), (12.0, 8.0), (12.0, 12.0), (8.0, 12.0)]
+    slack = 0.005  # emitted coordinates are rounded to four decimals
+
+    out = pcb._art_vector_items([[outer, void]], "F.SilkS", "t")
+    assert out, "a ring of artwork emitted no ink at all"
+    rings = [[(float(x) - pcb.ORIGIN, float(y) - pcb.ORIGIN)
+              for x, y in re.findall(r"\(xy ([\d.-]+) ([\d.-]+)\)", item)]
+             for item in out]
+    inked = unary_union([Polygon(r) for r in rings if len(r) >= 3])
+
+    band = Polygon(outer, [void]).buffer(-slack)
+    assert inked.contains(band), (
+        f"{band.difference(inked).area:.4f} mm^2 of the ring is missing ink "
+        f"around {tuple(round(v, 2) for v in band.difference(inked).bounds)}: "
+        "a gap scored across artwork the user drew solid")
+    assert not inked.intersects(Polygon(void).buffer(-slack)), (
+        "ink covers the middle of the ring; the hole the artwork asked for "
+        "was flooded shut")
