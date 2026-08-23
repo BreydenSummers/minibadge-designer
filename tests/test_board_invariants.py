@@ -37,6 +37,28 @@ from minibadge_designer import pcb
 _ART = [(4.0, 4.0, 5.0, 0.2), (4.0, 4.4, 4.0, 0.2)]
 
 
+def _ring(x0, y0, x1, y1):
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+
+#: A window shape with COUNTERS: the axis every art row here missed. Each of
+#: the 30-odd rows above draws its window as plain rectangles, so a window
+#: whose outline encloses a void -- which is every glyph with a counter (8, 4,
+#: 0, 6, A) and every ring of artwork -- was never generated at all, and the
+#: keepout emitter's handling of them went unexercised for its whole life.
+#:
+#: The two voids sit at DIFFERENT x on purpose. Any scheme for breaking a
+#: holed shape up divides it per void, so it takes voids offset from one
+#: another before the material between and below them comes away as separate
+#: pieces -- and a scheme that then loses a piece is what shipped copper into
+#: a light window. Aligned voids (the obvious way to draw an 8) come apart as
+#: one notch and never trigger it: measured on the defect, which is why this
+#: row is drawn the awkward way round rather than as a tidy 8.
+_COUNTERS = [[_ring(6.0, 6.0, 14.0, 15.0),
+              _ring(7.6, 7.6, 12.4, 10.0),
+              _ring(7.0, 11.0, 11.0, 13.4)]]
+
+
 def _spec(**over):
     """A BadgeSpec whose every axis can be moved off its default by keyword."""
     leds = over.pop("leds", [pcb.Led(6.5, 6.0, "red"), pcb.Led(14.0, 13.0, "blue")])
@@ -84,6 +106,12 @@ CORPUS = [
     *[(f"art-{m}", _spec(art=[pcb.ArtLayer(m, [(4.0, 9.0, 6.0, 3.0)], [])]))
       for m in ("silk", "copper", "glow", "bare")],
     ("art-on-back", _spec(art=[pcb.ArtLayer("copper", _ART, [], side="back")])),
+    # A window whose shape has holes, cut on both faces and on one; the second
+    # row keeps the default units so the window is also carved around real
+    # copper, which is how the pieces get their awkward shapes.
+    *[(f"window-counters-{m}", _spec(leds=[], art=[pcb.ArtLayer(m, [], _COUNTERS)]))
+      for m in ("glow", "bare")],
+    ("window-counters-carved", _spec(art=[pcb.ArtLayer("bare", [], _COUNTERS)])),
     ("one-face-window", _spec(art=[pcb.ArtLayer("bare", [(5.0, 6.0, 11.0, 8.0)],
                                                 [], side="back", window="back")])),
     # --- connector pin subsets: a whole row, a corner, a single pad ---------

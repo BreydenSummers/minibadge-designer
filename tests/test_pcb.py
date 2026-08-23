@@ -888,6 +888,112 @@ def test_light_windows_get_keepouts():
     assert not geom.contains(Point(10.0, 10.0))  # the copper island is exempt
 
 
+def _rect_ring(x0, y0, x1, y1):
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+
+#: A window outline that ENCLOSES two voids, at different x. Every window in
+#: this file and in the invariant corpus is otherwise drawn as plain
+#: rectangles, so the shape a real user draws most often -- a glyph with a
+#: counter (8, 4, 0, 6, A), or a ring of artwork -- went unexercised.
+#:
+#: The voids sit at different x deliberately. Both a slit and a band cut are
+#: driven off each void's own extent, and it takes two voids offset from one
+#: another for the material between and below them to come away as separate
+#: pieces rather than a notch. Aligned voids (the obvious way to draw an 8)
+#: are the case that does NOT reproduce: measured, and it is why the shape
+#: below looks lopsided.
+_COUNTERS = [[_rect_ring(6.0, 6.0, 14.0, 15.0),
+              _rect_ring(7.6, 7.6, 12.4, 10.0),
+              _rect_ring(7.0, 11.0, 11.0, 13.4)]]
+
+#: Emitted coordinates are written at four decimal places, so a vertex can
+#: land 1e-4 mm off the geometry it came from. Erode the shape by rather more
+#: than that before asking whether the board covers it -- and by far less than
+#: the 0.02 mm hairline this test exists to catch, or it would pass over one.
+_EMIT_SLACK = 0.005
+
+
+@pytest.mark.parametrize("material,window,cut_layers", [
+    ("bare", "through", ("F.Cu", "B.Cu")),
+    ("bare", "back", ("B.Cu",)),
+    ("glow", "through", ("F.Cu", "B.Cu")),
+])
+def test_a_window_with_counters_is_emitted_as_one_whole_shape(material, window,
+                                                             cut_layers):
+    """A window's opening and its keepout each cover the shape the user drew.
+
+    Neither a ``gr_poly`` nor a zone outline has any syntax for a hole, so a
+    window whose outline encloses a void has to be broken into hole-free
+    pieces, and *how* that is done is the whole of this test. Cutting a slit
+    from each void out to the boundary and emitting what is left cost the user
+    twice over:
+
+    * the mask opening lost the slit. No fab prints a 0.02 mm dam of
+      soldermask, but KiCad plots one faithfully, so every counter in every
+      window text shipped with a hairline scored across it -- visible in the
+      3D view and reported from it.
+    * where two slits cut a block of the shape free, the emitter kept only the
+      largest piece, so the block got no keepout at all. The precomputed fill
+      still excluded it (the zip and the 2D preview looked right, and DRC has
+      no rule about copper inside a window), but the first refill -- the 3D
+      export, the Gerber plot, or pressing B as the README asks -- poured
+      copper back into it under an open mask: bare live copper sitting in the
+      light window.
+
+    Stated as containment rather than as a count of pieces or a total area, so
+    it holds however the shape is divided up.
+
+    The board is deliberately bare apart from the window. A part whose keepout
+    reaches the shape carves the window legitimately, and this test is about
+    how a shape with holes gets *divided*, not about what a window may cut --
+    so adding such a part is a change in behaviour and belongs in a case of its
+    own, while a part clear of the shape leaves this green (probed both ways).
+    """
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    import invariants
+
+    art = pcb.ArtLayer(material, [], _COUNTERS, window=window)
+    spec = pcb.BadgeSpec(name="counters", leds=[], art=[art])
+    board = invariants.assert_parses(pcb.generate_pcb(spec))
+    drawn = Polygon(_COUNTERS[0][0], _COUNTERS[0][1:]).buffer(-_EMIT_SLACK)
+
+    assert len(cut_layers) > 0, "this case names no cut layer, so it checks nothing"
+    for layer in cut_layers:
+        keepout = unary_union(invariants._keepout_outlines(board, layer))
+        assert not keepout.is_empty, (
+            f"no keepout rule area reached {layer} at all, so the next refill "
+            "floods the whole window solid")
+        assert keepout.contains(drawn), (
+            f"the {layer} keepout rule areas miss "
+            f"{drawn.difference(keepout).area:.4f} mm^2 of the window "
+            "(around "
+            f"{tuple(round(v, 2) for v in drawn.difference(keepout).bounds)}): "
+            "the next refill pours copper into that patch, under an open mask "
+            "if the window is bare")
+
+    if material != "bare":
+        return  # glow keeps the mask; it only cuts copper
+    opened = [f"{face[0]}.Mask" for face in cut_layers]
+    assert len(opened) > 0, "a bare window that opens no mask is not a window"
+    for layer in opened:
+        rings = []
+        for g in board.graphics(layer):
+            if g[0] != "gr_poly":
+                continue
+            pts = next(c for c in g[1:] if isinstance(c, list) and c[0] == "pts")
+            rings.append([(float(p[1]) - pcb.ORIGIN, float(p[2]) - pcb.ORIGIN)
+                          for p in invariants._kids(pts, "xy")])
+        opening = unary_union([Polygon(r) for r in rings if len(r) >= 3])
+        assert opening.contains(drawn), (
+            f"the {layer} opening is missing "
+            f"{drawn.difference(opening).area:.4f} mm^2 of the window: a "
+            "hairline of soldermask no fab can print, scored across the "
+            "shape in the plot and the 3D view")
+
+
 def test_through_hole_silk_is_inside_the_art_keepout():
     """Artwork carves around a unit's copper, but a through-hole lens outline
     is drawn well outside the pads, so silk art used to print straight over
