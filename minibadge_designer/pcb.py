@@ -3167,6 +3167,31 @@ POUR_CLEARANCE = 0.35    # copper pour to other-net copper
 POUR_EDGE_INSET = 0.4    # copper pour to board edge
 POUR_MIN_WIDTH = 0.25    # slivers thinner than this are opened away
 
+# How close to the board edge a light window may go, mm: the mask opening,
+# and (0.1 mm wider, so the copper edge hides under mask despite fab
+# registration) the copper cut beneath it. Mirrored by WINDOW_EDGE_CLEAR in
+# index.html, which is the number the editor refuses a window text at.
+#
+# What the margin buys is the pours' perimeter ring: they start
+# POUR_EDGE_INSET in, so the copper cut stopping 1.1 mm short leaves a 0.7 mm
+# ring right round the board and no window can split a plane into
+# disconnected halves. 0.7 mm is measured against what has to live in that
+# ring, not chosen for looks: the widest tenant is a unit's perimeter bridge,
+# whose endpoint is pulled BRIDGE_INSET (0.8 mm) back from the outline and
+# carries a TRACK_W trace, so it occupies 0.65-0.95 mm and needs the ring to
+# reach 0.95. 1.1 clears that by 0.15 mm and clears POUR_MIN_WIDTH by 0.45.
+#
+# It was 1.5/1.6 -- a 1.1 mm ring, twice what the bridge asks for -- because
+# the window clip was composed rather than chosen: a box inset 1.1 mm, then
+# EDGE_MARGIN on top from the artwork frame, which hand-placed text had
+# already been excused from (see TEXT_EDGE_CLEAR). That cost every window
+# 0.4 mm of drawable board on all four sides. Measured before moving it:
+# with the cut at 1.0 (a 0.6 mm ring) `kicad-cli pcb drc --severity-all` is
+# clean and reports no unconnected items, on the board as shipped and after
+# a pcbnew refill, with a full-width window text pushed hard into the corner.
+WINDOW_EDGE_CLEAR = 1.2
+WINDOW_COPPER_INSET = 1.1
+
 
 def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
     """Compute the filled copper for a zone as shapely polygons (board mm).
@@ -3347,10 +3372,10 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
     # glow layer defaults to "through" and cuts both faces, as before.
     # Expanded 0.1 mm past the mask opening so the copper edge hides under
     # the mask despite fab registration tolerance.
-    # Windows never reach the outer 1.5 mm of the outline: the pours keep a
-    # continuous perimeter ring, so a full-width window can't split a plane
-    # into disconnected halves.
-    interior = board.buffer(-1.5)
+    # Windows never reach the outer WINDOW_COPPER_INSET of the outline: the
+    # pours keep a continuous perimeter ring, so a full-width window can't
+    # split a plane into disconnected halves.
+    interior = board.buffer(-WINDOW_COPPER_INSET)
     face = "front" if layer.startswith("F") else "back"
     for art in spec.art:
         if art.material not in ("glow", "bare"):
@@ -3506,7 +3531,7 @@ def _window_geometry(spec: BadgeSpec, face: str | None = None):
     from shapely.geometry import box
 
     board = outline_polygon(spec)
-    interior = board.buffer(-1.5)
+    interior = board.buffer(-WINDOW_COPPER_INSET)
     wins = []
     for art in spec.art:
         if art.material not in ("glow", "bare"):
@@ -3555,17 +3580,25 @@ def _keepout_zones_for(spec: BadgeSpec, face: str, layer: str) -> list[str]:
     geom = _window_geometry(spec, face)
     if geom is None:
         return []
-    polys = list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
+    # A zone outline is one ring with no syntax for a hole, and a hole here
+    # means "copper allowed" (a via's collar, copper art kept inside a bare
+    # face), so the window is tiled into hole-free pieces exactly like the
+    # mask opening it protects -- every piece, covering the window whole.
+    #
+    # Covering it whole is the point. This used to vent each hole with a slit
+    # and keep only the LARGEST piece the slit left, so a block a slit severed
+    # (the bottom bar of an 8, say) got no rule area at all. The shipped fill
+    # still excluded it, so the zip and the 2D preview looked right, while
+    # every refill -- the 3D view, the Gerber plot, pressing B as the README
+    # asks -- poured copper back into it under an open mask opening: exposed
+    # live copper in the middle of a light window, which DRC has no rule
+    # against and the precomputed-fill checks could not see.
     out = []
-    for i, poly in enumerate(polys):
+    for i, poly in enumerate(_hole_free_pieces(geom)):
         if poly.is_empty or poly.area < 0.01:
             continue
-        # A hole here just means "copper allowed", and any sliver the
-        # fracture leaves behind is thinner than the zone's min_thickness,
-        # so it never becomes copper.
-        ring = poly.exterior if not poly.interiors else _fracture(poly).exterior
         pts = " ".join(f"(xy {_n(ORIGIN + x)} {_n(ORIGIN + y)})"
-                       for x, y in ring.coords[:-1])
+                       for x, y in poly.exterior.coords[:-1])
         out.append(
             f'  (zone (net 0) (net_name "") (layer "{layer}") '
             f'(tstamp {_ts(f"keepout-{face}-{i}")}) (hatch edge 0.508)\n'
@@ -3578,25 +3611,6 @@ def _keepout_zones_for(spec: BadgeSpec, face: str, layer: str) -> list[str]:
             "  )"
         )
     return out
-
-
-def _fracture(poly):
-    """Drop a polygon's holes by slitting each one out to the boundary."""
-    from shapely.geometry import Polygon as ShapelyPolygon
-    from shapely.geometry import box
-    from shapely.ops import unary_union
-
-    bottom = poly.bounds[3] + 1.0
-    for _ in range(8):
-        if not poly.interiors:
-            break
-        slits = [box(ShapelyPolygon(r).representative_point().x - 0.06,
-                     ShapelyPolygon(r).representative_point().y,
-                     ShapelyPolygon(r).representative_point().x + 0.06, bottom)
-                 for r in poly.interiors]
-        cut = poly.difference(unary_union(slits))
-        poly = max(cut.geoms, key=lambda g: g.area) if cut.geom_type == "MultiPolygon" else cut
-    return poly
 
 
 def _zone(key: str, net: int, net_name: str, layer: str, spec: BadgeSpec) -> str:
@@ -3653,29 +3667,85 @@ def _art_shapely(polys: list[list[list[tuple[float, float]]]]) -> list:
     return out
 
 
-def _slit_holes(geom, half_w: float):
-    """Open every interior ring to the outside with a hairline slit.
+def _vent_holes(poly):
+    """Open a polygon's voids with hairline slits, keeping every piece.
 
-    gr_poly (like zone fills) can't represent holes; a slit far below any
-    printable feature size (2*half_w wide) turns each hole into an edge
-    notch that fabs (and eyes) can't tell from a true hole.
+    The fallback `_hole_free_pieces` uses when band-cutting a shape somehow
+    leaves a void behind. A slit is *missing* material -- that is why it is
+    not the main path -- but it does preserve the void, and every piece it
+    cuts free is returned rather than the largest one.
     """
     from shapely.geometry import Polygon as ShapelyPolygon
     from shapely.geometry import box
     from shapely.ops import unary_union
 
-    for _ in range(8):
-        polys = list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom]
-        slits = []
-        for poly in polys:
-            for ring in poly.interiors:
-                pt = ShapelyPolygon(ring).representative_point()
-                slits.append(box(pt.x - half_w, pt.y, pt.x + half_w, poly.bounds[3] + 1.0))
-        if not slits:
-            break
-        geom = geom.difference(unary_union(slits))
-    return [p for p in (list(geom.geoms) if geom.geom_type == "MultiPolygon" else [geom])
-            if not p.is_empty]
+    bottom = poly.bounds[3] + 1.0
+    slits = []
+    for ring in poly.interiors:
+        pt = ShapelyPolygon(ring).representative_point()
+        slits.append(box(pt.x - 0.01, pt.y, pt.x + 0.01, bottom))
+    cut = poly.difference(unary_union(slits))
+    return [p for p in getattr(cut, "geoms", [cut])
+            if p.geom_type == "Polygon" and not p.is_empty and p.area > 0]
+
+
+def _hole_free_pieces(geom, _depth: int = 0):
+    """Split a (multi)polygon into hole-free pieces that TILE it exactly.
+
+    ``gr_poly`` and a zone outline are both one ring with no syntax for a
+    hole, so any shape with a void -- a glyph's counter, a ring of artwork,
+    the mask cap kept over a via inside a window -- has to be broken up.
+
+    The pieces are cut as horizontal bands at every void's top and bottom
+    edge. Inside such a band each void spans the full height, so the band
+    falls into left/right pieces with no void left in either, and adjacent
+    pieces SHARE their cut edge: on an additive layer (silk ink, a mask
+    opening) the union is the original shape to the last micron.
+
+    That last property is the point. The previous approach vented each void
+    to the outside with a 0.02 mm slit instead, and a slit is *missing*
+    material: no fab can print a 0.02 mm dam of soldermask, but KiCad draws
+    it faithfully, so every counter in every window text had a hairline
+    scored across it in the 3D view and the plot -- reported as "there is a
+    line in the 4". Tiling has no gap to draw.
+    """
+    from shapely.geometry import Polygon as ShapelyPolygon
+    from shapely.geometry import box
+
+    out = []
+    # `getattr(..., "geoms", ...)`, not a MultiPolygon test: a band cut whose
+    # edge grazes the shape comes back as a GeometryCollection of the polygon
+    # plus a zero-area line, and a Multi-only test dropped the whole band with
+    # it -- silently, since an empty piece list just emits no opening at all.
+    for poly in getattr(geom, "geoms", [geom]):
+        if poly.geom_type != "Polygon" or poly.is_empty:
+            continue
+        if not poly.interiors:
+            out.append(poly)
+            continue
+        if _depth > 4:
+            # Should not be reachable: one band pass vents every void a piece
+            # has. Belt and braces, and it vents rather than appending the
+            # piece as-is, because a caller takes `.exterior` -- which would
+            # open the mask over a hole, or let a keepout swallow the copper
+            # island a hole was there to protect. A visible hairline beats
+            # either, and keeping every piece still matters more than both.
+            out += _vent_holes(poly)
+            continue
+        x0, y0, x1, y1 = poly.bounds
+        cuts = sorted({y0, y1} | {v for r in poly.interiors
+                                  for v in ShapelyPolygon(r).bounds[1::2]})
+        for lo, hi in zip(cuts, cuts[1:]):
+            if hi - lo <= 1e-9:
+                continue
+            band = poly.intersection(box(x0 - 1.0, lo, x1 + 1.0, hi))
+            if band.is_empty:
+                continue
+            # Recursion is for the degenerate case only (a void whose edge
+            # lands a float wobble off a cut line, leaving a hair of interior
+            # ring behind); the ordinary band comes back hole-free.
+            out += _hole_free_pieces(band, _depth + 1)
+    return [p for p in out if not p.is_empty and p.area > 0]
 
 
 def _art_vector_items(
@@ -3688,7 +3758,7 @@ def _art_vector_items(
     if not geoms:
         return []
     out = []
-    for i, poly in enumerate(_slit_holes(unary_union(geoms), 0.01)):
+    for i, poly in enumerate(_hole_free_pieces(unary_union(geoms))):
         pts = " ".join(
             f"(xy {_n(ORIGIN + px)} {_n(ORIGIN + py)})" for px, py in poly.exterior.coords[:-1]
         )
@@ -3766,7 +3836,7 @@ def _art_mask_items(art: ArtLayer, layer: str, key: str, cover) -> list[str]:
     if geom.is_empty:
         return []
     out = []
-    for i, poly in enumerate(_slit_holes(geom, 0.01)):
+    for i, poly in enumerate(_hole_free_pieces(geom)):
         pts = " ".join(
             f"(xy {_n(ORIGIN + px)} {_n(ORIGIN + py)})" for px, py in poly.exterior.coords[:-1]
         )

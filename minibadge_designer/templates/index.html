@@ -812,12 +812,13 @@ const VIA_SIZE = 0.7, VIA_DRILL = 0.3;
 // threshold.
 const SILK_EDGE_CLEAR = 0.2;
 // A window-material text (glow/bare) cuts the copper pours instead of printing
-// ink, and windows stay 1.6 mm off the board edge so the pours keep a
-// continuous perimeter ring: webapp's window_board is the board box inset
-// 1.1 mm and then clipped a further EDGE_MARGIN, and a custom outline gets the
-// same 1.6 mm as outline_poly.buffer(-1.6). Ink outside that is not clipped
-// tighter than silk -- it is dropped from the window altogether.
-const WINDOW_EDGE_CLEAR = 1.6;
+// ink, and windows stay this far off the board edge so the pours keep a
+// continuous perimeter ring. Mirrors pcb.WINDOW_EDGE_CLEAR, which is what the
+// server clips every window to -- the plain board box and a custom outline
+// alike (outline_poly.buffer(-WINDOW_EDGE_CLEAR)). See that constant for why
+// the number is 1.2 and not the 1.6 it used to be. Ink outside it is not
+// clipped tighter than silk -- it is dropped from the window altogether.
+const WINDOW_EDGE_CLEAR = 1.2;
 // Text on a CUSTOM outline is clipped to outline_poly.buffer(-0.35) (webapp's
 // `outside` keepout), which is stricter than SILK_EDGE_CLEAR. That buffer is
 // the artwork pipeline's, shared with every decorated layer; text does not get
@@ -4132,12 +4133,16 @@ function drawWindowLayers(c, mirror, mats, eraseText) {
   }
   if (!any) return;
   // Windows keep off the outline's outer ring: approximate the generator's
-  // outline.buffer(-1.6) with (x ring band) ∩ (board shape).
+  // outline.buffer(-WINDOW_EDGE_CLEAR) with (band) ∩ (board shape). The band
+  // is the approximation; the distance is not -- it used to read 1.16 against
+  // a server that clipped at 1.6, so the preview drew 0.44 mm of window the
+  // download did not contain.
   const ob = outlineBounds();
   oc.fillStyle = "#fff";
   oc.globalCompositeOperation = "destination-in";
-  oc.fillRect(mm2px(ob[0] + 1.16), mm2px(ob[1] + 1.16),
-              (ob[2] - ob[0] - 2.32) * SCALE, (ob[3] - ob[1] - 2.32) * SCALE);
+  oc.fillRect(mm2px(ob[0] + WINDOW_EDGE_CLEAR), mm2px(ob[1] + WINDOW_EDGE_CLEAR),
+              (ob[2] - ob[0] - 2 * WINDOW_EDGE_CLEAR) * SCALE,
+              (ob[3] - ob[1] - 2 * WINDOW_EDGE_CLEAR) * SCALE);
   clipToBoard(oc);
   // Each view's window is carved by that face's own keepouts (mirrors the
   // generator's per-face emit): a unit mounted on the other face keeps only
@@ -6548,7 +6553,7 @@ function textWarnings(t) {
     // A window text is refused well before it reaches the edge -- windows keep
     // WINDOW_EDGE_CLEAR so the pours keep an unbroken perimeter ring -- so
     // telling its owner it "hangs over the board edge" sends them looking for
-    // an overhang that is 1.6 mm away.
+    // an overhang a millimetre and more away.
     msgs.push(isWindowText(t)
       ? `Part of this text comes within ${WINDOW_EDGE_CLEAR} mm of the board `
         + "edge, which is nearer than a window may go: the copper pours need an "

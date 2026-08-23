@@ -2414,23 +2414,29 @@ def _generate_impl(render: bool):
         # whatever else crosses the board) instead of a slab of pour
         # shadowing the whole part.
         bare_keepouts = {face: _face_keepouts(face) for face in ("front", "back")}
-        # Windows stay 1.6 mm off the board edge so the copper pours keep a
-        # continuous perimeter ring (pcb._fill_geometry enforces this too).
-        window_board = (1.26, 1.26, 19.06, 19.06)
+        # Windows stay pcb.WINDOW_EDGE_CLEAR off the board edge so the copper
+        # pours keep a continuous perimeter ring (pcb._fill_geometry enforces
+        # this too). Both art paths add EDGE_MARGIN of their own on top of the
+        # box they are handed -- grid_to_rects internally, _clip_art_geom by
+        # default -- so what goes in is inset by the difference and the number
+        # the user sees is pcb.WINDOW_EDGE_CLEAR either way.
+        win_inset = pcb.WINDOW_EDGE_CLEAR - EDGE_MARGIN
         art_board = (0.16, 0.16, 20.16, 20.16)
         if outline_poly is not None:
             b = outline_poly.bounds
             art_board = (
                 min(0.16, b[0]), min(0.16, b[1]), max(20.16, b[2]), max(20.16, b[3])
             )
-            window_board = (
-                art_board[0] + 1.1, art_board[1] + 1.1, art_board[2] - 1.1, art_board[3] - 1.1
-            )
+        window_board = (
+            art_board[0] + win_inset, art_board[1] + win_inset,
+            art_board[2] - win_inset, art_board[3] - win_inset,
+        )
+        if outline_poly is not None:
             # Clip artwork to the actual board shape.
             outside = _OutsideKeepout(outline_poly.buffer(-0.35))
             decor_base["front"].append(outside)
             decor_base["back"].append(outside)
-            ring = _OutsideKeepout(outline_poly.buffer(-1.6))
+            ring = _OutsideKeepout(outline_poly.buffer(-pcb.WINDOW_EDGE_CLEAR))
             bare_keepouts["front"].append(ring)
             bare_keepouts["back"].append(ring)
 

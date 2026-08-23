@@ -2686,6 +2686,25 @@ def _radial_spread(ring: list[tuple[float, float]], cx: float, cy: float) -> flo
     return max(r) - min(r)
 
 
+def _art_outline(rings) -> list[tuple[float, float]]:
+    """The outline of the artwork itself, however the emitter split it up.
+
+    A holed shape reaches the board as several rings that TILE it (they share
+    their cut edges), so no single ring is the shape: the largest one carries
+    an arbitrary share of the real outline plus two horizontal edges per cut,
+    and a metric read off it moves when the emitter changes its mind about
+    where to divide -- measured, at 0.93 against a 0.90 threshold, with the
+    artwork itself untouched. Unioning first puts the shared edges back
+    together and leaves exactly the shape the fab receives.
+    """
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    merged = unary_union([Polygon(r) for r in rings if len(r) >= 3])
+    biggest = max(getattr(merged, "geoms", [merged]), key=lambda g: g.area)
+    return list(biggest.exterior.coords)[:-1]
+
+
 def _rect_rings(rings) -> int:
     """Rings that are a bare axis-aligned rectangle -- one pixel-grid tile."""
     return sum(1 for r in rings
@@ -2744,7 +2763,7 @@ def test_a_curved_raster_edge_reaches_the_board_as_a_curve_not_pixel_steps(
     assert _rect_rings(rings) == 0, (
         f"{label}: {_rect_rings(rings)} of {len(rings)} rings are plain "
         "axis-aligned rectangles -- the circle was tiled out of pixel squares")
-    edge = max(rings, key=len)
+    edge = _art_outline(rings)
     assert _axis_aligned_fraction(edge) < 0.5, (
         f"{label}: {_axis_aligned_fraction(edge):.0%} of the outline runs "
         "along the sampling axes; a traced circle runs across them")
@@ -2777,13 +2796,17 @@ def test_raster_art_carved_around_a_unit_keeps_the_keepouts_own_curve(client):
         "carve/carve.kicad_pcb").decode()
     rings = _art_rings(board, "F.SilkS")
     assert rings, "no silk art survived the carve"
-    assert _rect_rings(rings) == 0, (
-        f"{_rect_rings(rings)} of {len(rings)} silk rings are plain pixel "
-        "rectangles: the layer arrived as a mosaic, not as a carved shape")
+    # Asked of the shape, not of each emitted ring: a holed layer is tiled
+    # into pieces that share their cut edges, and a piece well away from the
+    # carve is legitimately a rectangle -- what must not be a bare rectangle
+    # is the artwork.
+    assert _rect_rings([_art_outline(rings)]) == 0, (
+        "the silk layer arrived as a bare axis-aligned rectangle: a pixel "
+        "tile, not a carved shape")
     # The outer boundary of a square layer IS axis-aligned; the carve is what
     # has to run across the axes, so a mostly-but-not-wholly axial ring is the
     # signature of a real curve here. The pixel path measured 1.00.
-    edge = max(rings, key=len)
+    edge = _art_outline(rings)
     assert _axis_aligned_fraction(edge) < 0.9, (
         "the whole silk boundary runs along the sampling axes, so the notch "
         "around the unit is a staircase rather than the part's own outline")
@@ -2815,6 +2838,63 @@ def test_the_preview_resolves_artwork_at_the_pitch_the_tracer_samples_it_at():
         f"the preview caps art at {m.group(2)} cells across and the server at "
         f"{logo.MAX_TRACE_COLS}: on artwork wider than the cap the two "
         "disagree about how much detail survives")
+
+
+#: How close to the board edge a light window may go, mm, and the copper cut
+#: beneath it. Restated here rather than read from ``pcb`` so that moving
+#: either one comes past this test: the editor refuses a window text at this
+#: distance and the server clips every window to it, and the two have to be
+#: the same number or the user is shown ink the download does not carry.
+WINDOW_EDGE_CLEAR, WINDOW_COPPER_INSET = 1.2, 1.1
+
+
+@pytest.mark.webapp
+def test_the_window_edge_margin_leaves_the_pours_a_usable_perimeter_ring():
+    """The editor, the server and the pour ring agree on one margin.
+
+    A window cuts copper, so it is held off the board edge to leave the pours
+    an unbroken ring right round the outside -- without it a full-width window
+    saws a plane in half and the LEDs on the far piece are wired to nothing.
+    Three copies of that decision have to line up: the number the canvas
+    refuses a window text at, the number the server clips every window to, and
+    the width of ring the copper cut actually leaves behind. The middle one is
+    the one users feel: too large and it silently eats 0.4 mm of drawable board
+    on all four sides, too small and the ring stops carrying what lives in it.
+
+    The ring's tenants are asserted as relationships, not as a second literal,
+    so a future loosening is measured against what it has to fit rather than
+    against a number somebody typed.
+    """
+    import re
+    from pathlib import Path
+
+    from minibadge_designer import pcb
+
+    html = (Path(pcb.__file__).parent / "templates" / "index.html").read_text()
+    m = re.search(r"const WINDOW_EDGE_CLEAR = ([\d.]+);", html)
+    assert m, "the canvas no longer declares how far a window keeps off the edge"
+    assert float(m.group(1)) == WINDOW_EDGE_CLEAR == pcb.WINDOW_EDGE_CLEAR, (
+        f"the editor holds windows {m.group(1)} mm off the board edge and the "
+        f"server clips them at {pcb.WINDOW_EDGE_CLEAR} mm: one of them is "
+        "lying to the user about where their window text may sit")
+    assert pcb.WINDOW_COPPER_INSET == WINDOW_COPPER_INSET, (
+        "the copper cut moved without this test: the mask opening has to sit "
+        "inside it or the pour's edge is exposed through the window")
+    assert pcb.WINDOW_EDGE_CLEAR - pcb.WINDOW_COPPER_INSET > 0, (
+        "the copper cut must run wider than the mask opening, so fab "
+        "registration slop cannot uncover the pour's cut edge")
+
+    ring = pcb.WINDOW_COPPER_INSET - pcb.POUR_EDGE_INSET
+    assert ring >= pcb.POUR_MIN_WIDTH, (
+        f"the ring the window leaves is {ring:.2f} mm wide and the pours "
+        f"declare a {pcb.POUR_MIN_WIDTH} mm minimum thickness: it is thinner "
+        "than the copper KiCad will pour, so the ring is not there at all")
+    bridge_reach = pcb.BRIDGE_INSET + pcb.TRACK_W / 2
+    assert pcb.WINDOW_COPPER_INSET >= bridge_reach, (
+        f"a unit's perimeter bridge reaches {bridge_reach:.2f} mm in from the "
+        f"outline and the window now cuts copper from "
+        f"{pcb.WINDOW_COPPER_INSET} mm: the bridge lands in cut-away copper "
+        "and the unit it feeds is stranded")
 
 
 @pytest.mark.webapp
