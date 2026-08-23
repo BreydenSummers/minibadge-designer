@@ -377,3 +377,97 @@ def test_a_blinking_badge_passes_drc_in_both_hookup_styles(tmp_path, hookup):
         capture_output=True, text=True, timeout=120, check=False,
     )
     assert result.returncode == 0, f"DRC violations:\n{(tmp_path / 'drc.txt').read_text()}"
+
+
+def test_a_refilled_window_still_has_no_copper_under_its_open_mask(tmp_path):
+    """A refill does not put copper back inside a light window.
+
+    Every other window check in this suite reads the fill the generator
+    *precomputed*, and that fill was never the problem. A zone fill is not a
+    fixed artifact: KiCad recomputes it from the keepout rule areas alone the
+    moment anyone refills, and this project refills on three paths the user
+    cannot see around -- the 3D preview does it before exporting the GLB, the
+    Gerber plot does it before plotting (it cannot ship the slits), and the
+    README tells people to press B. So the only honest oracle for "is there
+    copper in the light window" is a board that has been through KiCad's own
+    filler, which is what this runs.
+
+    The board is the one a user reported: a bare "418" in a pixel face, whose
+    counters make the window a shape with holes. Emitting the keepout for such
+    a shape means breaking it into hole-free pieces, and keeping only the
+    largest of them left a 1.6 x 0.7 mm block of the 8 with no rule area:
+    kicad-cli DRC passed with 0 violations, the zip and the preview looked
+    right, and the refill quietly poured the 3V3 plane into the middle of the
+    window under an OPEN mask opening -- bare live copper where light was
+    meant to pass, on both faces.
+    """
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    import invariants
+    from minibadge_designer import webapp
+
+    params = {
+        "name": "refill-window",
+        # Both defaults moved off: a back-mounted inline unit (so the window
+        # is carved around real copper from the far face) and a window text
+        # rather than the rectangles every other window case here draws.
+        "leds": [{"x": 11.9, "y": 15.33, "color": "red", "side": "back",
+                  "size": "0805", "layout": "inline"}],
+        "texts": [{"x": 9.99, "y": 10.42, "text": "418", "size": 5.887,
+                   "font": "pressstart", "material": "bare", "side": "front"}],
+    }
+    client = webapp.app.test_client()
+    resp = client.post("/generate", data={"params": json.dumps(params)})
+    assert resp.status_code == 200, resp.data
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    slug = "refill-window"
+    board = tmp_path / f"{slug}.kicad_pcb"
+    board.write_bytes(zf.read(f"{slug}/{slug}.kicad_pcb"))
+
+    # The app's own refill, not a hand-rolled one: this is the code path the
+    # 3D view and the Gerber export take, and it locates its interpreter
+    # itself. It returns False when pcbnew is not importable anywhere, which
+    # is a skip and not a pass -- a green here on an unrefilled board is
+    # exactly the vacuous result this test exists to avoid.
+    if not webapp._refill_zones(str(board)):
+        pytest.skip("pcbnew not importable; cannot refill (KiCad's python?)")
+
+    text = board.read_text()
+    root = invariants._parse_sexp(text)
+
+    def _polys(nodes):
+        out = []
+        for node in nodes:
+            pts = invariants._kid(node, "pts")
+            ring = [(float(p[1]) - pcb.ORIGIN, float(p[2]) - pcb.ORIGIN)
+                    for p in invariants._kids(pts, "xy")]
+            if len(ring) >= 3:
+                poly = Polygon(ring)
+                out.append(poly if poly.is_valid else poly.buffer(0))
+        return out
+
+    for mask_layer, copper_layer in (("F.Mask", "F.Cu"), ("B.Mask", "B.Cu")):
+        opening = unary_union(_polys(
+            g for g in invariants._kids(root, "gr_poly")
+            if invariants._val(g, "layer") == mask_layer))
+        assert not opening.is_empty, (
+            f"no {mask_layer} opening survived the refill, so this check has "
+            "nothing to measure and would pass on any board")
+        # Parsed with the s-expression reader on purpose: KiCad 9 rewrites a
+        # refilled fill as multi-line blocks carrying `(island)`, which the
+        # single-line regex in invariants.Board.emitted_fills does not match.
+        # It returns [] on a refilled board, and every assertion built on it
+        # then passes vacuously -- measured, on this very board.
+        fills = _polys(
+            fp for z in invariants._kids(root, "zone")
+            for fp in invariants._kids(z, "filled_polygon")
+            if invariants._val(fp, "layer") == copper_layer)
+        assert fills, f"the refill left no {copper_layer} fill at all"
+        exposed = opening.intersection(unary_union(fills))
+        assert exposed.is_empty, (
+            f"KiCad's refill put {exposed.area:.4f} mm^2 of {copper_layer} "
+            f"copper inside the light window (around "
+            f"{tuple(round(v, 2) for v in exposed.bounds)}), where "
+            f"{mask_layer} is open: the badge ships with bare plated copper "
+            "in the middle of the window and DRC will not say a word")

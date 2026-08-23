@@ -115,6 +115,14 @@ STANDARD_PINOUT = {"1": None, "2": "GND", "7": "3V3", "8": "GND",
 #: hookup puts the units straight on "CLK".
 CLK_NET, CLK_RAIL_NET = "CLK", "CLK_LED"
 
+#: Narrowest copper KiCad's own filler will lay down, mm: every pour zone this
+#: project writes declares ``(min_thickness 0.25)``. Stated here rather than
+#: read from ``pcb`` (D2) because it is the number that decides whether a patch
+#: of window the keepouts missed can actually come back as copper on a refill —
+#: a check sourcing it from the constant under test could not notice the
+#: constant being loosened.
+MIN_FILL_WIDTH = 0.25
+
 
 def clk_used(spec) -> bool:
     """Whether the design actually runs units off the badge clock.
@@ -1261,6 +1269,75 @@ def assert_light_windows_carry_keepouts(b: Board, spec) -> None:
             "the first refill in KiCad floods the window solid")
 
 
+def _keepout_outlines(b: Board, layer: str) -> list:
+    """The emitted keepout rule-area outlines on ``layer``, as shapely polygons.
+
+    Read from the file, not from ``pcb``: what protects a window on a refill is
+    the outline that shipped, whatever the generator meant to write.
+    """
+    from shapely.geometry import Polygon
+    out = []
+    for z in _kids(b.root, "zone"):
+        if _kid(z, "keepout") is None or _val(z, "layer") != layer:
+            continue
+        poly = _kid(z, "polygon")
+        pts = _kid(poly, "pts") if poly is not None else None
+        if pts is None:
+            continue
+        ring = [(float(p[1]) - pcb.ORIGIN, float(p[2]) - pcb.ORIGIN)
+                for p in _kids(pts, "xy")]
+        if len(ring) < 3:
+            continue
+        p = Polygon(ring)
+        out.append(p if p.is_valid else p.buffer(0))
+    return out
+
+
+def assert_light_window_keepouts_cover_every_fillable_piece(b: Board, spec) -> None:
+    """No patch of a light window is left where a refill could pour copper.
+
+    :func:`assert_light_windows_carry_keepouts` only asks whether *a* rule area
+    exists on the cut layer, and :func:`assert_light_windows_are_clear_of_copper`
+    reads the *shipped* fill, which is precomputed and correct. Between the two
+    sat a whole class of defect: a window whose shape has holes (any glyph with
+    a counter -- 8, 4, 0, 6 -- or a ring of artwork) has to be emitted as
+    hole-free zone outlines, and venting those holes can sever a block of the
+    shape off. Keeping only the largest piece left the severed blocks with no
+    rule area at all. Nothing downstream noticed: the zip and the 2D preview
+    read from the precomputed fill, and DRC has no rule about copper inside a
+    window, so the board measured 0 violations. The damage only appears once
+    anyone refills -- the 3D view before its GLB export, the Gerber plot, or the
+    user pressing B as the README asks -- and then it is a patch of live pour
+    sitting in the light window under an OPEN mask opening: bare plated copper
+    on a badge people handle, in the one place light was supposed to pass.
+
+    Stated as a relationship, so it survives any change to how the vents are
+    cut: whatever the keepouts miss must be narrower than :data:`MIN_FILL_WIDTH`,
+    the ``min_thickness`` the pours declare, because copper that thin is copper
+    KiCad's filler cannot lay down. The vent slits themselves are the intended
+    residue and pass by exactly that measure.
+
+    D2-DERIVED for the window region, like the two checks above it, and guarded
+    against vacuity by the same
+    :func:`assert_light_windows_exist_when_art_asks_for_them`.
+    """
+    from shapely.ops import unary_union
+    for face, layer in (("front", "F.Cu"), ("back", "B.Cu")):
+        geom = pcb._window_geometry(spec, face)
+        if geom is None or geom.is_empty:
+            continue
+        outlines = _keepout_outlines(b, layer)
+        unprotected = (geom.difference(unary_union(outlines)) if outlines else geom)
+        fillable = unprotected.buffer(-MIN_FILL_WIDTH / 2)
+        assert fillable.is_empty, (
+            f"{fillable.buffer(MIN_FILL_WIDTH / 2).area:.3f} mm^2 of the {face} "
+            f"light window carries no keepout rule area on {layer} "
+            f"(around {tuple(round(v, 2) for v in fillable.bounds)}): the "
+            "shipped fill excludes it, so the zip and the preview look right, "
+            "but the next refill pours copper back into it under an open mask "
+            "-- exposed live copper in the middle of the window")
+
+
 def _spec_window_regions(b: Board, spec) -> dict:
     """``{face: region}`` the *spec's own art* asks to be cut, clipped to the
     *emitted* board. ``pcb`` is asked nothing.
@@ -1269,9 +1346,12 @@ def _spec_window_regions(b: Board, spec) -> dict:
     both faces, ``bare`` cuts the face(s) its ``window`` mode names. Two
     clippings are applied, and both are read off the board rather than assumed:
 
-    * the emitted ``Edge.Cuts`` outline, inset 1.5 mm: the generator holds
+    * the emitted ``Edge.Cuts`` outline, inset 1.1 mm: the generator holds
       windows inside a perimeter ring so the pour keeps a path round the edge,
-      so art hanging over that ring is not entitled to a cut there;
+      so art hanging over that ring is not entitled to a cut there. The number
+      is written out rather than read from ``pcb.WINDOW_COPPER_INSET``, which
+      is the point of this check -- it has to move by hand when that constant
+      moves, so a shrinking window cannot shrink its own entitlement;
     * ``copper`` art is subtracted: copper artwork inside a window deliberately
       keeps its copper.
 
@@ -1301,7 +1381,7 @@ def _spec_window_regions(b: Board, spec) -> dict:
     board = max((_edge_polygon(g) for g in rings), key=lambda p: p.area)
     board = Polygon([(x - pcb.ORIGIN, y - pcb.ORIGIN)
                      for x, y in board.exterior.coords])
-    interior = board.buffer(-1.5)
+    interior = board.buffer(-1.1)
     keep = []
     for art in spec.art:
         if art.material != "copper":
@@ -1762,6 +1842,7 @@ ALL_CHECKS = [
     assert_pour_fills_have_no_holes,
     assert_light_windows_are_clear_of_copper,
     assert_light_windows_carry_keepouts,
+    assert_light_window_keepouts_cover_every_fillable_piece,
     assert_light_windows_exist_when_art_asks_for_them,
     assert_copper_clears_the_board_edge,
     assert_board_is_the_standard_size,
