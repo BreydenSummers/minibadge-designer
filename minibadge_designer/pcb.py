@@ -658,7 +658,17 @@ def refdes_layout(spec: BadgeSpec, safe=None) -> list[dict]:
                                     for e0, e1 in edges)):
                     out.append({"unit": i, "which": which, "ref": ref,
                                 "face": face, "at": (hx, hy),
-                                "local": _r(hx - cx - ax, hy - cy - ay, -ang),
+                                # The footprint carries NO rotation of its own
+                                # -- `_smd` bakes every angle into the local
+                                # geometry -- so the offset it writes is the
+                                # plain difference from its anchor. Rotating it
+                                # (by the part's own angle, as the automatic
+                                # branch does when it turns an offset INTO
+                                # this frame) sent a hand-placed label on a
+                                # unit at 180 degrees to the far side of the
+                                # board: right in the preview, wrong in the
+                                # 3D view and in every exported file.
+                                "local": (hx - cx - ax, hy - cy - ay),
                                 "quad": quad, "hand": True})
                     ink_obs.append(quad)
                     continue

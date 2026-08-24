@@ -1678,3 +1678,51 @@ def test_the_clk_jumper_vias_can_be_moved_but_not_onto_other_copper():
                        ("across the CLK pad", (5.0, 18.45))):
         assert not pcb.jumper_via_ok(spec, "via", bad), \
             f"a via on {label} at {bad} was called legal"
+
+
+@pytest.mark.parametrize("rot", [0, 90, 180, 270])
+@pytest.mark.parametrize("side,which,ref", [("front", "d", "D1"),
+                                            ("back", "r", "R1")])
+def test_a_hand_placed_label_prints_where_it_was_put_at_any_angle(rot, side,
+                                                                  which, ref):
+    """A label dragged to a spot prints at that spot, whatever the part's angle.
+
+    The reference is written into the footprint as an offset from its anchor,
+    and the footprints here carry no rotation of their own -- `_smd` bakes
+    every angle into the local geometry instead. So the offset is a plain
+    difference, and rotating it (the way the automatic branch rotates an
+    offset INTO that frame) moves the ink somewhere nobody asked for. At 180
+    degrees it landed on the far side of the board: right in the 2D preview,
+    which reads the position, and wrong in the 3D view and in every exported
+    file, which read the footprint.
+
+    Every angle and both faces, because the bug was invisible at 0 -- where a
+    rotation is the identity -- and every earlier test used 0.
+    """
+    from shapely.geometry import box as sbox
+
+    want = (6.5, 4.0) if side == "front" else (13.5, 16.0)
+    led = pcb.Led(10.0, 10.0, "red", side=side, rot=rot,
+                  **{f"{which}label_at": want})
+    board = invariants.assert_parses(
+        pcb.generate_pcb(pcb.BadgeSpec(leds=[led])))
+    printed = {r: at for r, _layer, at, _bx
+               in invariants._printed_references(board)}
+    assert ref in printed, (
+        f"{ref} is not printed at all on a {side} unit at {rot} degrees; "
+        f"the board carries {sorted(printed)}")
+    at = printed[ref]
+    assert max(abs(at[0] - want[0]), abs(at[1] - want[1])) < 0.01, (
+        f"{ref} was dragged to {want} and the board prints it at "
+        f"{(round(at[0], 3), round(at[1], 3))}")
+
+    # And it is still printable there: the whole point of honouring the
+    # position is that the search vetted it first.
+    ink = sbox(*next(bx for r, _l, _a, bx in invariants._printed_references(board)
+                     if r == ref))
+    unit_pads = [p for p in board.pads if p.ref != "J1"]
+    assert len(unit_pads) == 4, f"expected four unit pads, found {unit_pads}"
+    for pad in unit_pads:
+        assert ink.distance(pad.copper()) >= invariants.REFDES_CLEAR - 1e-4, (
+            f"{ref} prints {ink.distance(pad.copper()):.3f} mm from pad "
+            f"{pad.ref}.{pad.num}")
