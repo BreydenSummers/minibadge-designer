@@ -2,6 +2,7 @@ import re
 
 import pytest
 
+import invariants
 from minibadge_designer import pcb
 
 
@@ -1541,3 +1542,51 @@ def test_a_hand_bent_perimeter_bridge_is_built_through_its_bends():
     assert pcb.bridge_problems(bad) == [(0, "B.Cu")], (
         "a bend that puts the bridge through the unit's own pad has to be "
         "reported: the board would ship a short")
+
+
+@pytest.mark.parametrize("layout,size,rot", [
+    ("stacked", "0805", 0), ("stacked", "0603", 90), ("inline", "1206", 180),
+])
+def test_part_labels_print_on_the_silkscreen_and_can_be_turned_off(layout, size,
+                                                                   rot):
+    """The board names its parts D1 and R1, in ink, unless asked not to.
+
+    A footprint's reference is documentation on the fab layer and INK on the
+    silkscreen, and only one of those reaches the finished board. It was on
+    the fab layer, so the BOM named parts by references the board never
+    printed: whoever solders the kit has to work out which resistor is R1 from
+    the picture. Printed is the default, and the switch exists because a badge
+    whose whole face is artwork does not want two labels on it.
+    """
+    led = pcb.Led(10.0, 10.0, "red", layout=layout, size=size, rot=rot)
+    on = pcb.generate_pcb(pcb.BadgeSpec(leds=[led]))
+    off = pcb.generate_pcb(pcb.BadgeSpec(leds=[led], refdes=False))
+
+    for ref in ("D1", "R1"):
+        assert re.search(rf'\(fp_text reference "{ref}"[^\n]*\(layer "[FB]\.SilkS"\)',
+                         on), f"{ref} is not printed on the silkscreen"
+        assert re.search(rf'\(fp_text reference "{ref}"[^\n]*\(layer "[FB]\.Fab"\)',
+                         off), (
+            f"with labels off, {ref} must stay on the fab layer -- a footprint "
+            "without a reference is not a footprint")
+        assert not re.search(
+            rf'\(fp_text reference "{ref}"[^\n]*\(layer "[FB]\.SilkS"\)', off), \
+            f"{ref} still prints with labels switched off"
+
+    # The ink lands somewhere printable: clear of the pads' mask openings, on
+    # this unit and its sibling. Stated as a clearance, since where exactly
+    # the label goes is the placement search's business.
+    from shapely.geometry import box as sbox
+    b = invariants.assert_parses(on)
+    labels = invariants._printed_references(b)
+    assert len(labels) == 2, f"expected D1 and R1 in ink, got {labels}"
+    unit_pads = [pad for pad in b.pads if pad.ref != "J1"]
+    assert len(unit_pads) == 4, (
+        f"expected the unit's four pads to measure against, found {unit_pads}")
+    for ref, layer, _at, bx in labels:
+        for pad in unit_pads:
+            gap = sbox(*bx).distance(pad.copper())
+            assert gap >= invariants.REFDES_CLEAR - 1e-4, (
+                f"{ref} is {gap:.3f} mm from pad {pad.ref}.{pad.num} on a "
+                f"{layout} {size} unit at {rot} degrees: the fab clips ink "
+                "that close to a mask opening")
