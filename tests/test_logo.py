@@ -199,3 +199,60 @@ def test_transparency_flattens_to_white():
     assert rects
     # Transparent border must not become silkscreen: total area ~ quarter of box.
     assert sum(w * h for _, _, w, h in rects) < 10 * 10 * 0.5
+
+
+BOARD = (0.16, 0.16, 20.16, 20.16)
+
+
+def test_artwork_may_hang_off_the_board_and_keeps_its_detail():
+    """Art is placed at the size asked for, and sampled where it can print.
+
+    Art used to be shrunk to fit inside the board, which made the one thing a
+    big image is *for* impossible: lining a picture up with a board profile,
+    where the part you care about sits on the board and the rest hangs off.
+    Nothing downstream needed the shrinking -- everything outside the board is
+    clipped anyway.
+
+    Sampling has to follow the placement, though, or honouring the width would
+    quietly cost detail: the grid has a fixed cell budget, and spreading it
+    over 87 mm of drawing to print 20 mm of board is a coarser board than the
+    same art gets when it fits. The window that can print is cropped out first,
+    so the pitch stays put.
+    """
+    # Black in the RIGHT half only, so where the ink lands says which part of
+    # the image was sampled.
+    png = _png(lambda d: d.rectangle((100, 0, 199, 199), fill="black"))
+
+    fits = classify_image(png, cx=10.16, cy=10.16, width_mm=14.0,
+                          mode="threshold", material="silk", board=BOARD)
+    wide = classify_image(png, cx=10.16, cy=10.16, width_mm=87.0,
+                          mode="threshold", material="silk", board=BOARD)
+
+    assert wide.pw < fits.pw * 1.15, (
+        f"87 mm of art samples at {wide.pw:.3f} mm cells where 14 mm samples "
+        f"at {fits.pw:.3f}: honouring the width cost detail on the board")
+    assert wide.x_org <= BOARD[0] and wide.x_org + wide.cols * wide.pw >= BOARD[2], (
+        f"the sampled window ({wide.x_org:.2f} .. "
+        f"{wide.x_org + wide.cols * wide.pw:.2f}) does not cover the board")
+
+    # The ink is the half of the image that lands on the board, not a shrunken
+    # copy of the whole thing: at 87 mm centred, the black half starts at the
+    # board's own centre.
+    ink = [wide.x_org + (c + 0.5) * wide.pw
+           for r in range(wide.rows) for c in range(wide.cols)
+           if wide.grids["silk"][r * wide.cols + c]]
+    assert ink, "87 mm of art put no ink on the board at all"
+    assert abs(min(ink) - 10.16) < 0.3, (
+        f"the black half starts at x={min(ink):.2f}; centred art 87 mm wide "
+        "puts that boundary on the board's centre line")
+
+    # Pushed right off the left edge: the centre is nowhere near the board and
+    # the placement still holds.
+    off = classify_image(png, cx=-8.0, cy=10.16, width_mm=40.0,
+                         mode="threshold", material="silk", board=BOARD)
+    rects = grid_to_rects(off, "silk", [], board=BOARD)
+    assert rects, "art whose centre is off the board printed nothing"
+    right = max(x + w for x, _y, w, _h in rects)
+    assert right <= 12.1, (
+        f"the ink runs to x={right:.2f}; the image's black half ends at 12 mm "
+        "when its centre sits 8 mm off the left edge")
