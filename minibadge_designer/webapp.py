@@ -1906,6 +1906,9 @@ def _generate_impl(render: bool):
     # Via tenting is a board-wide fab choice like the finish: anything but an
     # explicit opt-out means tented (every manufacturer's default).
     tenting = params.get("tenting") is not False
+    # Printed part references (D1, R1, ...). On unless explicitly turned off,
+    # the same contract as tenting: silence means the default a board wants.
+    refdes = params.get("refdes") is not False
 
     try:
         pins = _parse_pins(params)
@@ -2324,6 +2327,20 @@ def _generate_impl(render: bool):
         # The printed pin captions live on both silks; art keeps clear of them
         # exactly like it keeps clear of the pads.
         captions = [RectKeepout(*b) for b in pcb.caption_boxes(pins)]
+        # The printed part references are generated ink like those captions,
+        # so artwork is carved around them rather than printed over them --
+        # and a window may not open mask under them either, which the fab
+        # would clip. Per face: a part's reference prints on the face the part
+        # is mounted on.
+        _ref_spec = pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds,
+                                  refdes=refdes, clk_jumper=clk_jumper,
+                                  jumper=jpos, jumper_rot=jrot,
+                                  jumper_side=jside, jumper_via=jvia)
+        refdes_keep = {
+            face: [RectKeepout(*b)
+                   for b in pcb.refdes_boxes(_ref_spec, safe, side=face)]
+            for face in ("front", "back")
+        }
         # The CLK jumper (pads, rail via + stub, the routed link to pin 9,
         # and its CLK/3V3 labels) claims front-face room like a unit does;
         # only its via barrel penetrates to the back.
@@ -2350,7 +2367,7 @@ def _generate_impl(render: bool):
                                for v in (clk_i["via"], clk_i["v3via"]) if v]
         decor_base = {
             side: [CircleKeepout(x, y, 1.65) for x, y in kept_pads]
-            + captions
+            + captions + refdes_keep[side]
             + (jumper_decor if side == jface else jumper_via_keep)
             + [_led_keepout(led, safe, pins, leds, outline_rings, side, clk_i)
                for led in leds if led.side == side]
@@ -2390,7 +2407,8 @@ def _generate_impl(render: bool):
         # LED sitting on the far side). That is what lets a back-only window run
         # right under a part mounted on the front.
         _window_base = ([CircleKeepout(x, y, 2.0) for x, y in kept_pads]
-                        + captions + jumper_via_keep)
+                        + captions + jumper_via_keep
+                        + refdes_keep["front"] + refdes_keep["back"])
 
         def _crossers(face: str) -> list:
             out: list = []
@@ -2601,6 +2619,7 @@ def _generate_impl(render: bool):
     spec = pcb.BadgeSpec(
         name=name, leds=leds, texts=texts, art=art_layers, mask_color=mask_color,
         finish=finish, pins=pins, outline=outline_rings, tenting=tenting,
+        refdes=refdes,
         clk_jumper=clk_jumper, jumper=jpos, jumper_rot=jrot,
         jumper_side=jside, jumper_via=jvia, jumper_nodes=jnodes,
         jumper_v3nodes=jv3nodes, jumper_v3pin=jv3pin,

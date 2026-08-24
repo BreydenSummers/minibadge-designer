@@ -704,6 +704,11 @@
             <option value="tented" selected>Tented</option>
             <option value="exposed">Exposed</option>
           </select></div>
+        <div><div class="sub" style="margin-top:0">Part labels</div>
+          <select id="refdes" title="Print each part's reference (D1, R1, ...) on the silkscreen, the way a board names its parts for whoever solders it">
+            <option value="on" selected>D1, R1&hellip;</option>
+            <option value="off">None</option>
+          </select></div>
       </div>
       <div class="sub" style="margin-top:0">Board shape</div>
       <input type="file" id="shapefile" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp,image/svg+xml,.svg">
@@ -1237,6 +1242,166 @@ renderPinGrid();
   draw();
   return true;
 }
+// ---- copy / paste ----------------------------------------------------------
+// Anything selectable can be copied and pasted: a unit, a text, an artwork
+// layer, an outline part. The clipboard carries JSON so a copy survives into
+// another tab (or another design), and an in-memory buffer holds the SAME item
+// live, because an uploaded image is a File and no amount of JSON carries one.
+// A paste prefers the buffer when the clipboard text is the one it wrote.
+const CLIP_FORMAT = "minibadge/clip@1";
+const CLIP_LABEL = { led: "LED", text: "text", art: "artwork layer",
+                     shapeel: "outline part" };
+const CLIP_CAP = { led: () => MAX_LEDS, text: () => MAX_TEXTS,
+                   art: () => MAX_ART, shapeel: () => MAX_SHAPE_ELS };
+const CLIP_LIST = { led: () => state.leds, text: () => state.texts,
+                    art: () => state.art,
+                    shapeel: () => state.shape.elements };
+let clipBuffer = null;     // {stamp, kind, item} -- live, uploads included
+let clipSeq = 0;
+
+// The one place that copies an item deeply enough to be independent of the
+// original: a shared palette array or adv object would make the copy change
+// when its source did.
+function clipClone(kind, item) {
+  const out = { ...item };
+  if (kind === "led") {
+    out.adv = item.adv ? { ...item.adv } : null;
+    for (const k of Object.values(NODE_KEYS)) {
+      if (Array.isArray(item[k])) out[k] = item[k].map(n => [+n[0], +n[1]]);
+    }
+    out.term = item.term ? { ...item.term } : null;
+  } else if (kind === "art") {
+    out.palette = (item.palette || []).map(q => ({ rgb: [...q.rgb], material: q.material }));
+    out.overrides = (item.overrides || []).map(o => ({ ...o }));
+    out.caches = null;   // rebuilt on arrival; they hold canvases, not data
+  }
+  return out;
+}
+// What goes on the system clipboard. Uploads cannot ride along, and saying so
+// beats pasting a layer whose image is silently missing.
+function clipPayload(kind, item, stamp) {
+  const bare = clipClone(kind, item);
+  const hadFile = !!(bare.file || bare.raster);
+  delete bare.file;
+  delete bare.raster;
+  return JSON.stringify({ $format: CLIP_FORMAT, stamp, kind, hadFile,
+                          item: bare });
+}
+function clipCopy(kind, index) {
+  const item = (CLIP_LIST[kind] || (() => []))()[index];
+  if (!item) return null;
+  const stamp = `${TAB_ID}:${++clipSeq}`;
+  clipBuffer = { stamp, kind, item: clipClone(kind, item) };
+  return clipPayload(kind, item, stamp);
+}
+// Where a pasted copy lands: offset a little so it does not hide under its
+// original, then whatever that kind's own placement rules say. A unit goes
+// through the same free-spot search the "+ Add LED" button uses, so a paste
+// can never drop one on a connector pad.
+function clipPlace(kind, item) {
+  const step = 1.5;
+  if (kind === "led") {
+    item.x += step; item.y += step;
+    // freeSpot before spotForNewLed: the latter is allowed to change the
+    // layout and rotation to make a unit fit, which is right for "+ Add LED"
+    // and wrong for a paste -- a copy that arrives in a different shape from
+    // the thing that was copied is not a copy.
+    let spot = unitInsideBoard(item) && !padConflict(item)
+      ? clampLedFor(item, item.x, item.y) : freeSpot(item);
+    if (!spot) spot = spotForNewLed(item);
+    if (!spot) return false;
+    [item.x, item.y] = spot;
+    return true;
+  }
+  if (kind === "text") {
+    item.x = Math.min(Math.max(item.x + step, 0.8), 19.5);
+    item.y = Math.min(Math.max(item.y + step, 0.8), 19.5);
+    return true;
+  }
+  item.cx = (item.cx || 10.16) + step;
+  item.cy = (item.cy || 10.16) + step;
+  return true;
+}
+function clipPaste(text) {
+  let doc = null;
+  try {
+    doc = JSON.parse(text);
+  } catch (err) {
+    return false;   // not ours; let the browser have the paste
+  }
+  if (!doc || doc.$format !== CLIP_FORMAT || !CLIP_LIST[doc.kind]) return false;
+  const kind = doc.kind;
+  const list = CLIP_LIST[kind]();
+  if (list.length >= CLIP_CAP[kind]()) {
+    setStatus(`That is the limit: ${CLIP_CAP[kind]()} ${CLIP_LABEL[kind]}s on `
+      + "one badge. Remove one before pasting another.", true);
+    return true;
+  }
+  // The buffer is the same copy this clipboard text was written from, so it
+  // still has the uploaded image; JSON from another tab does not.
+  const live = clipBuffer && clipBuffer.stamp === doc.stamp
+    && clipBuffer.kind === kind ? clipBuffer.item : null;
+  if (!live && doc.hadFile) {
+    setStatus(`That ${CLIP_LABEL[kind]} was copied in another tab and its `
+      + "image cannot come with it. Copy it again in this tab, or re-add the "
+      + "image here.", true);
+    return true;
+  }
+  const item = clipClone(kind, live || doc.item);
+  if (!clipPlace(kind, item)) {
+    setStatus(`No room to paste that ${CLIP_LABEL[kind]}: make space and try `
+      + "again.", true);
+    return true;
+  }
+  list.push(item);
+  const at = list.length - 1;
+  if (kind === "led") { renderLedList(); }
+  else if (kind === "text") { renderTextList(); }
+  else if (kind === "art") { rebuildArt(item); renderArtList(); }
+  else { renderShapeOpts(); renderPinGrid(); requestOutline(true); }
+  setSelection(kind, at, item.side);
+  setStatus(`Pasted ${CLIP_LABEL[kind]} ${at + 1}.`);
+  draw();
+  m3dStale("pasted a part");
+  return true;
+}
+// Real clipboard events, not a keyboard shortcut of our own: they carry the
+// system clipboard with them (no permission prompt), which is what makes a
+// copy work across tabs, and they leave ordinary text selection alone.
+const clipEditing = (e) => {
+  const tag = ((e.target && e.target.tagName) || "").toLowerCase();
+  if (tag === "input" || tag === "select" || tag === "textarea") return true;
+  const sel = window.getSelection && window.getSelection();
+  return !!(sel && String(sel).length);   // the user is copying page text
+};
+window.addEventListener("copy", e => {
+  if (clipEditing(e) || !selected || !CLIP_LIST[selected.kind]) return;
+  const payload = clipCopy(selected.kind, selected.index);
+  if (!payload) return;
+  e.clipboardData.setData("text/plain", payload);
+  e.preventDefault();
+  setStatus(`Copied ${CLIP_LABEL[selected.kind]} ${selected.index + 1}.`);
+});
+window.addEventListener("cut", e => {
+  if (clipEditing(e) || !selected || !CLIP_LIST[selected.kind]) return;
+  const kind = selected.kind, idx = selected.index;
+  const payload = clipCopy(kind, idx);
+  if (!payload) return;
+  e.clipboardData.setData("text/plain", payload);
+  e.preventDefault();
+  if (removeItem(kind, idx, `${CLIP_LABEL[kind]} ${idx + 1}`)) {
+    if (kind === "led") renderLedList();
+    else if (kind === "text") renderTextList();
+    else if (kind === "art") renderArtList();
+    else { renderShapeOpts(); renderPinGrid(); requestOutline(true); }
+    draw();
+  }
+});
+window.addEventListener("paste", e => {
+  if (clipEditing(e)) return;
+  const text = e.clipboardData && e.clipboardData.getData("text/plain");
+  if (text && clipPaste(text)) e.preventDefault();
+});
 window.addEventListener("keydown", e => {
   const tag = (e.target.tagName || "").toLowerCase();
   if (tag === "input" || tag === "select" || tag === "textarea") return;
@@ -1262,6 +1427,10 @@ const state = {
   mask: "green",
   finish: "enig",  // surface finish: what color the exposed metal plates
   tenting: true,   // vias covered with soldermask (every fab's default)
+  // Print each part's reference (D1, R1, ...) on the silk. On by default: it
+  // is what the BOM names the parts, and a board that does not say which
+  // resistor is R1 hands the person soldering it a puzzle.
+  refdes: true,
   pins: [...ALL_PINS],
   // Board-level CLK hookup for units with L.clk set: the 3-pad solder
   // jumper (bridge one side: steady 3V3 or blinking CLK) or a direct trace
@@ -3985,6 +4154,128 @@ function captionBoxes() { // mirrors pcb.caption_boxes
   }
   return out;
 }
+// ---- printed part references (mirrors pcb.refdes_layout exactly) ----
+// D1, R1, ... on the silkscreen, on by default. The search is why this is a
+// mirror rather than a fixed offset: a label's spot depends on where the
+// unit's other part, its own silk, its neighbours' pads, the pin captions and
+// the board edge are, and if the canvas guessed differently from the
+// generator the preview would print ink the board does not.
+const REFDES_SIZE = 0.7, REFDES_PEN = 0.1, REFDES_GAP = 0.15;
+const refdesQuad = (cx, cy, ref) => {
+  const hw = ref.length * REFDES_SIZE * 0.6 / 2 + 0.25;
+  const hh = REFDES_SIZE / 2 + 0.25;
+  return [[cx - hw, cy - hh], [cx + hw, cy - hh], [cx + hw, cy + hh], [cx - hw, cy + hh]];
+};
+let _refdesCache = { key: "", list: [] };
+function refdesLayout() {
+  const key = JSON.stringify([
+    state.refdes !== false,
+    state.leds.map(L => [L.x, L.y, L.rot, L.layout, L.size, !!L.reverse, L.side,
+                         !!L.novia, !!L.farled, L.adv]),
+    state.clk, [...state.pins], state.shape.ringsRev || 0,
+  ]);
+  if (_refdesCache.key === key) return _refdesCache.list;
+  const out = [];
+  if (state.refdes === false || !state.leds.length) {
+    _refdesCache = { key, list: out };
+    return out;
+  }
+  const rings = boardRings();
+  const edges = [];
+  for (const ring of rings) {
+    for (let i = 0; i < ring.length; i++) edges.push([ring[i], ring[(i + 1) % ring.length]]);
+  }
+  const copperObs = [];
+  for (const L of state.leds) copperObs.push(...unitCopperQuads(L, false));
+  for (const [px, py] of activePads()) {
+    const hw = 0.875 + 0.15;
+    copperObs.push([[px - hw, py - hw], [px + hw, py - hw],
+                    [px + hw, py + hw], [px - hw, py + hw]]);
+  }
+  const inkObs = captionBoxes().map(b => rectPoly(b));
+  for (const L of state.leds) {   // each part's own silk box
+    const g = geomOf(L);
+    for (const [which, anchor] of [["led", [0, 0]], ["res", g.res]]) {
+      const pk = which === "led" ? PKG[g.pkg] : resPkgOf(g.pkg);
+      const lens = which === "led" ? (pk.lens || 0) : 0;
+      const hw = Math.max(pk.dx + pk.pw / 2, pk.body[0] / 2, lens / 2) + 0.2;
+      const hh = Math.max(pk.ph / 2, pk.body[1] / 2, lens / 2) + 0.2;
+      const extra = which === "led" ? (g.ledRot || 0) : (g.resRot || 0);
+      // Centre turns with the unit, extents with the part (mirrors pcb).
+      const [axx, ayy] = unitPoint(L, anchor[0], anchor[1]);
+      inkObs.push([[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([sx, sy]) => {
+        const [ex, ey] = rotOff(sx * hw, sy * hh, (L.rot || 0) + extra);
+        return [axx + ex, ayy + ey];
+      }));
+    }
+  }
+  const ci = clkActive() && state.clk.jumper ? clkInfo() : null;
+  if (ci) {
+    copperObs.push(...jumperCopperPieces(ci).map(([, q]) => q));
+    inkObs.push(...jumperCaptionBoxes(ci).map(b => rectPoly(b)));
+  }
+  state.leds.forEach((L, i) => {
+    const g = geomOf(L);
+    const far = !!L.farled && farOK(L);
+    for (const [which, ref, anchor] of [["led", `D${i + 1}`, [0, 0]],
+                                        ["res", `R${i + 1}`, g.res]]) {
+      let face = L.side;
+      if (which === "led" && far) face = L.side === "back" ? "front" : "back";
+      const pk = which === "led" ? PKG[g.pkg] : resPkgOf(g.pkg);
+      const ty = Math.max(pk.ph / 2 + 1.0, pk.body[1] / 2 + 0.6);
+      const tx = pk.dx + pk.pw / 2 + ref.length * REFDES_SIZE * 0.6 / 2 + 0.4;
+      const extra = which === "led" ? (g.ledRot || 0) : (g.resRot || 0);
+      let [sx, sy] = which === "led" ? g.res : [-g.res[0], -g.res[1]];
+      [sx, sy] = rotOff(sx, sy, -extra);
+      const firstY = (Math.abs(sy) > Math.abs(sx) && sy < 0) ? ty : -ty;
+      const cands = [[0, firstY], [0, -firstY], [tx, 0], [-tx, 0],
+                     [tx, firstY], [-tx, firstY], [tx, -firstY], [-tx, -firstY]];
+      const [ax, ay] = unitPoint(L, anchor[0], anchor[1]);
+      for (const [ox, oy] of cands) {
+        const [lx, ly] = rotOff(ox, oy, (L.rot || 0) + extra);
+        const [px, py] = [ax + lx, ay + ly];
+        const quad = refdesQuad(px, py, ref);
+        if (copperObs.some(q => !polysClear(quad, q, REFDES_GAP))) continue;
+        if (inkObs.some(q => !polysClear(quad, q, 0))) continue;
+        if (!quad.every(([qx, qy]) => pipRings(rings, qx, qy))) continue;
+        let tooClose = false;
+        for (let k = 0; k < quad.length && !tooClose; k++) {
+          const a = quad[k], b = quad[(k + 1) % quad.length];
+          if (edges.some(([e0, e1]) => noviaSegDist(a, b, e0, e1) < SILK_EDGE_CLEAR)) {
+            tooClose = true;
+          }
+        }
+        if (tooClose) continue;
+        out.push({ unit: i, which, ref, face, at: [px, py], quad });
+        inkObs.push(quad);
+        break;
+      }
+    }
+  });
+  _refdesCache = { key, list: out };
+  return out;
+}
+// The printed references, on the face each part is mounted on. Silk ink, so
+// it is drawn in the silkscreen colour like the pin captions.
+function drawRefdes(c, mirror, canvas) {
+  const side = mirror ? "back" : "front";
+  const labs = refdesLayout().filter(l => l.face === side);
+  if (!labs.length) return;
+  // Called from the text pass, which is never mirrored: the back view flips
+  // the canvas for parts, and a flipped transform draws the glyphs
+  // backwards. Flip the POSITION instead, exactly as the pin captions do --
+  // "D2" reads left to right on a board you are looking at from the back,
+  // because that is how the fab prints mirrored silk.
+  const tx = x => mirror ? canvas.width - 2 * VIEW.tx - mm2px(x) : mm2px(x);
+  c.save();
+  c.textAlign = "center";
+  c.textBaseline = "middle";
+  // KiCad sizes its stroke font by CAP height and a canvas font size is the
+  // em, so the drawn glyphs need scaling up to match the printed ink.
+  c.font = `${(REFDES_SIZE * 1.36) * SCALE}px sans-serif`;
+  for (const lab of labs) c.fillText(lab.ref, tx(lab.at[0]), mm2px(lab.at[1]));
+  c.restore();
+}
 function eraseArtKeepouts(oc, forWindows, unitSide) {
   oc.save();
   oc.globalCompositeOperation = "destination-out";
@@ -3997,6 +4288,15 @@ function eraseArtKeepouts(oc, forWindows, unitSide) {
   }
   for (const [x0, y0, x1, y1] of captionBoxes()) {
     oc.fillRect(mm2px(x0), mm2px(y0), (x1 - x0) * SCALE, (y1 - y0) * SCALE);
+  }
+  // Printed part references are generated ink like the captions: art is
+  // carved around them, and a window may not open mask under them either.
+  for (const lab of refdesLayout()) {
+    if (!forWindows && unitSide && lab.face !== unitSide) continue;
+    const xs = lab.quad.map(q => q[0]), ys = lab.quad.map(q => q[1]);
+    oc.fillRect(mm2px(Math.min(...xs)), mm2px(Math.min(...ys)),
+                (Math.max(...xs) - Math.min(...xs)) * SCALE,
+                (Math.max(...ys) - Math.min(...ys)) * SCALE);
   }
   { // The CLK jumper claims front-face room like a unit does (pads, rail
     // via + stub, the routed link to pin 9, its labels); only the via
@@ -4940,6 +5240,7 @@ function drawView(canvas, side) {
   // ---- text pass (never mirrored) ----
   c.fillStyle = state.mask === "white" ? "#555" : "rgba(255,255,255,.75)";
   c.font = `${0.75 * SCALE}px sans-serif`; c.textAlign = "center";
+  drawRefdes(c, mirror, canvas);
   // Pair captions, matching the silk actually printed on the fab board.
   // Each caption names a pad PAIR, left word for the left pad, so in the
   // mirrored back view the words swap with the pads they describe.
@@ -7907,6 +8208,14 @@ $("tenting").addEventListener("change", () => {
   state.tenting = $("tenting").value !== "exposed";
   draw(); // vias crossing windows repaint as mask caps or bare annuli
 });
+$("refdes").addEventListener("change", () => {
+  state.refdes = $("refdes").value !== "off";
+  // Art is carved around this ink, so the layers have to be rebuilt, not
+  // just redrawn: turning the labels on takes a bite out of a full-face
+  // silk layer exactly where the board will print them.
+  rebuildAllArt();
+  renderLedList(); draw(); m3dStale("part labels changed");
+});
 
 // Art layer metadata as /generate, /render and /outline take it.
 function artParams() {
@@ -7933,6 +8242,7 @@ function designFormData() { // the full design, as /generate and /render take it
     mask_color: state.mask,
     finish: state.finish,
     tenting: state.tenting,
+    refdes: state.refdes !== false,
     pins: ALL_PINS.filter(pinOn),
     clk: { jumper: !!state.clk.jumper, rot: state.clk.rot || 0,
            side: state.clk.side === "back" ? "back" : "front",
@@ -8495,6 +8805,8 @@ const TIPS = {
   </ul>` },
   leds: { title: "Step 4: a red LED behind the visor", img: "leds.webp", html: `<ul>
     <li>An LED with Side set to <b>Back</b> glows in the window on the Back view; the front view shows only its dashed ghost.</li>
+    <li>Each part prints its name &mdash; <b>D1</b>, <b>R1</b> &mdash; on the silkscreen beside it, which is what the parts list calls them. Turn that off under <b>Part labels</b> in Board characteristics if the face is all artwork.</li>
+    <li>Anything you select copies: <b>Ctrl/&#8984;+C</b> then <b>V</b>, or <b>X</b> to move it. Works between tabs, so a unit set up the way you like can be pasted into another badge.</li>
     <li>Each LED arrives with its series resistor, pre-wired — nothing to route.</li>
     <li><b>In line</b> is a thin strip (fits behind the visor); 0805 is the minibadge standard. The Layout and Size selects carry the rest.</li>
   </ul>` },
@@ -8664,6 +8976,7 @@ function designJSON() {
   return {
     v: 1, name: $("name").value, mask: state.mask, finish: state.finish,
     tenting: state.tenting,
+    refdes: state.refdes !== false,
     pins: [...(state.pins || ALL_PINS)],
     clk: { ...state.clk },
     shape: {
@@ -8867,6 +9180,7 @@ function normalizeDesign(raw) {
     mask: _pick(raw.mask, Object.keys(MASKS), "green"),
     finish: _pick(raw.finish, ["enig", "hasl"], "enig"),
     tenting: raw.tenting !== false,
+    refdes: raw.refdes !== false,   // absent (older saves) means labelled
     rows: raw.rows && typeof raw.rows === "object" ? raw.rows : undefined,
     pins: Array.isArray(raw.pins)
       ? ALL_PINS.filter(n => raw.pins.map(String).includes(n)) : undefined,
@@ -9029,6 +9343,8 @@ function applyDesign(d, assets) {
   state.mask = d.mask || "green"; $("mask").value = state.mask;
   state.finish = d.finish || "enig"; $("finish").value = state.finish;
   state.tenting = d.tenting !== false;  // absent (older saves) means tented
+  state.refdes = d.refdes !== false;    // ditto: labels are the default
+  $("refdes").value = state.refdes ? "on" : "off";
   $("tenting").value = state.tenting ? "tented" : "exposed";
   // pins arrive already whitelisted (normalizeDesign) and already migrated from
   // the pre-per-pin `rows` shape (MIGRATIONS[1]).

@@ -120,6 +120,10 @@ CORPUS = [
     ("pins-power-only", _spec(pins=("2", "7"))),
     # --- stackup ------------------------------------------------------------
     ("mask-purple-hasl", _spec(mask_color="purple", finish="hasl")),
+    # Part labels off: the other half of the refdes switch, which every row
+    # above leaves at its default. Without it the "no ink when off" branch of
+    # assert_printed_references_sit_on_printable_board never runs.
+    ("no-part-labels", _spec(refdes=False)),
     # --- nothing at all: the degenerate board still has to be legal ---------
     ("bare-board", _spec(leds=[], art=[])),
     # --- axes this corpus originally missed entirely ------------------------
