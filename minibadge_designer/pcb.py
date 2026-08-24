@@ -209,13 +209,19 @@ def clk_info(spec: "BadgeSpec") -> dict | None:
     pads = [("CLK", *at(-JUMPER_PITCH, 0.0)), (CLK_RAIL, jx, jy),
             ("3V3", *at(JUMPER_PITCH, 0.0))]
     far_face = "back" if side == "front" else "front"
-    far = at(*JUMPER_VIA)
+    # Either via may have been dragged off the spot the jumper's own frame
+    # puts it (spec.jumper_via_at / jumper_v3via_at). Honoured as given here:
+    # this function is a pure accessor that half the generator calls, so the
+    # "is that spot legal" question lives in `jumper_via_ok` and the webapp
+    # drops an illegal one back to None before the board is built.
+    far = tuple(spec.jumper_via_at) if spec.jumper_via_at else at(*JUMPER_VIA)
     via = (far if any(led.clk and led.side == far_face for led in spec.leds)
            else None)
     near = (jx, jy)
     return {"net": CLK_RAIL, "jumper": (jx, jy, rot), "side": side,
             "pads": pads, "via": via,
-            "v3via": (at(*JUMPER_V3VIA)
+            "v3via": ((tuple(spec.jumper_v3via_at) if spec.jumper_v3via_at
+                       else at(*JUMPER_V3VIA))
                       if side == "back" and spec.jumper_via else None),
             "v3link": side == "back" and not spec.jumper_via,
             "nodes": tuple(spec.jumper_nodes or ()),
@@ -259,6 +265,72 @@ def jumper_caption_boxes(clk) -> list[tuple[float, float, float, float]]:
         else:
             out.append((cx - hw, cy - 0.55, cx + hw, cy + 0.55))
     return out
+
+
+def jumper_via_ok(spec: "BadgeSpec", which: str, pos, safe=None) -> bool:
+    """Is (x, y) a legal home for one of the jumper's vias?
+
+    A via is a plated hole with copper on both faces, so it may not sit on
+    another part's copper, on a connector pad, on the jumper's OTHER pads (a
+    barrel bridging two of them is a solder jumper that is always bridged), or
+    off the board. `which` is "via" (the rail via) or "v3via".
+
+    The canvas runs this during the drag so an illegal spot cannot be dropped;
+    the webapp runs it as the backstop for requests the canvas did not make,
+    and falls back to the automatic spot rather than shipping a short.
+    """
+    if pos is None:
+        return True
+    px, py = float(pos[0]), float(pos[1])
+    clk = clk_info(spec)
+    if clk is None or not clk["jumper"]:
+        return False
+    if safe is None:
+        safe = unit_safe(spec)
+    r = VIA_SIZE / 2 + POUR_CLEARANCE
+    hazard = [(px - r, py - r), (px + r, py - r),
+              (px + r, py + r), (px - r, py + r)]
+    # The stub that feeds it is copper too, and a via dragged across the board
+    # drags the stub with it: judging the barrel alone would happily park a via
+    # somewhere clear whose feed runs straight over a pad on the way.
+    feed = next((p_ for pnet, *p_ in clk["pads"]
+                 if pnet == {"via": CLK_RAIL, "v3via": "3V3"}.get(which)), None)
+    hazards = [hazard]
+    if feed is not None:
+        hazards.append(_quad_seg((feed[0], feed[1]), (px, py), 1.1))
+    # The pad this via feeds is same-net copper (its stub joins them); the
+    # other two are not.
+    own = {"via": CLK_RAIL, "v3via": "3V3"}.get(which)
+    for pnet, cx, cy in clk["pads"]:
+        if pnet == own:
+            continue
+        if any(_quads_overlap(h, _jumper_pad_quad(clk, cx, cy)) for h in hazards):
+            return False
+    for num, qx, qy, _net, _row in CONNECTOR_PADS:
+        if num not in spec.pins:
+            continue
+        if (qx - px) ** 2 + (qy - py) ** 2 < (0.875 + r) ** 2:
+            return False
+    for led in spec.leds:
+        for lbl, quad in unit_copper_pieces(led, safe, spec.pins, spec.leds,
+                                            spec.outline, clk=clk):
+            # The rail via's own feed is the supply run that TERMINATES on it,
+            # same net and touching by construction: judging against it would
+            # call every position illegal, including the automatic one.
+            if which == "via" and lbl.startswith("trace_pad"):
+                continue
+            if any(_quads_overlap(h, quad) for h in hazards):
+                return False
+    rings = spec.outline if spec.outline else [
+        [(OUTLINE[0], OUTLINE[1]), (OUTLINE[2], OUTLINE[1]),
+         (OUTLINE[2], OUTLINE[3]), (OUTLINE[0], OUTLINE[3])]
+    ]
+    if not _point_in_rings(rings, px, py):
+        return False
+    edges = [(ring[k], ring[(k + 1) % len(ring)])
+             for ring in rings for k in range(len(ring))]
+    return all(_seg_dist((px, py), (px, py), e0, e1) >= VIA_SIZE / 2 + 0.2
+               for e0, e1 in edges)
 
 
 def jumper_copper_pieces(clk) -> list[tuple[str, list]]:
@@ -539,6 +611,8 @@ def refdes_layout(spec: BadgeSpec, safe=None) -> list[dict]:
         far = bool(led.farled) and not g["hole"] and "drill" not in PKG[g["pkg"]]
         for which, ref, anchor in (("led", f"D{i + 1}", (0.0, 0.0)),
                                    ("res", f"R{i + 1}", g["res"])):
+            if not (led.dlabel if which == "led" else led.rlabel):
+                continue      # this part's label is switched off
             face = led.side
             if which == "led" and far:
                 face = "back" if led.side != "back" else "front"
@@ -568,6 +642,28 @@ def refdes_layout(spec: BadgeSpec, safe=None) -> list[dict]:
             # unit's, and rotating the sum by the total put its label
             # somewhere neither frame agrees with.
             ax, ay = _r(anchor[0], anchor[1], led.rot)
+            # A hand-placed centre is tried first and used as given. It is a
+            # position, not an offset: the user dragged the ink to a spot on
+            # the board, and it stays there when the part turns.
+            hand = led.dlabel_at if which == "led" else led.rlabel_at
+            if hand:
+                hx, hy = float(hand[0]), float(hand[1])
+                quad = _refdes_quad(hx, hy, ref)
+                if (not any(_quads_overlap(quad, q, REFDES_GAP)
+                            for q in copper_obs)
+                        and not any(_quads_overlap(quad, q) for q in ink_obs)
+                        and all(_point_in_rings(rings, qx, qy) for qx, qy in quad)
+                        and not any(_seg_dist(a, b, e0, e1) < TEXT_EDGE_CLEAR
+                                    for a, b in zip(quad, quad[1:] + quad[:1])
+                                    for e0, e1 in edges)):
+                    out.append({"unit": i, "which": which, "ref": ref,
+                                "face": face, "at": (hx, hy),
+                                "local": _r(hx - cx - ax, hy - cy - ay, -ang),
+                                "quad": quad, "hand": True})
+                    ink_obs.append(quad)
+                    continue
+                # else: fall through to the search, which is what the canvas
+                # does with the same position, so the preview matches.
             for ox, oy in cands:
                 lx, ly = _r(ox, oy, ang)
                 px, py = cx + ax + lx, cy + ay + ly
@@ -582,8 +678,9 @@ def refdes_layout(spec: BadgeSpec, safe=None) -> list[dict]:
                        for a, b in zip(quad, quad[1:] + quad[:1])
                        for e0, e1 in edges):
                     continue
-                out.append({"unit": i, "which": which, "ref": ref, "face": face,
-                            "at": (px, py), "local": (lx, ly), "quad": quad})
+                out.append({"unit": i, "which": which, "ref": ref,
+                            "face": face, "at": (px, py), "local": (lx, ly),
+                            "quad": quad, "hand": False})
                 ink_obs.append(quad)     # the next label keeps off this ink
                 break
     return out
@@ -759,6 +856,16 @@ class Led:
     # between them starts crossing things the user can see.
     anodes: tuple = ()
     vnodes: tuple = ()
+    # Printed reference (D1 / R1) per part: whether it prints at all, and
+    # where. None = the automatic placement search picks the spot; a board-mm
+    # centre = the user dragged it there. A hand-placed label that no longer
+    # clears the copper (a part moved onto it, a package grew) falls back to
+    # the search rather than shipping ink over a mask opening -- the canvas
+    # runs the same fallback, so the two never disagree about where it went.
+    dlabel: bool = True
+    rlabel: bool = True
+    dlabel_at: tuple | None = None
+    rlabel_at: tuple | None = None
     # Board-mm bends for the unit's perimeter bridges, same contract again.
     # A unit can carry two, so they are kept apart by which face the bridge
     # runs on: bnodes bends the one on the unit's OWN face (off its rail pad,
@@ -2844,6 +2951,12 @@ class BadgeSpec:
     # degrees clockwise. Only meaningful while clk_jumper is on.
     jumper: tuple | None = None
     jumper_rot: float = 0
+    # The jumper's two vias, in board mm, when the user has dragged them off
+    # the spots the jumper's own frame would put them (None = automatic).
+    # Same fallback contract as a hand-placed part label: a position that no
+    # longer clears the copper is ignored rather than shipped.
+    jumper_via_at: tuple | None = None
+    jumper_v3via_at: tuple | None = None
     # Which face carries the jumper's pads and silk. On the back, its 3V3
     # pad has no 3V3 copper of its own (the back pour is GND), so it is fed
     # per jumper_via below. Blinking LEDs on the opposite face from the

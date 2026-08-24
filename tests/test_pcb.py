@@ -1590,3 +1590,91 @@ def test_part_labels_print_on_the_silkscreen_and_can_be_turned_off(layout, size,
                 f"{ref} is {gap:.3f} mm from pad {pad.ref}.{pad.num} on a "
                 f"{layout} {size} unit at {rot} degrees: the fab clips ink "
                 "that close to a mask opening")
+
+
+def test_a_part_label_can_be_moved_or_switched_off_one_part_at_a_time():
+    """Each printed reference is the user's to place, or to do without.
+
+    The automatic spot is a fallback, not a policy: a badge is a piece of
+    design work, and where "R1" sits on it is the designer's call. So each
+    part carries its own switch and its own position, and a hand-placed one is
+    used as given -- a POSITION, not an offset, so it stays put when the part
+    turns.
+
+    The fallback matters as much as the placement. A label placed by hand and
+    then buried (a part moved onto it, a package grew) drops back to the
+    search rather than shipping ink over a mask opening, because the canvas
+    runs the same fallback and the two have to agree about where it went.
+    """
+    from shapely.geometry import box as sbox
+
+    hand = (15.0, 5.0)
+    spec = pcb.BadgeSpec(leds=[pcb.Led(10.0, 10.0, "red", dlabel_at=hand)])
+    placed = {lab["ref"]: lab for lab in pcb.refdes_layout(spec)}
+    assert set(placed) == {"D1", "R1"}, f"expected both labels, got {placed}"
+    assert placed["D1"]["at"] == pytest.approx(hand), (
+        f"D1 was placed at {placed['D1']['at']}, not at the {hand} it was "
+        "dragged to")
+    assert placed["D1"]["hand"] and not placed["R1"]["hand"], (
+        "the hand-placed flag has to name which label was chosen by whom; "
+        "the UI draws them differently and the fallback below depends on it")
+
+    # The emitted footprint carries it as a local offset, since that is what a
+    # KiCad reference field is: turn the unit and the ink turns with it.
+    out = pcb.generate_pcb(spec)
+    assert re.search(r'\(fp_text reference "D1" \(at 5 -5 unlocked\) '
+                     r'\(layer "F\.SilkS"\)', out), (
+        "the hand-placed D1 is not written as an offset from its footprint")
+
+    # One part at a time: R1 off leaves D1 printing.
+    off = pcb.BadgeSpec(leds=[pcb.Led(10.0, 10.0, "red", rlabel=False)])
+    assert [lab["ref"] for lab in pcb.refdes_layout(off)] == ["D1"], \
+        "switching R1 off must not take D1 with it"
+    text = pcb.generate_pcb(off)
+    assert re.search(r'\(fp_text reference "R1"[^\n]*\(layer "F\.Fab"\)', text)
+    assert not re.search(r'\(fp_text reference "R1"[^\n]*SilkS', text)
+
+    # Buried by its own unit: back to the automatic spot, not onto the pad.
+    buried = pcb.BadgeSpec(leds=[pcb.Led(10.0, 10.0, "red",
+                                         dlabel_at=(10.0, 10.0))])
+    lab = next(l for l in pcb.refdes_layout(buried) if l["ref"] == "D1")
+    assert not lab["hand"], (
+        "a label dropped on its own pads was honoured; that ink is clipped by "
+        "the fab and DRC flags it")
+    board = invariants.assert_parses(pcb.generate_pcb(buried))
+    ink = sbox(*invariants._printed_references(board)[0][3])
+    unit_pads = [p for p in board.pads if p.ref != "J1"]
+    assert len(unit_pads) == 4, (
+        f"expected the unit's four pads to measure against, found {unit_pads}")
+    for pad in unit_pads:
+        assert ink.distance(pad.copper()) >= invariants.REFDES_CLEAR - 1e-4, \
+            "the fallback put the label somewhere the fab cannot print it"
+
+
+def test_the_clk_jumper_vias_can_be_moved_but_not_onto_other_copper():
+    """The jumper's vias go where the designer puts them, within reason.
+
+    A via is a plated hole with copper on both faces: parked on a pad, on
+    another part's copper or off the board it is a short or a hole in thin
+    air, and the STUB that feeds it drags along with it -- a via dropped
+    somewhere clear whose feed crosses a pad is the same fault one step
+    removed. Legal moves are honoured; the rest fall back to the spot beside
+    the jumper, which is what the canvas does with the same position.
+    """
+    leds = [pcb.Led(10.0, 6.0, "red", side="back", clk=True)]
+    auto = pcb.clk_info(pcb.BadgeSpec(leds=leds, clk_jumper=True))["via"]
+    assert auto, "this design should have a rail via to move in the first place"
+
+    moved = (auto[0], auto[1] - 2.0)
+    spec = pcb.BadgeSpec(leds=leds, clk_jumper=True, jumper_via_at=moved)
+    assert pcb.jumper_via_ok(spec, "via", moved), (
+        f"{moved} is 2 mm along the via's own feed and clear of everything; "
+        "if the check refuses that, nothing is movable")
+    assert pcb.clk_info(spec)["via"] == pytest.approx(moved)
+
+    for label, bad in (("a connector pad", (1.27, 1.27)),
+                       ("its own unit", (10.0, 6.0)),
+                       ("off the board", (25.0, 25.0)),
+                       ("across the CLK pad", (5.0, 18.45))):
+        assert not pcb.jumper_via_ok(spec, "via", bad), \
+            f"a via on {label} at {bad} was called legal"

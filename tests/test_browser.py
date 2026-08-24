@@ -5129,3 +5129,134 @@ def test_cut_takes_the_object_with_it_and_paste_puts_it_back(ui):
     back = ui.js("() => state.texts.map(t => [t.text, t.size])")
     assert back == [["zap", 2]], f"paste after cut produced {back}"
     ui.assert_clean("cut and paste a text")
+
+
+@pytest.mark.browser
+def test_a_part_label_can_be_dragged_switched_off_and_reset(ui, client):
+    """The label goes where it is dragged, off when told, back when reset.
+
+    Three gestures on one piece of ink, and each has to reach the board: drag
+    it, select it and press Delete to switch that one part's label off, and
+    double-click it to hand the spot back to the automatic search. Driven
+    through the canvas rather than through `state`, because the whole feature
+    IS the gesture.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+
+    page = ui.page
+    ui.js("""(led) => { state.leds = [led]; state.art = []; state.texts = [];
+                        renderLedList(); draw(); }""",
+          _js_led(x=10.0, y=6.0, side="front", size="0805", layout="stacked"))
+    home = ui.js("() => refdesLayout().find(l => l.ref === 'D1')")
+    assert home and not home["hand"], (
+        f"D1 has no automatic label to start from ({home})")
+
+    sx, sy = ui.board_to_client(home["at"][0], home["at"][1], "front")
+    tx, ty = ui.board_to_client(home["at"][0] + 3.0, home["at"][1], "front")
+    page.mouse.move(sx, sy)
+    page.mouse.down()
+    page.mouse.move(tx, ty, steps=8)
+    page.mouse.up()
+    moved = ui.js("() => refdesLayout().find(l => l.ref === 'D1')")
+    assert moved["hand"] and abs(moved["at"][0] - (home["at"][0] + 3.0)) < 0.3, (
+        f"the drag left D1 at {moved['at']} (hand={moved['hand']}); it was "
+        f"aimed 3 mm right of {home['at']}")
+
+    # ... and the board prints it there.
+    params = json.loads(ui.js('() => designFormData().get("params")'))
+    params["name"] = "movedlabel"
+    resp = client.post("/generate", data={"params": json.dumps(params)})
+    assert resp.status_code == 200, resp.get_json()
+    board = invariants.assert_parses(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "movedlabel/movedlabel.kicad_pcb").decode())
+    printed = {ref: at for ref, _layer, at, _bx
+               in invariants._printed_references(board)}
+    assert "D1" in printed, f"the board prints {sorted(printed)}, not D1"
+    assert max(abs(printed["D1"][0] - moved["at"][0]),
+               abs(printed["D1"][1] - moved["at"][1])) < 0.01, (
+        f"the preview shows D1 at {moved['at']} and the board prints it at "
+        f"{printed['D1']}")
+
+    # Double-click: back to the automatic spot.
+    dx, dy = ui.board_to_client(moved["at"][0], moved["at"][1], "front")
+    page.mouse.dblclick(dx, dy)
+    back = ui.js("() => refdesLayout().find(l => l.ref === 'D1')")
+    assert back and not back["hand"], (
+        f"double-click left D1 hand-placed at {back and back['at']}")
+
+    # Select it and press Delete: that ONE label goes, its sibling stays.
+    cx, cy = ui.board_to_client(back["at"][0], back["at"][1], "front")
+    page.mouse.click(cx, cy)
+    assert ui.js("() => selected && [selected.kind, selected.which]") \
+        == ["refdes", "led"], "clicking the ink did not select the label"
+    page.keyboard.press("Delete")
+    left = ui.js("() => refdesLayout().map(l => l.ref)")
+    assert left == ["R1"], (
+        f"Delete on D1's label left {left}; it must switch that one label off "
+        "and nothing else")
+    assert ui.js("() => state.leds.length") == 1, (
+        "Delete on a label deleted the part under it")
+    ui.assert_clean("drag, reset and switch off a part label")
+
+
+@pytest.mark.browser
+def test_the_clk_rail_via_can_be_dragged_and_the_board_follows(ui, client):
+    """The jumper's via is placeable, and the preview never lies about it.
+
+    The via was wherever the jumper's own frame put it, which on a crowded
+    board is not necessarily where its owner wants a hole. Dragging it moves
+    real copper -- the barrel and the stub that feeds it -- so the canvas
+    refuses spots the board could not carry, and what it does accept has to
+    come out of /generate in the same place.
+    """
+    import io
+    import json
+    import re
+    import zipfile
+
+    page = ui.page
+    ui.js("""(led) => { state.leds = [led]; state.art = []; state.texts = [];
+                        renderLedList(); draw(); }""",
+          _js_led(x=10.0, y=6.0, side="back", size="0805", clk=True))
+    home = ui.js("() => clkInfo().via")
+    assert home, "this design has no rail via to drag"
+
+    sx, sy = ui.board_to_client(home[0], home[1], "front")
+    tx, ty = ui.board_to_client(home[0], home[1] - 2.0, "front")
+    page.mouse.move(sx, sy)
+    page.mouse.down()
+    page.mouse.move(tx, ty, steps=8)
+    page.mouse.up()
+    moved = ui.js("() => clkInfo().via")
+    assert abs(moved[1] - (home[1] - 2.0)) < 0.3, (
+        f"the drag left the via at {moved}, aimed 2 mm above {home}")
+
+    params = json.loads(ui.js('() => designFormData().get("params")'))
+    params["name"] = "movedvia"
+    resp = client.post("/generate", data={"params": json.dumps(params)})
+    assert resp.status_code == 200, resp.get_json()
+    text = zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "movedvia/movedvia.kicad_pcb").decode()
+    built = [(round(float(a) - 100.0, 3), round(float(b) - 100.0, 3))
+             for a, b in re.findall(r"\(via \(at ([\d.]+) ([\d.]+)\)", text)]
+    assert any(max(abs(vx - moved[0]), abs(vy - moved[1])) < 0.01
+               for vx, vy in built), (
+        f"the preview shows the rail via at {moved} and the board drills "
+        f"{built}")
+
+    # An illegal spot is not taken: dragging it onto a connector pad leaves it
+    # where it was rather than shipping a short.
+    px, py = ui.board_to_client(1.27, 1.27, "front")
+    vx, vy = ui.board_to_client(moved[0], moved[1], "front")
+    page.mouse.move(vx, vy)
+    page.mouse.down()
+    page.mouse.move(px, py, steps=10)
+    page.mouse.up()
+    after = ui.js("() => clkInfo().via")
+    assert max(abs(after[0] - 1.27), abs(after[1] - 1.27)) > 1.0, (
+        f"the via was dropped on a connector pad at {after}")
+    ui.assert_clean("drag the CLK rail via")

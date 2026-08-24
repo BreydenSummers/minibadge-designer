@@ -2029,6 +2029,21 @@ def _generate_impl(render: bool):
             cnodes = _bends("cnodes")
             bnodes = _bends("bnodes")
             bfnodes = _bends("bfnodes")
+
+            def _point(key):
+                """One board-mm point, or None. Clamped like a bend: a
+                hand-crafted request may not fling ink off the page."""
+                raw_pt = raw.get(key)
+                if not isinstance(raw_pt, (list, tuple)) or len(raw_pt) < 2:
+                    return None
+                return (max(0.0, min(20.32, float(raw_pt[0]))),
+                        max(0.0, min(20.32, float(raw_pt[1]))))
+
+            # Each part's printed reference: shown at all, and where it sits.
+            dlabel = raw.get("dlabel") is not False
+            rlabel = raw.get("rlabel") is not False
+            dlabel_at = _point("dlabel_at")
+            rlabel_at = _point("rlabel_at")
             clk = bool(raw.get("clk"))
             # Where the via-less run ends: a chosen connector pad or another
             # unit's pad. Shape-checked only: net, kept-pin, face and chain
@@ -2057,7 +2072,9 @@ def _generate_impl(render: bool):
                           nodes=nodes, anodes=anodes, vnodes=vnodes,
                           term=term, farled=farled, adv=adv,
                           clk=clk, cnodes=cnodes,
-                          bnodes=bnodes, bfnodes=bfnodes)
+                          bnodes=bnodes, bfnodes=bfnodes,
+                          dlabel=dlabel, rlabel=rlabel,
+                          dlabel_at=dlabel_at, rlabel_at=rlabel_at)
             x, y = pcb.clamp_led_obj(led, safe)
             leds.append(pcb.Led(x=x, y=y, color=color, side=side, rot=rot,
                                 layout=layout, size=size, reverse=reverse,
@@ -2065,7 +2082,9 @@ def _generate_impl(render: bool):
                                 vnodes=vnodes, term=term,
                                 farled=farled, adv=adv,
                                 clk=clk, cnodes=cnodes,
-                                bnodes=bnodes, bfnodes=bfnodes))
+                                bnodes=bnodes, bfnodes=bfnodes,
+                                dlabel=dlabel, rlabel=rlabel,
+                                dlabel_at=dlabel_at, rlabel_at=rlabel_at))
     except (TypeError, ValueError, AttributeError):
         return {"error": "invalid led parameters"}, 400
     # Placing the units is pure geometry over user-supplied numbers, so a
@@ -2157,6 +2176,7 @@ def _generate_impl(render: bool):
     clk_jumper, jpos, jrot = True, None, 0.0
     jside, jvia = "front", True
     jnodes, jv3nodes, jv3pin = (), (), None
+    jvia_at, jv3via_at = None, None
     raw_clk = params.get("clk")
     try:
         if isinstance(raw_clk, dict):
@@ -2178,6 +2198,18 @@ def _generate_impl(render: bool):
 
             jnodes = _jbends("nodes")
             jv3nodes = _jbends("v3nodes")
+
+            def _jpoint(key):
+                pt = raw_clk.get(key)
+                if not isinstance(pt, (list, tuple)) or len(pt) < 2:
+                    return None
+                ex = pcb.OUTLINE_EXTENT
+                return (max(ex[0], min(ex[2], float(pt[0]))),
+                        max(ex[1], min(ex[3], float(pt[1]))))
+
+            # Either via, dragged off the spot the jumper's frame gives it.
+            jvia_at = _jpoint("via_at")
+            jv3via_at = _jpoint("v3via_at")
             if str(raw_clk.get("v3pin", "")) in pcb.PIN_LABELS:
                 jv3pin = str(raw_clk["v3pin"])
     except (TypeError, ValueError):
@@ -2195,8 +2227,25 @@ def _generate_impl(render: bool):
                                  jumper_rot=jrot, jumper_side=jside,
                                  jumper_via=jvia, jumper_nodes=jnodes,
                                  jumper_v3nodes=jv3nodes,
-                                 jumper_v3pin=jv3pin)
+                                 jumper_v3pin=jv3pin,
+                                 jumper_via_at=jvia_at,
+                                 jumper_v3via_at=jv3via_at)
         clk_i = pcb.clk_info(spec_clk)
+        # A hand-placed via is judged BEFORE the jumper's own backstop as well
+        # as after, because the jumper's legality test counts the via as part
+        # of its copper: a via parked on a connector pad made the JUMPER look
+        # unplaceable, and the request was refused with "no room for the CLK
+        # jumper" -- an error about the wrong object entirely.
+        if clk_i is not None and clk_i["jumper"] and (jvia_at or jv3via_at):
+            from dataclasses import replace as _dcr0
+
+            if jvia_at and not pcb.jumper_via_ok(spec_clk, "via", jvia_at):
+                jvia_at = None
+            if jv3via_at and not pcb.jumper_via_ok(spec_clk, "v3via", jv3via_at):
+                jv3via_at = None
+            spec_clk = _dcr0(spec_clk, jumper_via_at=jvia_at,
+                             jumper_v3via_at=jv3via_at)
+            clk_i = pcb.clk_info(spec_clk)
         if clk_i is not None and clk_i["jumper"]:
             # Backstop nudge, jumper edition: the canvas never drops it on a
             # unit, a pad pair or off the board, but hand-crafted requests
@@ -2238,6 +2287,7 @@ def _generate_impl(render: bool):
                             jumper_side=jside, jumper_via=jvia,
                             jumper_nodes=jnodes, jumper_v3nodes=jv3nodes,
                             jumper_v3pin=jv3pin,
+                            jumper_via_at=jvia_at, jumper_v3via_at=jv3via_at,
                             jumper=(jx0 + r * _math.cos(t),
                                     jy0 + r * _math.sin(t)))
                         info = pcb.clk_info(probe)
@@ -2252,6 +2302,25 @@ def _generate_impl(render: bool):
                     }, 400
                 clk_i = found
                 jpos = (found["jumper"][0], found["jumper"][1])
+        # Backstop, via edition, and it runs HERE rather than earlier because
+        # a via is judged against the jumper it feeds: the pad the stub leaves
+        # from only stops moving once the jumper above has settled. The canvas
+        # will not let a via be dropped on other copper, but a hand-crafted
+        # request can, and so can an edit that moves a part onto a via placed
+        # earlier -- an illegal position falls back to the automatic spot,
+        # which is the same fallback the canvas runs.
+        if clk_i is not None and clk_i["jumper"] and (jvia_at or jv3via_at):
+            from dataclasses import replace as _dcr
+
+            settled = _dcr(spec_clk, jumper=jpos, jumper_via_at=jvia_at,
+                           jumper_v3via_at=jv3via_at)
+            if jvia_at and not pcb.jumper_via_ok(settled, "via", jvia_at):
+                jvia_at = None
+            if jv3via_at and not pcb.jumper_via_ok(settled, "v3via", jv3via_at):
+                jv3via_at = None
+            spec_clk = _dcr(spec_clk, jumper=jpos, jumper_via_at=jvia_at,
+                            jumper_v3via_at=jv3via_at)
+            clk_i = pcb.clk_info(spec_clk)
     except _GEOMETRY_ERRORS:
         return {"error": "could not place the CLK jumper; check its x/y"}, 400
 
@@ -2398,7 +2467,9 @@ def _generate_impl(render: bool):
                           jumper_rot=jrot, jumper_side=jside,
                           jumper_via=jvia, jumper_nodes=jnodes,
                           jumper_v3nodes=jv3nodes,
-                          jumper_v3pin=jv3pin), safe, windows=window_art
+                          jumper_v3pin=jv3pin,
+                          jumper_via_at=jvia_at,
+                          jumper_v3via_at=jv3via_at), safe, windows=window_art
         )
         # A window has to keep clear of anything whose copper it would cut. A glow
         # window cuts both faces, so it avoids every unit. A bare window that opens
@@ -2623,6 +2694,7 @@ def _generate_impl(render: bool):
         clk_jumper=clk_jumper, jumper=jpos, jumper_rot=jrot,
         jumper_side=jside, jumper_via=jvia, jumper_nodes=jnodes,
         jumper_v3nodes=jv3nodes, jumper_v3pin=jv3pin,
+        jumper_via_at=jvia_at, jumper_v3via_at=jv3via_at,
     )
     # Via-less units pick their connector pad against the real copper fill so
     # the run cannot fence the pour's own pad onto an island. Refuse rather

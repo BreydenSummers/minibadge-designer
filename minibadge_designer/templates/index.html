@@ -2011,12 +2011,17 @@ function clkInfo() {
   const pads = [["CLK", ...at(-JUMPER_PITCH, 0)], [CLK_RAIL, jx, jy],
                 ["3V3", ...at(JUMPER_PITCH, 0)]];
   const farFace = side === "front" ? "back" : "front";
-  const far = at(...JUMPER_VIA);
+  // Either via may have been dragged off the spot the jumper's own frame
+  // gives it (mirrors pcb.clk_info). Honoured as drawn: whether the spot is
+  // legal is jumperViaOk's business, and the drag never commits an illegal
+  // one, so the preview and the board place it identically.
+  const far = state.clk.via_at ? [...state.clk.via_at] : at(...JUMPER_VIA);
   const via = state.leds.some(L => L.clk && L.side === farFace) ? far : null;
   const near = [jx, jy];
   return { net: CLK_RAIL, jumper: [jx, jy, rot], side, pads, via,
            v3via: side === "back" && state.clk.via !== false
-             ? at(...JUMPER_V3VIA) : null,
+             ? (state.clk.v3via_at ? [...state.clk.v3via_at]
+                                   : at(...JUMPER_V3VIA)) : null,
            v3link: side === "back" && state.clk.via === false,
            nodes: state.clk.nodes || [], v3nodes: state.clk.v3nodes || [],
            v3pin: state.clk.v3pin || null,
@@ -4171,7 +4176,9 @@ function refdesLayout() {
   const key = JSON.stringify([
     state.refdes !== false,
     state.leds.map(L => [L.x, L.y, L.rot, L.layout, L.size, !!L.reverse, L.side,
-                         !!L.novia, !!L.farled, L.adv]),
+                         !!L.novia, !!L.farled, L.adv,
+                         L.dlabel !== false, L.rlabel !== false,
+                         L.dlabel_at || null, L.rlabel_at || null]),
     state.clk, [...state.pins], state.shape.ringsRev || 0,
   ]);
   if (_refdesCache.key === key) return _refdesCache.list;
@@ -4219,6 +4226,7 @@ function refdesLayout() {
     const far = !!L.farled && farOK(L);
     for (const [which, ref, anchor] of [["led", `D${i + 1}`, [0, 0]],
                                         ["res", `R${i + 1}`, g.res]]) {
+      if ((which === "led" ? L.dlabel : L.rlabel) === false) continue;
       let face = L.side;
       if (which === "led" && far) face = L.side === "back" ? "front" : "back";
       const pk = which === "led" ? PKG[g.pkg] : resPkgOf(g.pkg);
@@ -4231,6 +4239,30 @@ function refdesLayout() {
       const cands = [[0, firstY], [0, -firstY], [tx, 0], [-tx, 0],
                      [tx, firstY], [-tx, firstY], [tx, -firstY], [-tx, -firstY]];
       const [ax, ay] = unitPoint(L, anchor[0], anchor[1]);
+      // A hand-placed centre is a position, not an offset: the user dragged
+      // the ink to a spot and it stays there when the part turns. Illegal
+      // (a part moved onto it since) falls back to the search, which is what
+      // the generator does with the same position.
+      const hand = which === "led" ? L.dlabel_at : L.rlabel_at;
+      if (hand) {
+        const quad = refdesQuad(+hand[0], +hand[1], ref);
+        const clearCopper = !copperObs.some(q => !polysClear(quad, q, REFDES_GAP));
+        const clearInk = !inkObs.some(q => !polysClear(quad, q, 0));
+        const onBoard = quad.every(([qx, qy]) => pipRings(rings, qx, qy));
+        let nearEdge = false;
+        for (let k = 0; k < quad.length && !nearEdge; k++) {
+          const a = quad[k], b = quad[(k + 1) % quad.length];
+          if (edges.some(([e0, e1]) => noviaSegDist(a, b, e0, e1) < SILK_EDGE_CLEAR)) {
+            nearEdge = true;
+          }
+        }
+        if (clearCopper && clearInk && onBoard && !nearEdge) {
+          out.push({ unit: i, which, ref, face,
+                     at: [+hand[0], +hand[1]], quad, hand: true });
+          inkObs.push(quad);
+          continue;
+        }
+      }
       for (const [ox, oy] of cands) {
         const [lx, ly] = rotOff(ox, oy, (L.rot || 0) + extra);
         const [px, py] = [ax + lx, ay + ly];
@@ -4246,7 +4278,7 @@ function refdesLayout() {
           }
         }
         if (tooClose) continue;
-        out.push({ unit: i, which, ref, face, at: [px, py], quad });
+        out.push({ unit: i, which, ref, face, at: [px, py], quad, hand: false });
         inkObs.push(quad);
         break;
       }
@@ -4273,8 +4305,68 @@ function drawRefdes(c, mirror, canvas) {
   // KiCad sizes its stroke font by CAP height and a canvas font size is the
   // em, so the drawn glyphs need scaling up to match the printed ink.
   c.font = `${(REFDES_SIZE * 1.36) * SCALE}px sans-serif`;
-  for (const lab of labs) c.fillText(lab.ref, tx(lab.at[0]), mm2px(lab.at[1]));
+  for (const lab of labs) {
+    const sel = selected && selected.kind === "refdes"
+      && selected.index === lab.unit && selected.which === lab.which;
+    c.fillStyle = sel ? "#6fb2ff"
+      : (state.mask === "white" ? "#555" : "rgba(255,255,255,.75)");
+    c.fillText(lab.ref, tx(lab.at[0]), mm2px(lab.at[1]));
+  }
   c.restore();
+}
+// Mirrors pcb.jumper_via_ok: may this via sit here? A via is a plated hole
+// with copper on both faces, so it may not land on another part's copper, a
+// connector pad, the jumper's OTHER pads (a barrel bridging two of them is a
+// solder jumper that is always bridged) or off the board -- and neither may
+// the stub that feeds it, which a dragged via drags along with it.
+function jumperViaOk(which, x, y) {
+  const ci = clkActive() && state.clk.jumper ? clkInfo() : null;
+  if (!ci || !ci.jumper) return false;
+  const r = VIA_SIZE / 2 + 0.35;
+  const barrel = [[x - r, y - r], [x + r, y - r], [x + r, y + r], [x - r, y + r]];
+  const own = which === "via" ? ci.net : "3V3";
+  const feed = ci.pads.find(([pnet]) => pnet === own);
+  const hazards = [barrel];
+  if (feed) hazards.push(quadSegPts([feed[1], feed[2]], [x, y], 1.1));
+  for (const [pnet, cx, cy] of ci.pads) {
+    if (pnet === own) continue;
+    const q = jumperPadQuad(ci, cx, cy);
+    if (hazards.some(h => !polysClear(h, q, 0))) return false;
+  }
+  for (const [px, py] of activePads()) {
+    if ((px - x) ** 2 + (py - y) ** 2 < (0.875 + r) ** 2) return false;
+  }
+  for (const L of state.leds) {
+    for (const [lbl, quad] of unitCopperPieces(L)) {
+      // The rail via's own feed terminates on it: same net, touching by
+      // construction, and judging against it would refuse every position.
+      if (which === "via" && lbl.startsWith("trace_pad")) continue;
+      if (hazards.some(h => !polysClear(h, quad, 0))) return false;
+    }
+  }
+  const rings = boardRings();
+  if (!pipRings(rings, x, y)) return false;
+  for (const ring of rings) {
+    for (let i = 0; i < ring.length; i++) {
+      const a = ring[i], b = ring[(i + 1) % ring.length];
+      if (noviaSegDist([x, y], [x, y], a, b) < VIA_SIZE / 2 + 0.2) return false;
+    }
+  }
+  return true;
+}
+// Would this part's label be honoured at (x, y)? Asked by running the real
+// layout with the position in place, rather than by a second copy of the
+// obstacle set: the layout already knows every rule, and a copy of it would
+// be one more thing to keep in step with the generator.
+function refdesOkAt(L, which, x, y) {
+  const key = which === "led" ? "dlabel_at" : "rlabel_at";
+  const was = L[key];
+  L[key] = [x, y];
+  const lab = refdesLayout().find(l => state.leds[l.unit] === L
+                                       && l.which === which);
+  const ok = !!(lab && lab.hand);
+  L[key] = was;
+  return ok;
 }
 function eraseArtKeepouts(oc, forWindows, unitSide) {
   oc.save();
@@ -5483,6 +5575,15 @@ function dragLandedAt() {
       const n = (state.clk[JNODE_KEYS[drag.trace || "link"]] || [])[drag.node];
       return n ? [n[0], n[1]] : null;
     }
+    case "refdes": {
+      const lab = refdesLayout().find(l => l.unit === drag.index
+                                           && l.which === drag.which);
+      return lab ? [lab.at[0], lab.at[1]] : null;
+    }
+    case "clkvia": {
+      const v = state.clk[drag.which === "via" ? "via_at" : "v3via_at"];
+      return v ? [v[0], v[1]] : null;
+    }
     default: return null;
   }
 }
@@ -5792,6 +5893,18 @@ function attachPointer(cv, side) {
             }
           }
         }
+        { // a printed part label, grabbed on the face it prints on
+          for (const lab of refdesLayout()) {
+            if (lab.unit !== i) continue;
+            if ((lab.face === "back") !== (side === "back")) continue;
+            const xs = lab.quad.map(q => q[0]), ys = lab.quad.map(q => q[1]);
+            if (mx >= Math.min(...xs) && mx <= Math.max(...xs)
+                && my >= Math.min(...ys) && my <= Math.max(...ys)) {
+              return { kind: "refdes", index: i, which: lab.which,
+                       x: lab.at[0], y: lab.at[1], side: lab.face };
+            }
+          }
+        }
         { // hand-placed trace bends, on any trace this unit owns
           const keys = (L.adv ? ["run", "a", "v", "c"]
             : (clkActive() && L.clk ? ["c"] : [])).filter(() => sameSide);
@@ -5849,6 +5962,20 @@ function attachPointer(cv, side) {
           if (Math.hypot(mx - ex, my - ey) < 0.9) {
             return { kind: "jumperterm", index: 0, x: ex, y: ey,
                      side: ci.side };
+          }
+        }
+        // Either via: a plated hole, so it is grabbable from both views.
+        // The radius is the barrel itself and no more. At its default spot a
+        // via sits INSIDE the jumper's own grab box, and a generous radius
+        // there swallowed clicks meant to move the part -- the fringe of the
+        // jumper body is 0.53 mm from the via, and that click has to reach
+        // the jumper (test_clicking_a_jumper_pad_grabs_the_jumper...).
+        for (const which of ["via", "v3via"]) {
+          const v = ci[which];
+          if (!v) continue;
+          if (Math.hypot(mx - v[0], my - v[1]) < VIA_SIZE / 2 + 0.05) {
+            return { kind: "clkvia", index: 0, which, x: v[0], y: v[1],
+                     side };
           }
         }
         for (const key of ["link", "v3"]) {
@@ -6051,9 +6178,13 @@ function attachPointer(cv, side) {
       selected.trace = hit.trace || "link";
       selected.node = hit.node;
     }
+    if (hit && (hit.kind === "refdes" || hit.kind === "clkvia") && selected) {
+      selected.which = hit.which;
+    }
     if (hit) {
       drag = { kind: hit.kind, index: hit.index, trace: hit.trace,
-               node: hit.node, dx: hit.x - mx, dy: hit.y - my,
+               node: hit.node, which: hit.which,
+               dx: hit.x - mx, dy: hit.y - my,
                cOff: snapCentreOffset(hit.kind, hit.index, hit.x, hit.y) };
       if (hit.kind === "ledterm") {
         // Enumerate the legal destinations once, at pick-up: the move
@@ -6171,6 +6302,23 @@ function attachPointer(cv, side) {
           if (d2 < bd) { bd = d2; best = cand; }
         }
         if (best) state.clk.v3pin = best.pin;
+      }
+    } else if (drag.kind === "refdes") {
+      // The ink follows the pointer only into spots the board will actually
+      // print it in: silk over a pad's mask opening is clipped by the fab, so
+      // an illegal position is simply not taken and the label stays where it
+      // last was. Same contract as dragging the jumper.
+      const L = state.leds[drag.index];
+      if (L) {
+        const [nx, ny] = [mx + drag.dx, my + drag.dy];
+        if (refdesOkAt(L, drag.which, nx, ny)) {
+          L[drag.which === "led" ? "dlabel_at" : "rlabel_at"] = [nx, ny];
+        }
+      }
+    } else if (drag.kind === "clkvia") {
+      const [nx, ny] = snap(mx + drag.dx, my + drag.dy, { kind: "clkvia" });
+      if (jumperViaOk(drag.which, nx, ny)) {
+        state.clk[drag.which === "via" ? "via_at" : "v3via_at"] = [nx, ny];
       }
     } else if (drag.kind === "jumper") {
       const ob = outlineBounds();
@@ -6402,6 +6550,20 @@ function attachPointer(cv, side) {
       draw();
       return;
     }
+    if (hit.kind === "refdes") {
+      // Back to the automatic spot the placement search picks.
+      const L = state.leds[hit.index];
+      if (L) delete L[hit.which === "led" ? "dlabel_at" : "rlabel_at"];
+      setStatus("Label back to its automatic spot.");
+      renderLedList(); draw();
+      return;
+    }
+    if (hit.kind === "clkvia") {
+      delete state.clk[hit.which === "via" ? "via_at" : "v3via_at"];
+      setStatus("Via back beside the jumper.");
+      draw(); m3dStale("CLK via moved");
+      return;
+    }
     if (hit.kind === "ledterm") {
       // Back to the automatic choice: the nearest same-net connector pad.
       delete state.leds[hit.index].term;
@@ -6614,7 +6776,9 @@ const SEL_LIST = { text: () => state.texts, art: () => state.art,
                    // reference, so reconcileSelection keeps working
                    jumper: () => [state.clk],
                    jumpernode: () => [state.clk],
-                   jumperterm: () => [state.clk] };
+                   jumperterm: () => [state.clk],
+                   // the jumper's vias are parts of the same singleton
+                   clkvia: () => [state.clk] };
 // led / ledres / ledvia / ledbody / lednode / ledterm are all parts of one
 // LED unit.
 const selList = kind => (SEL_LIST[kind] || (() => state.leds))();
@@ -7444,6 +7608,11 @@ function renderLedList() {
             <input type="number" class="avy" min="-20" max="20" step="0.05" value="${(+L.adv.vy).toFixed(2)}">
           </div>`}
           ` : ""}
+        <div class="row" style="gap:10px">
+          <label class="chk"><input type="checkbox" class="dlab"${L.dlabel === false ? "" : " checked"}> Label D${i + 1}</label>
+          <label class="chk"><input type="checkbox" class="rlab"${L.rlabel === false ? "" : " checked"}> Label R${i + 1}</label>
+        </div>
+        <div class="sub">Drag either label on the board; double-click one to send it back to its automatic spot, or select it and press Delete to switch it off.</div>
         ${`<div class="sub">Trace bends: ${bendCount(L)}. Hover any of this unit's traces on the canvas to add one (+), drag to move, click to select, Delete to remove. That includes its thin tie to the pour's edge ring, on whichever side the tie runs.</div>`}
       </details>
 `;
@@ -7492,6 +7661,17 @@ function renderLedList() {
     div.querySelector(".pk").onchange = e => {
       L.size = e.target.value; reposition(); renderLedList(); draw();
     };
+    for (const [cls, flag, at] of [[".dlab", "dlabel", "dlabel_at"],
+                                   [".rlab", "rlabel", "rlabel_at"]]) {
+      div.querySelector(cls).onchange = e => {
+        L[flag] = e.target.checked;
+        if (!e.target.checked) delete L[at];   // its spot goes with it
+        // Artwork is carved around this ink, so a layer has to be rebuilt
+        // rather than merely redrawn when a label appears or goes away.
+        rebuildAllArt();
+        renderLedList(); draw(); m3dStale("part label changed");
+      };
+    }
     div.querySelector(".nvia").onchange = e => {
       L.novia = e.target.checked;
       if (!L.novia) { delete L.nodes; delete L.term; } // both belong to the trace
@@ -8245,6 +8425,8 @@ function designFormData() { // the full design, as /generate and /render take it
     refdes: state.refdes !== false,
     pins: ALL_PINS.filter(pinOn),
     clk: { jumper: !!state.clk.jumper, rot: state.clk.rot || 0,
+           ...(state.clk.via_at ? { via_at: [...state.clk.via_at] } : {}),
+           ...(state.clk.v3via_at ? { v3via_at: [...state.clk.v3via_at] } : {}),
            side: state.clk.side === "back" ? "back" : "front",
            via: state.clk.via !== false,
            nodes: state.clk.nodes || [], v3nodes: state.clk.v3nodes || [],
@@ -8747,6 +8929,18 @@ window.addEventListener("keydown", e => {
       draw();
       return;
     }
+    if (selected.kind === "refdes") {
+      // Delete on a label switches THAT part's label off rather than
+      // deleting the part under it. Its checkbox on the card turns it back.
+      const L = state.leds[idx];
+      if (!L) return;
+      L[selected.which === "led" ? "dlabel" : "rlabel"] = false;
+      delete L[selected.which === "led" ? "dlabel_at" : "rlabel_at"];
+      clearSelection();
+      rebuildAllArt();   // art is carved around this ink; it just went away
+      renderLedList(); draw();
+      return;
+    }
     if (selected.kind === "led") {
       if (removeItem("led", idx, `LED ${idx + 1}`)) renderLedList();
     } else if (selected.kind === "text") {
@@ -8805,7 +8999,7 @@ const TIPS = {
   </ul>` },
   leds: { title: "Step 4: a red LED behind the visor", img: "leds.webp", html: `<ul>
     <li>An LED with Side set to <b>Back</b> glows in the window on the Back view; the front view shows only its dashed ghost.</li>
-    <li>Each part prints its name &mdash; <b>D1</b>, <b>R1</b> &mdash; on the silkscreen beside it, which is what the parts list calls them. Turn that off under <b>Part labels</b> in Board characteristics if the face is all artwork.</li>
+    <li>Each part prints its name &mdash; <b>D1</b>, <b>R1</b> &mdash; on the silkscreen beside it, which is what the parts list calls them. <b>Drag a label</b> anywhere it will print, double-click it for the automatic spot, or select it and press <b>Delete</b> to drop just that one; each part's card has a tick for it, and <b>Part labels</b> in Board characteristics turns the lot off.</li>
     <li>Anything you select copies: <b>Ctrl/&#8984;+C</b> then <b>V</b>, or <b>X</b> to move it. Works between tabs, so a unit set up the way you like can be pasted into another badge.</li>
     <li>Each LED arrives with its series resistor, pre-wired — nothing to route.</li>
     <li><b>In line</b> is a thin strip (fits behind the visor); 0805 is the minibadge standard. The Layout and Size selects carry the rest.</li>
@@ -8821,6 +9015,7 @@ const TIPS = {
     <li>The <b>solder jumper</b> leaves the choice to whoever solders it: bridge its centre pad to the 3V3 side for steady light, the CLK side to blink — exactly one, never both. <b>Direct trace to pin 9</b> (the CLK pad) always blinks.</li>
     <li>Drag the jumper like a part; double-click for +90&deg;. Hover any of its traces to add a bend (+), drag bends to move them, select one and press <b>Delete</b> to remove it — just like a unit's traces.</li>
     <li>A back-side jumper feeds its 3V3 pad through a via by default; untick <b>Feed 3V3 through a via</b> to run a surface trace instead, then drag its &#9670; endpoint onto either 3V3 pin (double-click it for the nearest).</li>
+    <li><b>Drag either via</b> off the jumper if the hole is in your way: it only lands where the board can carry it (the stub that feeds it moves too), and a double-click puts it back beside the pads.</li>
   </ul>` },
   text: { title: "Step 5: your handle on the back", img: "text.webp", html: `<ul>
     <li>"made by half" in <b>Black Ops One</b>, Side set to <b>Back</b>: the bundled typefaces work in any material; KiCad's own stroke font is silkscreen-only.</li>
@@ -9198,6 +9393,9 @@ function normalizeDesign(raw) {
     nodes: (Array.isArray(c.nodes) ? c.nodes : []).map(node).filter(Boolean).slice(0, 8),
     v3nodes: (Array.isArray(c.v3nodes) ? c.v3nodes : []).map(node).filter(Boolean).slice(0, 8),
     v3pin: typeof c.v3pin === "string" ? _pick(c.v3pin, ALL_PINS, null) : null,
+    // Hand-dragged via positions; absent (and older saves) means automatic.
+    via_at: node(c.via_at) || null,
+    v3via_at: node(c.v3via_at) || null,
   };
   const sh = raw.shape && typeof raw.shape === "object" ? raw.shape : {};
   d.shape = {
@@ -9279,6 +9477,11 @@ function normalizeDesign(raw) {
         vnodes: (Array.isArray(L.vnodes) ? L.vnodes : []).map(node).filter(Boolean).slice(0, 8),
         cnodes: (Array.isArray(L.cnodes) ? L.cnodes : []).map(node).filter(Boolean).slice(0, 8),
         bnodes: (Array.isArray(L.bnodes) ? L.bnodes : []).map(node).filter(Boolean).slice(0, 8),
+        // Printed labels: absent means shown, which is what an older save
+        // meant when the board printed them unconditionally.
+        dlabel: L.dlabel !== false, rlabel: L.rlabel !== false,
+        dlabel_at: node(L.dlabel_at) || null,
+        rlabel_at: node(L.rlabel_at) || null,
         bfnodes: (Array.isArray(L.bfnodes) ? L.bfnodes : []).map(node).filter(Boolean).slice(0, 8),
         adv: adv ? {
           rx: _num(adv.rx, 0, -20, 20), ry: _num(adv.ry, 0, -20, 20),
