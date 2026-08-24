@@ -471,3 +471,70 @@ def test_a_refilled_window_still_has_no_copper_under_its_open_mask(tmp_path):
             f"{tuple(round(v, 2) for v in exposed.bounds)}), where "
             f"{mask_layer} is open: the badge ships with bare plated copper "
             "in the middle of the window and DRC will not say a word")
+
+
+def test_artwork_pushed_past_every_edge_still_passes_drc(tmp_path):
+    """Art that hangs off the board is clipped, not shipped over the edge.
+
+    Placing a picture over a board profile means pushing it past the outline on
+    purpose, so the clip at the edge is what keeps the board legal: ink or
+    copper running into the routed edge is a fab reject and DRC flags it. Four
+    layers, one over each edge, plus one bigger than the whole board.
+    """
+    from PIL import Image, ImageDraw
+
+    from minibadge_designer.webapp import app
+
+    img = Image.new("RGB", (300, 300), (20, 20, 20))
+    ImageDraw.Draw(img).ellipse((40, 40, 260, 260), fill=(230, 180, 40))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    png = buf.getvalue()
+
+    # cx/cy well outside the board on each side, and one layer swallowing it.
+    places = [(-6.0, 10.16, 24.0), (26.0, 10.16, 24.0),
+              (10.16, -6.0, 24.0), (10.16, 26.0, 24.0),
+              (10.16, 10.16, 90.0)]
+    art = [{"mode": "palette", "cx": cx, "cy": cy, "w": w,
+            "palette": [{"rgb": [20, 20, 20], "material": "silk"},
+                        {"rgb": [230, 180, 40], "material": "copper"}]}
+           for cx, cy, w in places]
+    params = {"name": "overhang", "leds": [{"x": 10.16, "y": 10.16, "color": "red"}],
+              "texts": [], "art": art}
+    data = {"params": json.dumps(params)}
+    for i in range(len(art)):
+        data[f"art{i}"] = (io.BytesIO(png), f"blob{i}.png")
+    client = app.test_client()
+    resp = client.post("/generate", data=data, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    board = tmp_path / "overhang.kicad_pcb"
+    board.write_bytes(zf.read("overhang/overhang.kicad_pcb"))
+    (tmp_path / "overhang.kicad_pro").write_bytes(
+        zf.read("overhang/overhang.kicad_pro"))
+    report = tmp_path / "drc.txt"
+    result = subprocess.run(
+        [KICAD_CLI, "pcb", "drc", "--severity-all", "--exit-code-violations",
+         "-o", str(report), str(board)],
+        capture_output=True, text=True, timeout=120, check=False)
+    assert result.returncode == 0, f"DRC violations:\n{report.read_text()}"
+
+    # And the ink really is inside: art hanging over the edge has to be gone,
+    # not merely legal. Board-level polygons only -- a footprint's own shapes
+    # are in ITS frame, and reading those as page coordinates says -99 mm.
+    import invariants
+    from minibadge_designer import pcb as pcb_mod
+
+    root = invariants._parse_sexp(board.read_text())
+    pts = [(float(q[1]) - pcb_mod.ORIGIN, float(q[2]) - pcb_mod.ORIGIN)
+           for g in invariants._kids(root, "gr_poly")
+           if str(invariants._val(g, "layer")) != "Edge.Cuts"
+           for q in invariants._kids(invariants._kid(g, "pts"), "xy")]
+    assert pts, "the board carries no artwork polygons at all"
+    xs = [x for x, _y in pts]
+    ys = [y for _x, y in pts]
+    assert min(xs) >= -0.01 and max(xs) <= 20.33, (
+        f"artwork x runs {min(xs):.2f}..{max(xs):.2f}, outside the board")
+    assert min(ys) >= -0.01 and max(ys) <= 20.33, (
+        f"artwork y runs {min(ys):.2f}..{max(ys):.2f}, outside the board")
