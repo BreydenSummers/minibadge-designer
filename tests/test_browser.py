@@ -4627,13 +4627,16 @@ def test_an_image_the_server_will_not_decode_is_refused_where_it_is_chosen(
 
 
 @pytest.mark.browser
-def test_a_width_the_board_cannot_fit_says_what_it_actually_drew(ui, logo):
-    """The width control stops keeping a number the board threw away.
+def test_artwork_wider_than_the_board_is_drawn_wide_and_says_it_overhangs(ui,
+                                                                          logo):
+    """A width past the board draws at that width, and the card says so.
 
-    The slider's range is the range for the largest custom outline, so on the
-    standard badge everything past ~19 mm is fitted down by artDims and the
-    typed number is left standing. The number is worth keeping — the board can
-    still grow — but not silently: a user tuning by number was tuning nothing.
+    Artwork used to be fitted down to the board, with a note explaining that
+    the typed number had been ignored. That made the one thing you most need a
+    big image for impossible: lining a picture up with a board profile, where
+    the interesting part is on the board and the rest hangs off. Art is placed
+    at the size asked for now, clipped at the edge, and the standing note says
+    which of those is happening.
     """
     _add_art(ui, logo)
     ui.wait_state("state.art.length === 1", timeout=UPLOAD_TIMEOUT)
@@ -4653,17 +4656,20 @@ def test_a_width_the_board_cannot_fit_says_what_it_actually_drew(ui, logo):
 
     set_width(14)
     assert note() is None, (
-        "a width the board fits is annotated as clamped; the note has to mean "
-        "something when it appears")
+        "a layer that fits inside the board is annotated as overhanging; the "
+        "note has to mean something when it appears")
     set_width(60)
-    said = note()
-    assert said, ("60 mm of artwork on a 20 mm board draws at 19 mm and the "
-                  "card says nothing about it")
     drawn = ui.js("() => artDims(state.art[0]).w")
+    assert abs(drawn - 60) < 0.01, (
+        f"60 mm of artwork was drawn at {drawn:.1f} mm; the board is not "
+        "allowed to resize it any more")
+    said = note()
+    assert said, ("60 mm of artwork on a 20 mm board hangs well off it and the "
+                  "card says nothing about it")
     assert f"{drawn:.1f}" in said, (
-        f"the note must state the width actually drawn ({drawn:.1f} mm): {said!r}")
-    assert "60" in said, (
-        f"the note must account for the number still in the box: {said!r}")
+        f"the note must state the size actually drawn ({drawn:.1f} mm): {said!r}")
+    assert "clip" in said.lower(), (
+        f"the note must say what happens to the part that hangs over: {said!r}")
     # And it goes away again, so it tracks the design rather than latching.
     set_width(12)
     assert note() is None, "the note outlived the condition it describes"
@@ -5260,3 +5266,98 @@ def test_the_clk_rail_via_can_be_dragged_and_the_board_follows(ui, client):
     assert max(abs(after[0] - 1.27), abs(after[1] - 1.27)) > 1.0, (
         f"the via was dropped on a connector pad at {after}")
     ui.assert_clean("drag the CLK rail via")
+
+
+def _half_dark_png() -> bytes:
+    """A wide image, dark in its RIGHT half only.
+
+    Which half of it lands on the board is the whole assertion below, so the
+    two halves have to be told apart by position alone.
+    """
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (400, 200), "white")
+    ImageDraw.Draw(img).rectangle((200, 0, 399, 199), fill=(20, 20, 20))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+#: (id, side, cx, wmm, expect ink on the board). A wide image with ink in its
+#: RIGHT half only, so which half lands says whether the crop kept the right
+#: window -- and the back cases are the ones that matter, because the canvas
+#: mirrors a back layer when it PAINTS while the generator mirrors the image
+#: before cropping.
+_OVERHANG = [
+    ("front-centred", "front", 10.16, 87.0, True),
+    ("front-off-left", "front", -8.0, 40.0, True),
+    ("back-centred", "back", 10.16, 87.0, True),
+    ("back-off-left", "back", -8.0, 40.0, False),
+    ("back-off-right", "back", 28.0, 40.0, True),
+]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("label,side,cx,wmm,inked", _OVERHANG,
+                         ids=[c[0] for c in _OVERHANG])
+def test_art_pushed_off_the_board_previews_the_half_the_board_gets(
+        ui, client, label, side, cx, wmm, inked):
+    """The preview paints the part of an overhanging image that prints.
+
+    Art is no longer fitted to the board, so a layer can be far bigger than the
+    board and hang off it -- which is the point: that is how a picture is lined
+    up with a board profile. Both sides then have to agree about WHICH part of
+    it lands, and the two arrive there differently: the canvas mirrors a back
+    layer when it paints, the generator mirrors the image before it crops. Get
+    that backwards and the preview shows one half of the drawing while the
+    board prints the other.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+    from minibadge_designer import pcb
+
+    page = ui.page
+    png = _half_dark_png()
+    page.click("#tab-art")
+    page.set_input_files("#artfile", {"name": "wide.png", "mimeType": "image/png",
+                                      "buffer": png})
+    page.wait_for_function("() => state.art.length === 1 && state.art[0].img",
+                           timeout=UPLOAD_TIMEOUT)
+    ui.js("""([side, cx, w]) => {
+        const a = state.art[0];
+        a.side = side; a.cx = cx; a.cy = 10.16; a.wmm = w;
+        a.material = 'silk'; a.mode = 'threshold';
+        rebuildArt(a); renderArtList(); draw();
+    }""", [side, cx, wmm])
+
+    drawn = ui.js("() => !!(state.art[0].caches && state.art[0].caches.silk)")
+    params = json.loads(ui.js('() => designFormData().get("params")'))
+    params["name"] = "oh"
+    resp = client.post("/generate", data={
+        "params": json.dumps(params), "art0": (io.BytesIO(png), "wide.png"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    root = invariants._parse_sexp(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "oh/oh.kicad_pcb").decode())
+    silk = [(float(q[1]) - pcb.ORIGIN, float(q[2]) - pcb.ORIGIN)
+            for g in invariants._kids(root, "gr_poly")
+            if str(invariants._val(g, "layer")).endswith("SilkS")
+            for q in invariants._kids(invariants._kid(g, "pts"), "xy")]
+
+    assert bool(silk) == inked, (
+        f"{label}: the board {'prints nothing' if not silk else 'prints ink'} "
+        f"where the dark half of the image should {'land' if inked else 'miss'}")
+    assert drawn == bool(silk), (
+        f"{label}: the preview {'paints' if drawn else 'paints nothing'} and "
+        f"the board {'prints' if silk else 'prints nothing'} -- one of them is "
+        "showing the wrong half of the drawing")
+    if silk:
+        xs = [x for x, _y in silk]
+        assert min(xs) >= -0.01 and max(xs) <= 20.33, (
+            f"{label}: ink runs {min(xs):.2f}..{max(xs):.2f}, off the board")
+    ui.assert_clean(f"overhanging art, {label}")

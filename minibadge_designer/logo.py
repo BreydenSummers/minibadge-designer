@@ -164,20 +164,93 @@ def _open_rgba(image_bytes: bytes, resample=Image.LANCZOS) -> Image.Image:
     return img
 
 
+#: Widest an artwork layer may be asked to be, mm. Not a board fit: art is
+#: allowed to hang off the edge and be clipped there, which is the only way to
+#: line a picture up with a silhouette board -- you cannot push a 90 mm drawing
+#: over a 27 mm outline if the app keeps shrinking it to 26 mm. This ceiling
+#: only stops a hand-crafted request asking for a metre of image.
+MAX_ART_MM = 400.0
+
+
 def _fit(
-    img: Image.Image, width_mm: float, board, max_cols: int = MAX_COLS,
+    img: Image.Image, width_mm: float, board=None, max_cols: int = MAX_COLS,
     pixel_mm: float = PIXEL_MM,
 ) -> tuple[float, float, int, int]:
-    width_mm = max(2.0, min(width_mm, board[2] - board[0] - 2 * EDGE_MARGIN))
+    """(width, height, cols, rows) for an image drawn `width_mm` wide.
+
+    The width is the width asked for. It used to be shrunk to fit inside
+    `board`, which is why `board` is still accepted and ignored;
+    :func:`_crop_to_board` drops the part that could never print instead, so
+    the grid spends its cells on the part that can.
+    """
+    width_mm = max(2.0, min(float(width_mm), MAX_ART_MM))
     aspect = img.height / img.width
     height_mm = width_mm * aspect
-    max_h = board[3] - board[1] - 2 * EDGE_MARGIN
-    if height_mm > max_h:
-        height_mm = max_h
-        width_mm = height_mm / aspect
     cols = min(max_cols, max(1, round(width_mm / pixel_mm)))
     rows = max(1, round(height_mm * cols / width_mm))
     return width_mm, height_mm, cols, rows
+
+
+def _crop_to_board(img: Image.Image, cx: float, cy: float, width_mm: float,
+                   board, pad: float = EDGE_MARGIN):
+    """Drop the part of a placed image that could never print.
+
+    -> (image, cx, cy, width_mm, (u0, v0, u1, v1) kept)
+
+    Everything outside the board is clipped away downstream, so sampling it
+    spends the grid's fixed cell budget on cells nobody will ever see: 87 mm
+    of drawing over a 27 mm board at MAX_TRACE_COLS is a 0.18 mm pitch, three
+    times coarser than the 0.06 mm the same board gets when the art fits.
+    Cropping first keeps the pitch AND cuts the work.
+
+    The window is returned in fractions of the incoming image so the caller
+    can remap anything expressed in those (the magic wand's picks). Rotation
+    and mirroring are already baked into the image by :func:`_transpose`, so
+    this is a plain axis-aligned intersection in board mm.
+    """
+    import math
+
+    whole = (0.0, 0.0, 1.0, 1.0)
+    height_mm = width_mm * img.height / img.width
+    x0, y0 = cx - width_mm / 2, cy - height_mm / 2
+    bx0, by0 = board[0] - pad, board[1] - pad
+    bx1, by1 = board[2] + pad, board[3] + pad
+    ox0, oy0 = max(x0, bx0), max(y0, by0)
+    ox1, oy1 = min(x0 + width_mm, bx1), min(y0 + height_mm, by1)
+    if ox1 - ox0 <= 0 or oy1 - oy0 <= 0:
+        return img, cx, cy, width_mm, whole   # nothing lands; leave it be
+    if (ox1 - ox0 >= width_mm - 1e-9) and (oy1 - oy0 >= height_mm - 1e-9):
+        return img, cx, cy, width_mm, whole   # nothing to crop
+    w_px, h_px = img.width, img.height
+    c0 = max(0, min(w_px - 1, math.floor((ox0 - x0) / width_mm * w_px)))
+    c1 = max(c0 + 1, min(w_px, math.ceil((ox1 - x0) / width_mm * w_px)))
+    r0 = max(0, min(h_px - 1, math.floor((oy0 - y0) / height_mm * h_px)))
+    r1 = max(r0 + 1, min(h_px, math.ceil((oy1 - y0) / height_mm * h_px)))
+    # Recompute the placement from the PIXEL box, not from the mm overlap: the
+    # crop can only land on whole pixels, and deriving the new centre from the
+    # rounded box is what keeps image and board coordinates in step.
+    new_w = (c1 - c0) / w_px * width_mm
+    new_cx = x0 + (c0 + c1) / 2 / w_px * width_mm
+    new_cy = y0 + (r0 + r1) / 2 / h_px * height_mm
+    return (img.crop((c0, r0, c1, r1)), new_cx, new_cy, new_w,
+            (c0 / w_px, r0 / h_px, c1 / w_px, r1 / h_px))
+
+
+def _remap_overrides(overrides, crop):
+    """Wand picks, expressed in the cropped image's fractions.
+
+    A pick outside the crop is dropped: the region it named is off the board,
+    so there is nothing left for it to retarget.
+    """
+    u0, v0, u1, v1 = crop
+    if (u0, v0, u1, v1) == (0.0, 0.0, 1.0, 1.0) or not overrides:
+        return overrides
+    out = []
+    for u, v, mat in overrides:
+        if not (u0 <= u <= u1 and v0 <= v <= v1):
+            continue
+        out.append(((u - u0) / (u1 - u0), (v - v0) / (v1 - v0), mat))
+    return out
 
 
 def _transpose(img: Image.Image, rot: float, flip: bool) -> Image.Image:
@@ -247,6 +320,8 @@ def classify_image(
     # for its own bounding reduction, so pass it in before opening.
     resample = Image.NEAREST if mode == "palette" else Image.LANCZOS
     img = _transpose(_open_rgba(image_bytes, resample), rot, flip)
+    img, cx, cy, width_mm, crop = _crop_to_board(img, cx, cy, width_mm, board)
+    overrides = _remap_overrides(overrides, crop)
     width_mm, height_mm, cols, rows = _fit(img, width_mm, board, max_cols, pixel_mm)
     resized = img.resize((cols, rows), resample)
     px = resized.load()
