@@ -1626,22 +1626,42 @@ def test_the_previewed_perimeter_bridges_match_the_generated_ones(ui):
     from minibadge_designer import pcb
 
     leds = _clamped(_unit_matrix(sides=("front", "back")))
-    drawn = ui.js("(Ls) => Ls.map(L => { state.leds = [L];"
-                  " return allBridges()[0]; })", leds)
     off_by = []
-    for d, js in zip(leds, drawn):
-        board = pcb.unit_bridges(pcb.BadgeSpec(leds=[_py_led(d)]))[0]
-        for jkey, bkey in (("F", "F.Cu"), ("B", "B.Cu")):
-            jseg, bseg = js.get(jkey), board.get(bkey)
-            if (jseg is None) != (bseg is None):
-                off_by.append(
-                    f"{_describe(d)} on {bkey}: the canvas "
-                    f"{'draws a bridge' if jseg else 'reserves the corridor'} "
-                    f"but the board "
-                    f"{'routes one' if bseg else 'falls back to the corridor'}")
-            elif jseg and _gap(jseg, bseg) > _PARITY_TOL:
-                off_by.append(f"{_describe(d)} on {bkey}: the drawn bridge is "
-                              f"{_gap(jseg, bseg):.4f} mm from the shipped one")
+    # Both worlds, because the window is now part of the decision: a PAD's
+    # bridge is only cut when the design has one, so without a windowed pass
+    # this test would compare "no pad bridges" against "no pad bridges" and
+    # the whole pad branch -- most of the bridges a real badge carries --
+    # would go unchecked on either side.
+    for label, js_art, py_art in (
+            ("no window", [], []),
+            ("bare window", [{"kind": "rect", "material": "bare",
+                              "side": "through", "cx": 10.16, "cy": 10.16,
+                              "wmm": 14, "h": 14, "rot": 0}],
+             [pcb.ArtLayer("bare", [(3.0, 3.0, 14.0, 14.0)])])):
+        drawn = ui.js("([Ls, art]) => Ls.map(L => { state.leds = [L];"
+                      " state.art = art; return allBridges()[0]; })",
+                      [leds, js_art])
+        for d, js in zip(leds, drawn):
+            board = pcb.unit_bridges(
+                pcb.BadgeSpec(leds=[_py_led(d)], art=list(py_art)))[0]
+            for jkey, bkey in (("F", "F.Cu"), ("B", "B.Cu")):
+                # The canvas answers {pts, ok} per layer now that a bridge can
+                # carry hand-placed bends; the board answers the polyline.
+                drawn_br = js.get(jkey)
+                jseg = drawn_br["pts"] if drawn_br else None
+                bseg = board.get(bkey)
+                if (jseg is None) != (bseg is None):
+                    off_by.append(
+                        f"{label}, {_describe(d)} on {bkey}: the canvas "
+                        f"{'draws a bridge' if jseg else 'cuts none'} but the "
+                        f"board {'routes one' if bseg else 'cuts none'}")
+                elif jseg and _gap(jseg, bseg) > _PARITY_TOL:
+                    off_by.append(
+                        f"{label}, {_describe(d)} on {bkey}: the drawn bridge "
+                        f"is {_gap(jseg, bseg):.4f} mm from the shipped one")
+        assert any(js.get("F") or js.get("B") for js in drawn), (
+            f"{label}: the canvas drew no bridge on any of {len(leds)} units, "
+            "so nothing below was actually compared")
 
     assert not off_by, (
         f"{len(off_by)} bridge decisions across {len(leds)} units differ "
@@ -4721,3 +4741,235 @@ def test_the_illustrated_help_can_be_reached_without_a_mouse(ui):
     page.wait_for_timeout(300)
     assert not page.evaluate(shown), "Escape did not close the tip"
     ui.assert_clean()
+
+
+#: Controls that change the room a unit claims *after* the CLK hookup is on,
+#: which is the half `relocateJumper` was never wired to. Crowding the board
+#: so that NO legal spot is left was tried as a fourth case and dropped: the
+#: same handler relocates the unit first, so the jumper never ends up
+#: stranded that way and the case proved nothing the three below do not.
+_RESHAPE = [("package", ".pk", "1206"), ("layout", ".l", "inline"),
+            ("side", ".s", "front")]
+
+
+def _built_jumper(client, params, slug="jumperparity"):
+    """Where the BOARD puts the CLK jumper, for a design the page just built.
+
+    Returns ``(position, None)`` or ``(None, error)``: a refusal is an answer
+    too -- it means the download promised nothing -- and the caller decides
+    which of those the guarantee allows.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+
+    params = dict(params, name=slug)
+    resp = client.post("/generate", data={"params": json.dumps(params)})
+    if resp.status_code != 200:
+        return None, resp.get_json().get("error", "")
+    board = invariants.Board(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        f"{slug}/{slug}.kicad_pcb").decode())
+    return next(((x, y) for _n, _l, x, y, ref, _f in board.footprints
+                 if ref == "JP1"), None), None
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("what,sel,value", _RESHAPE,
+                         ids=[r[0] for r in _RESHAPE])
+def test_the_previewed_clk_jumper_is_the_one_the_board_gets(ui, client, what,
+                                                            sel, value):
+    """The preview never shows a CLK jumper the download will not build.
+
+    The jumper is placed by the app, not by the user, and the server always
+    yields it when a unit is in the way -- units are placed first. The canvas
+    mirrors that walk in `relocateJumper`, but it was only wired to the events
+    that turn the hookup ON. Change the unit *afterwards* -- its package,
+    layout or side, or the rail-via tick -- and nothing re-ran it: the canvas
+    kept drawing the jumper at its old spot while the server moved it, so the
+    badge shipped with a via the user was never shown, sitting in the middle
+    of the board. Reported from exactly that: "it seems to be generating
+    unneeded ground vias when the LED is on the back".
+
+    Driven through the real controls on purpose. Writing `state` and calling
+    `draw()` -- the way the parity tests above set their designs -- bypasses
+    the handlers this guards, so it would pass on the broken code.
+
+    Either position agrees with the board, or the download is refused with a
+    reason: a refusal promises nothing, and "no room for the CLK jumper" is
+    what the server says when the walk finds nowhere legal.
+    """
+    import json
+
+    page = ui.page
+    page.click("#tab-leds")
+    # Setup only: one blinking unit on the back, parked over the jumper's home
+    # so that any growth of it collides. The controls do the rest.
+    ui.js("""(led) => {
+        state.leds = [led]; renderLedList(); draw();
+    }""", _js_led(x=10.0, y=15.0, side="back", size="0805", layout="stacked"))
+    row = "#ledlist .item:first-child"
+    page.locator(f"{row} .clk").check()          # this path already yielded
+    before = ui.js("() => clkInfo().jumper")
+
+    page.select_option(f"{row} {sel}", value)    # the path under test
+
+    drawn = ui.js("() => clkInfo().jumper")
+    built, refused = _built_jumper(
+        client, json.loads(ui.js('() => designFormData().get("params")')))
+
+    if refused is not None:
+        # Believed unreachable through the UI (the unit is relocated first),
+        # so this is a guard rather than a covered branch: if it ever does
+        # happen, the editor has to have said so before the click.
+        assert ui.js("() => blockingProblems().map(p => p[0])"), (
+            f"changing the {what} left the server unable to build the board "
+            f"({refused!r}) while the editor reported no blocking problem at "
+            "all: Download fails with no warning")
+        return
+    assert built, "the board carries no CLK jumper at all"
+    gap = max(abs(drawn[0] - built[0]), abs(drawn[1] - built[1]))
+    assert gap <= 0.01, (
+        f"after changing the {what}, the preview draws the CLK jumper at "
+        f"{(round(drawn[0], 2), round(drawn[1], 2))} and the board builds it "
+        f"at {(round(built[0], 2), round(built[1], 2))} -- {gap:.2f} mm apart "
+        f"(it started at {(round(before[0], 2), round(before[1], 2))}); its "
+        "rail via moves with it, so the user approves a board with a via "
+        "somewhere they never saw one")
+
+
+@pytest.mark.browser
+def test_a_new_board_shape_takes_the_previewed_jumper_with_it(ui, client):
+    """Cutting the board under the CLK jumper moves it in the preview too.
+
+    Same guarantee as the reshape cases above, reached the other way: the
+    jumper is placed by the app, and a new outline can take the board out from
+    under it (a cut over its corner, a silhouette that no longer reaches it).
+    `/outline`'s reply already relocates stranded LEDs; the jumper was left
+    where it was, so the canvas drew it on board that no longer existed while
+    the server put it somewhere else and built THAT -- with its rail via, a
+    via the user never saw.
+    """
+    import json
+
+    page = ui.page
+    ui.js("""(led) => { state.leds = [led]; renderLedList(); draw(); }""",
+          _js_led(x=6.0, y=6.0, clk=True))
+    home = ui.js("() => clkInfo().jumper")
+
+    # A cut across the bottom strip, which is where the jumper lives.
+    ui.js("""() => {
+        state.shape.elements = [{kind: 'rect', op: 'cut', cx: 10.16, cy: 19.2,
+                                 w: 12, h: 3.5, rot: 0}];
+        requestOutline(true);
+    }""")
+    page.wait_for_function("() => state.shape.rings !== null",
+                           timeout=GENERATE_TIMEOUT)
+
+    drawn = ui.js("() => clkInfo().jumper")
+    assert (drawn[0], drawn[1]) != (home[0], home[1]), (
+        "the cut removed the board under the jumper and the preview left it "
+        "there; nothing below would tell us whether the two agree by accident")
+    built, refused = _built_jumper(
+        client, json.loads(ui.js('() => designFormData().get("params")')),
+        slug="jumpershape")
+    if refused is not None:
+        assert ui.js("() => blockingProblems().map(p => p[0])"), (
+            f"the shape left the server unable to build the board ({refused!r}) "
+            "while the editor reported no blocking problem: Download fails "
+            "with no warning")
+        return
+    assert built, "the board carries no CLK jumper at all"
+    gap = max(abs(drawn[0] - built[0]), abs(drawn[1] - built[1]))
+    assert gap <= 0.01, (
+        f"after the cut the preview draws the CLK jumper at "
+        f"{(round(drawn[0], 2), round(drawn[1], 2))} and the board builds it "
+        f"at {(round(built[0], 2), round(built[1], 2))} -- {gap:.2f} mm apart")
+
+
+@pytest.mark.browser
+def test_a_perimeter_bridge_can_be_bent_and_the_board_follows(ui, client):
+    """The bridge is editable like every other trace, and shaped in the file.
+
+    It used to be the one piece of routed copper nobody could touch: no bends,
+    and not drawn in the editor at all, so a ground trace appeared in the 3D
+    view running from a unit to the board edge that its owner had never been
+    shown. This drives the real gesture -- hover the trace, click the "+" it
+    offers, drag the handle -- and then asks the board where the trace went.
+    """
+    import json
+
+    page = ui.page
+    # A back unit under a bare window, which is what makes its rail pad's
+    # bridge exist at all (pcb.unit_bridges only cuts one where a window
+    # could sever the pad).
+    ui.js("""(led) => {
+        state.leds = [led];
+        state.art = [{kind: 'rect', material: 'bare', side: 'through',
+                      cx: 10.16, cy: 10.16, wmm: 15, h: 15, rot: 0}];
+        state.texts = []; renderLedList(); draw();
+    }""", _js_led(x=10.0, y=10.0, side="back", size="0805", layout="stacked"))
+
+    before = ui.js("() => { const b = allBridges()[0].B; return b && b.pts; }")
+    assert before and len(before) == 2, (
+        f"the unit's GND bridge is not the plain two-point run to start with "
+        f"({before}); the drag below would prove nothing")
+
+    # Hover the middle of the run, which is where the "+" is offered, then
+    # click it: that is how every other trace gets its first bend.
+    mid = [(before[0][0] + before[1][0]) / 2, (before[0][1] + before[1][1]) / 2]
+    hx, hy = ui.board_to_client(mid[0], mid[1], "back")
+    page.mouse.move(hx, hy)
+    # Read it rather than waiting on it: the hover handler runs inline on the
+    # event, so "no hint" is an answer, and a wait would turn this into a
+    # timeout -- which reads as a broken test rather than a lost feature.
+    hint = ui.js("() => nodeHint && ({trace: nodeHint.trace, side: nodeHint.side})")
+    assert hint, (
+        "hovering the middle of the bridge offered no '+' at all, so the "
+        "trace cannot be bent: it is the one piece of routed copper on the "
+        "board its owner cannot shape")
+    assert hint["trace"] == "b" and hint["side"] == "back", (
+        f"the hover offered {hint}, not a bend on this unit's back-face "
+        "bridge: the trace is not editable from the view it runs on")
+    page.mouse.down()
+    page.mouse.up()
+    bends = ui.js("() => state.leds[0].bnodes || []")
+    assert len(bends) == 1, f"clicking the + added {bends}, not one bend"
+
+    # Drag it somewhere clear of the unit and check the board agrees.
+    tx, ty = ui.board_to_client(bends[0][0], 15.0, "back")
+    sx, sy = ui.board_to_client(bends[0][0], bends[0][1], "back")
+    page.mouse.move(sx, sy)
+    page.mouse.down()
+    page.mouse.move(tx, ty, steps=6)
+    page.mouse.up()
+
+    after = ui.js("() => { const b = allBridges()[0].B; return b && {pts: b.pts, ok: b.ok}; }")
+    assert after and len(after["pts"]) > 2, (
+        f"the bridge is still unbent after the drag: {after}")
+    params = json.loads(ui.js('() => designFormData().get("params")'))
+    params["name"] = "bentbridge"
+    resp = client.post("/generate", data={"params": json.dumps(params)})
+    if not after["ok"]:
+        assert resp.status_code != 200, (
+            "the canvas says the bend cannot be routed but the server built "
+            "the board anyway")
+        return
+    assert resp.status_code == 200, resp.get_json()
+    import io
+    import re
+    import zipfile
+    board = zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "bentbridge/bentbridge.kicad_pcb").decode()
+    legs = [tuple(round(float(v) - 100.0, 3) for v in m) for m in re.findall(
+        r'\(segment \(start ([\d.]+) ([\d.]+)\) \(end ([\d.]+) ([\d.]+)\)'
+        r'[^\n]+\(layer "B\.Cu"\) \(net 2\)', board)]
+    assert len(legs) == len(after["pts"]) - 1, (
+        f"the preview draws {len(after['pts']) - 1} legs of bent bridge and "
+        f"the board carries {len(legs)}")
+    assert legs, "the board carries no GND copper for the bent bridge at all"
+    for (ax, ay), (leg) in zip(after["pts"], legs):
+        assert abs(ax - leg[0]) < 0.01 and abs(ay - leg[1]) < 0.01, (
+            f"a leg starts at {leg[:2]} on the board and {(ax, ay)} in the "
+            "preview: the bent trace the user shaped is not the one built")
