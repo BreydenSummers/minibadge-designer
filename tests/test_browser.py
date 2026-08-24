@@ -4973,3 +4973,159 @@ def test_a_perimeter_bridge_can_be_bent_and_the_board_follows(ui, client):
         assert abs(ax - leg[0]) < 0.01 and abs(ay - leg[1]) < 0.01, (
             f"a leg starts at {leg[:2]} on the board and {(ax, ay)} in the "
             "preview: the bent trace the user shaped is not the one built")
+
+
+@pytest.mark.browser
+def test_the_previewed_part_labels_are_the_ones_the_board_prints(ui, client):
+    """Every D1 the canvas draws is a D1 the generator places, in the same spot.
+
+    `refdesLayout` and `pcb.refdes_layout` are two copies of one placement
+    search -- away from the unit's other part, then past the pads, then the
+    diagonals, each candidate tested against the copper, the ink and the board
+    edge, first clear one wins. A drift is not cosmetic: the canvas would show
+    a label beside a part that the board prints somewhere else, or does not
+    print at all.
+
+    Compared unit by unit against `pcb` rather than against a downloaded
+    board, for the same reason the bridge parity test does: a crowded design
+    goes through the placement pipeline on the way to /generate, so the parts
+    themselves move and the labels legitimately follow them. The board's half
+    of the promise -- the ink reaching the silkscreen at all, clear of every
+    mask opening -- is what the invariant battery and the DRC corpus check.
+    """
+    import json
+
+    import invariants
+    from minibadge_designer import pcb
+
+    leds = _clamped(_unit_matrix(sides=("front", "back")))
+    drawn = ui.js("(Ls) => Ls.map(L => { state.leds = [L]; state.art = [];"
+                  " return refdesLayout().map(l => [l.ref, l.face, l.at[0], l.at[1]]); })",
+                  leds)   # raw, not rounded: the tolerance below is tighter
+                          # than four decimals, so rounding here reads as drift
+    assert any(drawn), "the canvas drew no part labels at all, so nothing is compared"
+
+    off_by = []
+    for d, js in zip(leds, drawn):
+        spec = pcb.BadgeSpec(leds=[_py_led(d)])
+        board = [(lab["ref"], lab["face"], lab["at"])
+                 for lab in pcb.refdes_layout(spec)]
+        if len(js) != len(board):
+            off_by.append(f"{_describe(d)}: canvas places {len(js)} label(s), "
+                          f"the generator {len(board)}")
+            continue
+        for (jref, jface, jx, jy), (bref, bface, (bx, by)) in zip(js, board):
+            if jref != bref or jface != bface:
+                off_by.append(f"{_describe(d)}: canvas draws {jref} on the "
+                              f"{jface}, the generator places {bref} on the "
+                              f"{bface}")
+            elif max(abs(jx - bx), abs(jy - by)) > _PARITY_TOL:
+                off_by.append(
+                    f"{_describe(d)}: {jref} is drawn at "
+                    f"{(jx, jy)} and placed at {(round(bx, 4), round(by, 4))}")
+    assert not off_by, (
+        f"{len(off_by)} part-label placements across {len(leds)} units differ "
+        "between preview and generator:\n" + "\n".join(off_by[:10]))
+
+    # Switched off, neither the canvas nor the download shows one.
+    import io
+    import zipfile
+    ui.js("(L) => { state.leds = [L]; state.refdes = false; rebuildAllArt();"
+          " draw(); }", _js_led(x=10.0, y=10.0))
+    assert ui.js("() => refdesLayout().length") == 0, (
+        "the canvas still draws part labels with the switch off")
+    params = json.loads(ui.js('() => designFormData().get("params")'))
+    params["name"] = "nolabels"
+    resp = client.post("/generate", data={"params": json.dumps(params)})
+    assert resp.status_code == 200, resp.get_json()
+    board = invariants.assert_parses(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "nolabels/nolabels.kicad_pcb").decode())
+    assert not invariants._printed_references(board), (
+        "the preview stopped drawing part labels and the board still prints "
+        f"{[r for r, *_ in invariants._printed_references(board)]}")
+
+
+#: (kind, how to install one, how to read the list back). Every selectable
+#: thing on the board, because "copy" that works on units and silently does
+#: nothing on a text is worse than no copy at all.
+_CLIP_KINDS = [
+    ("led", """() => { state.leds = [{x: 10, y: 6, color: 'blue', side: 'back',
+        rot: 90, layout: 'inline', size: '0603', reverse: false, novia: false,
+        nodes: [], farled: false, adv: null, clk: false, cnodes: []}];
+        renderLedList(); draw(); setSelection('led', 0, 'back'); }""",
+     "() => state.leds.map(L => [L.x, L.y, L.rot, L.layout, L.size, L.side])"),
+    ("text", """() => { state.texts = [{x: 5, y: 5, text: 'zap', size: 2,
+        side: 'back', rot: 0, font: 'kicad', material: 'silk'}];
+        renderTextList(); draw(); setSelection('text', 0, 'back'); }""",
+     "() => state.texts.map(t => [t.text, t.size, t.side])"),
+    ("art", """() => { state.art = [{kind: 'circle', material: 'copper',
+        side: 'front', cx: 6, cy: 6, wmm: 5, h: 5, rot: 0, mode: 'threshold',
+        palette: [], overrides: []}];
+        renderArtList(); draw(); setSelection('art', 0, 'front'); }""",
+     "() => state.art.map(a => [a.kind, a.material, a.wmm])"),
+]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("kind,install,read", _CLIP_KINDS,
+                         ids=[k[0] for k in _CLIP_KINDS])
+def test_anything_selected_can_be_copied_and_pasted(ui, kind, install, read):
+    """Copy and paste put a second one on the board, the same as the first.
+
+    Real clipboard events, driven with the real shortcut: that is what makes a
+    copy survive into another tab, and it is the only version of this feature
+    worth having -- an app-private buffer would leave a user wondering why the
+    paste they just did in the other window produced nothing.
+
+    The copy has to arrive with the properties it was copied WITH. A unit that
+    comes back rotated (because the free-spot search was allowed to turn it to
+    make it fit) is not a copy of anything the user asked for.
+    """
+    page = ui.page
+    ui.js(install)
+    before = ui.js(read)
+    assert len(before) == 1, f"the {kind} fixture did not install: {before}"
+
+    page.keyboard.press("ControlOrMeta+c")
+    page.keyboard.press("ControlOrMeta+v")
+    after = ui.js(read)
+    assert len(after) == 2, (
+        f"copy then paste left {len(after)} {kind}(s) on the board, not two: "
+        f"{after}")
+    if kind == "led":
+        # x/y move on purpose (a copy under its original is invisible);
+        # everything about the unit's shape must not.
+        assert after[1][2:] == before[0][2:], (
+            f"the pasted unit came back as {after[1][2:]} where the copied one "
+            f"was {before[0][2:]}")
+        assert (after[1][0], after[1][1]) != (before[0][0], before[0][1]), (
+            "the pasted unit landed exactly on top of the original, where "
+            "nobody can see or grab it")
+    else:
+        assert after[1] == before[0], (
+            f"the pasted {kind} is {after[1]} and the copied one was "
+            f"{before[0]}")
+    assert ui.js("() => selected && [selected.kind, selected.index]") == [kind, 1], (
+        "the paste left the ORIGINAL selected, so a second paste would copy "
+        "the wrong thing and Delete would remove it")
+    ui.assert_clean(f"copy and paste a {kind}")
+
+
+@pytest.mark.browser
+def test_cut_takes_the_object_with_it_and_paste_puts_it_back(ui):
+    """Cut removes what it copied, and the copy is still on the clipboard.
+
+    Cut that only deleted would be a worse Delete; cut that only copied would
+    lose the user's object the first time they tried to move one between
+    designs.
+    """
+    page = ui.page
+    ui.js("""() => { state.texts = [{x: 5, y: 5, text: 'zap', size: 2,
+        side: 'front', rot: 0, font: 'kicad', material: 'silk'}];
+        renderTextList(); draw(); setSelection('text', 0, 'front'); }""")
+    page.keyboard.press("ControlOrMeta+x")
+    assert ui.js("() => state.texts.length") == 0, "cut left the text behind"
+    page.keyboard.press("ControlOrMeta+v")
+    back = ui.js("() => state.texts.map(t => [t.text, t.size])")
+    assert back == [["zap", 2]], f"paste after cut produced {back}"
+    ui.assert_clean("cut and paste a text")

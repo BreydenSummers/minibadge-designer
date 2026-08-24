@@ -1269,6 +1269,93 @@ def assert_light_windows_carry_keepouts(b: Board, spec) -> None:
             "the first refill in KiCad floods the window solid")
 
 
+#: Silk-to-copper gap the generator holds for a printed part reference, mm.
+#: Stated here, not read from pcb: the rule is "ink must not sit on a mask
+#: opening", and a check that took the number from the constant under test
+#: could not notice it being loosened to zero.
+REFDES_CLEAR = 0.15
+
+
+def _printed_references(b: Board) -> list:
+    """[(ref, layer, (x, y), quad)] for every reference printed on silk.
+
+    Read off the file: a footprint's reference is documentation on `*.Fab`
+    and ink on `*.SilkS`, and which one it lands on is the whole question.
+    """
+    out = []
+    for _name, _fl, fx, fy, _ref, node in b.footprints:
+        for t in _kids(node, "fp_text"):
+            if t[1] != "reference":
+                continue
+            layer = _val(t, "layer")
+            if not str(layer).endswith("SilkS"):
+                continue
+            at = _kid(t, "at")
+            x = fx + float(at[1])
+            y = fy + float(at[2])
+            eff = _kid(t, "effects")
+            size = float(_kid(_kid(eff, "font"), "size")[1]) if eff else 0.7
+            ref = str(t[2])
+            hw = len(ref) * size * 0.6 / 2 + 0.25
+            hh = size / 2 + 0.25
+            out.append((ref, layer, (x, y),
+                        (x - hw, y - hh, x + hw, y + hh)))
+    return out
+
+
+def assert_printed_references_sit_on_printable_board(b: Board, spec) -> None:
+    """A printed part reference clears the copper and the other ink.
+
+    The references (D1, R1, ...) are what the BOM names the parts by, so the
+    board printing them is the difference between a kit somebody can solder
+    and a puzzle. They are also generated ink placed automatically, and ink
+    over a pad's mask opening is CLIPPED by the fab -- KiCad calls it
+    silk_over_copper -- while two labels on top of each other is silk_overlap.
+    Neither is a printing problem the user can see coming: they placed a part,
+    not a label.
+
+    Asserted as clearances rather than as positions, so any change to where
+    the labels go is fine as long as they still land somewhere printable.
+    """
+    from shapely.geometry import box as sbox
+    labels = _printed_references(b)
+    if spec.refdes:
+        assert bool(labels) == bool(spec.leds), (
+            f"the spec asks for printed part references and the board carries "
+            f"{len(labels)} of them for {len(spec.leds)} unit(s)")
+    else:
+        assert not labels, (
+            "part labels are switched off, but the board prints "
+            f"{[lab[0] for lab in labels]} on the silkscreen anyway")
+    if labels:
+        # Every board this runs on has the connector's eight pads at least, so
+        # an empty list means the parse lost them rather than that the board
+        # has none -- and then the clearance loop below would pass on nothing.
+        assert len(b.pads) >= 8, (
+            f"only {len(b.pads)} pads parsed off a board with printed labels; "
+            "the clearance check below would have nothing to measure against")
+    for ref, layer, _at, bx in labels:
+        ink = sbox(*bx)
+        face = layer[0]  # "F" / "B"
+        for pad in b.pads:
+            if not any(lay.startswith((face, "*")) for lay in pad.layers):
+                continue
+            gap = ink.distance(pad.copper())
+            assert gap >= REFDES_CLEAR - EMITTED_ROUNDING_MM, (
+                f"the printed {ref} sits {gap:.3f} mm from pad "
+                f"{pad.ref}.{pad.num} on {layer} (needs {REFDES_CLEAR}): ink "
+                "over a mask opening is clipped by the fab, so the label "
+                "prints broken or not at all")
+        for other, olayer, _oat, obx in labels:
+            if other is ref and obx == bx:
+                continue
+            if olayer != layer:
+                continue
+            assert not ink.intersects(sbox(*obx).buffer(-1e-9)), (
+                f"the printed {ref} and {other} overlap on {layer}: two "
+                "labels printed over each other name neither part")
+
+
 def _keepout_outlines(b: Board, layer: str) -> list:
     """The emitted keepout rule-area outlines on ``layer``, as shapely polygons.
 
@@ -1854,6 +1941,7 @@ ALL_CHECKS = [
     assert_fab_choices_reach_the_stackup,
     assert_back_side_parts_live_on_back_layers,
     assert_stroke_text_prints_at_the_size_it_asks_for,
+    assert_printed_references_sit_on_printable_board,
 ]
 
 
