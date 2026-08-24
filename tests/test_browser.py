@@ -5361,3 +5361,114 @@ def test_art_pushed_off_the_board_previews_the_half_the_board_gets(
         assert min(xs) >= -0.01 and max(xs) <= 20.33, (
             f"{label}: ink runs {min(xs):.2f}..{max(xs):.2f}, off the board")
     ui.assert_clean(f"overhanging art, {label}")
+def _centre_stripe_png() -> bytes:
+    """A wide image with one dark stripe down its middle.
+
+    Symmetric on purpose: a back layer is painted mirrored, and a stripe that
+    survives the mirror lets the front and back cases share one assertion
+    about WHERE the ink lands.
+    """
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (400, 200), "white")
+    ImageDraw.Draw(img).rectangle((180, 0, 219, 199), fill=(20, 20, 20))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+#: Sample a band of the board off one canvas.  Mirrors the back canvas the
+#: same way the app's boardCoords() does.
+_BAND = """([side, x0, x1, y0, y1]) => {
+    const cv = side === 'back' ? cvB : cvF;
+    const left = side === 'back' ? cv.width - VIEW.tx - x1 * SCALE
+                                 : VIEW.tx + x0 * SCALE;
+    const w = Math.max(1, Math.round((x1 - x0) * SCALE));
+    const h = Math.max(1, Math.round((y1 - y0) * SCALE));
+    return [...cv.getContext('2d').getImageData(
+        Math.round(left), Math.round(VIEW.ty + y0 * SCALE), w, h).data];
+}"""
+
+#: (id, layer side, sample while still holding the button)
+_ART_MOVES = [
+    ("front-mid-drag", "front", True),
+    ("front-released", "front", False),
+    ("back-released", "back", False),
+]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("label,side,mid", _ART_MOVES,
+                         ids=[c[0] for c in _ART_MOVES])
+def test_art_dragged_across_the_board_is_painted_where_it_is_dragged(
+        ui, label, side, mid):
+    """Dragging an art layer moves the picture, not just its outline.
+
+    Only the part of a layer over the board is classified, so what is cached
+    is a window onto the image -- and a move slides that window. If the cache
+    is placed by where it was BUILT rather than by where the layer is now, the
+    selection box tracks the mouse while the artwork stays behind at the old
+    spot, and lining a drawing up with a board profile becomes guesswork.
+    """
+    page = ui.page
+    page.click("#tab-art")
+    page.set_input_files("#artfile", {"name": "stripe.png",
+                                      "mimeType": "image/png",
+                                      "buffer": _centre_stripe_png()})
+    page.wait_for_function("() => state.art.length === 1 && state.art[0].img",
+                           timeout=UPLOAD_TIMEOUT)
+    start, end = 5.0, 15.0
+    ui.js("""([side, cx]) => {
+        state.leds.length = 0; state.texts.length = 0;
+        const a = state.art[0];
+        a.side = side; a.cx = cx; a.cy = 10.16; a.wmm = 40;
+        a.material = 'silk'; a.mode = 'threshold';
+        rebuildArt(a); renderLedList(); renderArtList(); draw();
+    }""", [side, start])
+
+    def band(x):
+        """The pixels in a 4 mm-wide slice of the board around x."""
+        return ui.js(_BAND, [side, x - 2.0, x + 2.0, 6.0, 14.0])
+
+    # What the two slices look like with no art at all, so "inked" below can
+    # mean "differs from the bare board" rather than a colour this test guesses.
+    ui.js("() => { window.__parked = state.art.pop(); draw(); }")
+    blank = (band(start), band(end))
+    ui.js("() => { state.art.push(window.__parked);"
+          " rebuildArt(window.__parked); draw(); }")
+
+    def inked(now, base):
+        return sum(1 for i in range(0, len(base), 4)
+                   if any(abs(now[i + k] - base[i + k]) > 8 for k in range(3)))
+
+    was_here = inked(band(start), blank[0])
+    was_there = inked(band(end), blank[1])
+    assert was_here > 0, (
+        "the stripe inks nothing where the layer starts; nothing to test")
+    assert was_there == 0, (
+        f"the stripe already inks {was_there} pixels at the destination "
+        "before the drag; the two bands are not telling the positions apart")
+
+    if mid:
+        ui.drag_mm_hold((start, 10.16), (end, 10.16), side=side)
+    else:
+        ui.drag_mm((start, 10.16), (end, 10.16), side=side)
+    moved = ui.js("() => state.art[0].cx")
+    assert abs(moved - end) < 1.5, (
+        f"the drag left the layer at cx={moved:.2f}, not near {end}: it "
+        "grabbed something other than the art, so nothing here was tested")
+
+    now_here = inked(band(start), blank[0])
+    now_there = inked(band(end), blank[1])
+    if mid:
+        ui.release()
+    assert now_there > 0.5 * was_here, (
+        f"{label}: the layer is at cx={moved:.2f} but the destination band "
+        f"only inks {now_there} pixels against {was_here} at the old place -- "
+        "the preview is not showing the artwork where the user dragged it")
+    assert now_here < 0.2 * was_here, (
+        f"{label}: the artwork still inks {now_here} of {was_here} pixels "
+        "where the layer used to be, after being dragged away from there")
+    ui.assert_clean(f"dragged art, {label}")
