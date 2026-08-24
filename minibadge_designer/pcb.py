@@ -433,6 +433,181 @@ def model_path(library: str, stem: str) -> str:
     return f"{MODEL_DIR}/{library}.3dshapes/{stem}{MODEL_EXT}"
 
 
+#: Printed part references (D1, R1, ...): cap height and pen, mm. Matched to
+#: the pin captions this board already prints rather than to a fab's silk
+#: minimum -- JLCPCB asks 1.0 mm / 0.15 mm and the captions run 0.6 / 0.11, so
+#: a refdes that obeyed the datasheet would tower over the labels beside it on
+#: a 20 mm board. Legible and consistent beats nominally compliant here, and
+#: generate_project says as much where the rules live.
+REFDES_SIZE, REFDES_PEN = 0.7, 0.1
+#: How far a printed reference keeps off copper and other ink, mm. Silk over a
+#: pad's mask opening is clipped by the fab (KiCad calls it silk_over_copper);
+#: 0.15 is the gap the unit's own silk brackets already keep from their pads.
+REFDES_GAP = 0.15
+
+
+def _refdes_quad(cx: float, cy: float, ref: str) -> list:
+    """The ink box of one printed reference, centred on (cx, cy), as a quad."""
+    hw = len(ref) * REFDES_SIZE * 0.6 / 2 + 0.25
+    hh = REFDES_SIZE / 2 + 0.25
+    return [(cx - hw, cy - hh), (cx + hw, cy - hh),
+            (cx + hw, cy + hh), (cx - hw, cy + hh)]
+
+
+def refdes_layout(spec: BadgeSpec, safe=None) -> list[dict]:
+    """Where each part's printed reference goes. -> [{...}] per label placed.
+
+    Every entry carries `unit`, `which` ("led"/"res"), `ref` ("D1"), `face`,
+    `at` (board mm), `local` (the offset the footprint writes, already turned
+    into the part's emitted frame) and `quad` (the ink box art keeps clear of).
+    A part whose label has nowhere legal to sit is simply absent: a missing
+    label is a cosmetic loss and the BOM still names the part, where ink over
+    a pad's mask opening is a fab reject.
+    
+    The search is four candidates per part -- out along the short axis either
+    way, then past the pads along the long axis -- tested against the copper,
+    ink and board edge in that order, first clear one wins. It exists because
+    a fixed offset cannot work: the default spot sits 1.5-1.9 mm along the
+    short axis, which on a STACKED unit is straight over the sibling's pads,
+    and even flipped it lands on a neighbouring unit's label on a crowded
+    board (measured: 4 DRC violations across the smd-sizes corpus row, two
+    silk-over-mask and two silk-overlap).
+    """
+    if not spec.refdes or not spec.leds:
+        return []
+    if safe is None:
+        safe = unit_safe(spec)
+    clk = clk_info(spec)
+    rings = spec.outline if spec.outline else [
+        [(OUTLINE[0], OUTLINE[1]), (OUTLINE[2], OUTLINE[1]),
+         (OUTLINE[2], OUTLINE[3]), (OUTLINE[0], OUTLINE[3])]
+    ]
+    # Copper and ink this text has to miss. Pads carry mask openings, and ink
+    # over one is clipped by the fab; captions and other labels are ink, which
+    # DRC flags as silk_overlap.
+    # Two obstacle sets, because the two failures are different rules. COPPER
+    # carries a mask opening and ink over one is clipped by the fab
+    # (silk_over_copper), so the label keeps REFDES_GAP off it. INK just may
+    # not overlap (silk_overlap), so it is tested at touching distance --
+    # holding ink off by the copper gap as well would leave a label no legal
+    # spot on an ordinary 0805, since its own silk brackets sit 1.0 mm out and
+    # the nearest candidate box starts at 1.1 mm.
+    #
+    # Real pad copper, not the inflated art keepouts: those grow every pad by
+    # 0.5 mm a side, which swallows the 1.5-1.9 mm the label sits at and left
+    # every candidate blocked (measured: no label placed anywhere at all).
+    copper_obs = [q for led in spec.leds
+                  for q in _unit_copper_quads(led, safe, False)]
+    for num, px, py, _net, _row in CONNECTOR_PADS:
+        if num not in spec.pins:
+            continue
+        hw = 0.875 + 0.15
+        copper_obs.append([(px - hw, py - hw), (px + hw, py - hw),
+                           (px + hw, py + hw), (px - hw, py + hw)])
+    ink_obs = [[(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
+               for b in caption_boxes(spec.pins)]
+    # Each part's OWN silk -- the pad brackets, a dome's arcs, the cathode bar
+    # -- as a box in its own frame. Without it a label sitting past the pads
+    # landed straight on the bracket it belongs to (measured on the
+    # through-hole and crowd corpus rows).
+    for led in spec.leds:
+        g = led_geometry(led)
+        cx, cy = clamp_led_obj(led, safe)
+        for which, anchor in (("led", (0.0, 0.0)), ("res", g["res"])):
+            pk = PKG[g["pkg"] if which == "led" else res_pkg(g["pkg"])]
+            lens = pk.get("lens", 0.0) if which == "led" else 0.0
+            hw = max(pk["dx"] + pk["pw"] / 2, pk["body"][0] / 2, lens / 2) + 0.2
+            hh = max(pk["ph"] / 2, pk["body"][1] / 2, lens / 2) + 0.2
+            extra = (g.get("led_rot", 0.0) if which == "led"
+                     else g.get("res_rot", 0.0))
+            ang = (led.rot + extra) % 360
+            ax, ay = _r(anchor[0], anchor[1], led.rot)
+            ink_obs.append([
+                (cx + ax + ex, cy + ay + ey) for ex, ey in
+                (_r(sx * hw, sy * hh, ang)
+                 for sx, sy in ((-1, -1), (1, -1), (1, 1), (-1, 1)))])
+    if clk is not None and clk["jumper"]:
+        copper_obs += [q for _lbl, q in jumper_copper_pieces(clk)]
+        ink_obs += [[(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
+                    for b in jumper_caption_boxes(clk)]
+    edges = [(ring[k], ring[(k + 1) % len(ring)])
+             for ring in rings for k in range(len(ring))]
+    out: list[dict] = []
+    for i, led in enumerate(spec.leds):
+        g = led_geometry(led)
+        cx, cy = clamp_led_obj(led, safe)
+        far = bool(led.farled) and not g["hole"] and "drill" not in PKG[g["pkg"]]
+        for which, ref, anchor in (("led", f"D{i + 1}", (0.0, 0.0)),
+                                   ("res", f"R{i + 1}", g["res"])):
+            face = led.side
+            if which == "led" and far:
+                face = "back" if led.side != "back" else "front"
+            pk = PKG[g["pkg"] if which == "led" else res_pkg(g["pkg"])]
+            ty = max(pk["ph"] / 2 + 1.0, pk["body"][1] / 2 + 0.6)
+            tx = pk["dx"] + pk["pw"] / 2 + len(ref) * REFDES_SIZE * 0.6 / 2 + 0.4
+            extra = (g.get("led_rot", 0.0) if which == "led"
+                     else g.get("res_rot", 0.0))
+            ang = (led.rot + extra) % 360
+            # Away from the unit's other part first: `res` is the resistor's
+            # offset from the LED, so the LED sees it as-is and the resistor
+            # sees it negated, and the sign of the bigger component says which
+            # way to step.
+            sx, sy = g["res"] if which == "led" else (-g["res"][0], -g["res"][1])
+            sx, sy = _r(sx, sy, -extra)
+            first = (0.0, ty) if (abs(sy) > abs(sx) and sy < 0) else (0.0, -ty)
+            # Short axis away from the sibling, then the other way, then past
+            # the pads along the long axis, then the four diagonals. The
+            # diagonals earn their place: with only the axial four, a resistor
+            # boxed in by the pin captions above and its own LED below got no
+            # label at all (1 of 8 missing on the smd-sizes corpus row).
+            cands = [first, (0.0, -first[1]), (tx, 0.0), (-tx, 0.0),
+                     (tx, first[1]), (-tx, first[1]),
+                     (tx, -first[1]), (-tx, -first[1])]
+            # The anchor turns with the UNIT and the offset with the PART:
+            # a free-placed resistor carries its own rotation on top of the
+            # unit's, and rotating the sum by the total put its label
+            # somewhere neither frame agrees with.
+            ax, ay = _r(anchor[0], anchor[1], led.rot)
+            for ox, oy in cands:
+                lx, ly = _r(ox, oy, ang)
+                px, py = cx + ax + lx, cy + ay + ly
+                quad = _refdes_quad(px, py, ref)
+                if any(_quads_overlap(quad, q, REFDES_GAP) for q in copper_obs):
+                    continue
+                if any(_quads_overlap(quad, q) for q in ink_obs):
+                    continue
+                if not all(_point_in_rings(rings, qx, qy) for qx, qy in quad):
+                    continue
+                if any(_seg_dist(a, b, e0, e1) < TEXT_EDGE_CLEAR
+                       for a, b in zip(quad, quad[1:] + quad[:1])
+                       for e0, e1 in edges):
+                    continue
+                out.append({"unit": i, "which": which, "ref": ref, "face": face,
+                            "at": (px, py), "local": (lx, ly), "quad": quad})
+                ink_obs.append(quad)     # the next label keeps off this ink
+                break
+    return out
+
+
+def refdes_boxes(spec: BadgeSpec, safe=None,
+                 side: str | None = None) -> list[tuple[float, float, float, float]]:
+    """Bounding boxes of the printed part references (art must stay clear).
+
+    Same contract as :func:`caption_boxes`, and for the same reason: this ink
+    is generated, not placed by the user, so artwork has to be carved around
+    it rather than printed over it. `side` filters to one face, since a part's
+    reference prints on the face the part is mounted on.
+    """
+    out = []
+    for lab in refdes_layout(spec, safe):
+        if side is not None and lab["face"] != side:
+            continue
+        xs = [q[0] for q in lab["quad"]]
+        ys = [q[1] for q in lab["quad"]]
+        out.append((min(xs), min(ys), max(xs), max(ys)))
+    return out
+
+
 def caption_boxes(pins) -> list[tuple[float, float, float, float]]:
     """Bounding boxes of the printed pin captions (art must stay clear)."""
     out = []
@@ -2655,6 +2830,12 @@ class BadgeSpec:
     # writes `(tenting none)` on each via so the annulus plates bare, and
     # window mask openings stop keeping a cap of mask over vias they cross.
     tenting: bool = True
+    # Print each part's reference (D1, R1, ...) on the silkscreen. On by
+    # default: it is what a KiCad footprint's reference is FOR, and without
+    # it the BOM names parts the board does not. Off leaves the reference on
+    # the fab layer, where it documents the part without printing ink -- a
+    # badge whose whole front is artwork does not want two labels on it.
+    refdes: bool = True
     # How CLK units (Led.clk) meet the blink clock, once any exist. True =
     # the 3-pad solder jumper (bridge one side: steady 3V3 or blinking CLK);
     # False = their supply is wired straight to pin 9. See clk_info().
@@ -2974,6 +3155,7 @@ def _smd(
     pkg: str = "0805",
     model: str | None = None,
     silk_avoid: tuple = (),
+    ref_at: tuple | None = None,
 ) -> str:
     """A minimal two-pad SMD footprint (0603/0805/1206) at page coords.
 
@@ -2983,6 +3165,13 @@ def _smd(
     carry the equivalent KiCad orientation (which counts counterclockwise).
     `flip` mirrors the local x axis first (pad 1 moves to the + side), used
     by the inline layout to face the LED anode toward the resistor.
+
+    `ref_at` prints the reference (D1, R1, ...) on the SILKSCREEN at that
+    local offset instead of leaving it on the fab layer. The caller picks the
+    offset because only it knows where the unit's other part is: the default
+    spot sits 1.7 mm along the part's short axis, which on a stacked unit is
+    straight over the sibling's pads, and ink over a mask opening is clipped
+    by the fab and flagged by DRC.
     """
     p = "F" if side != "back" else "B"
     mirror = "" if side != "back" else " (justify mirror)"
@@ -3044,8 +3233,12 @@ def _smd(
         f'  (footprint "minibadge-designer:{value}_{pkg}" (layer "{p}.Cu") (tstamp {_ts(f"fp-{key}")})',
         f"    (at {_n(x)} {_n(y)})",
         f"    (attr {'through_hole' if drill else 'smd'})",
-        f'    (fp_text reference "{ref}" (at 0 {_n(-ty)} unlocked) (layer "{p}.Fab")',
-        f"      (effects (font (size 0.7 0.7) (thickness 0.1)){mirror})",
+        f'    (fp_text reference "{ref}" '
+        f"(at {_n(ref_at[0]) if ref_at else 0} "
+        f'{_n(ref_at[1]) if ref_at else _n(-ty)} unlocked) '
+        f'(layer "{p}.{"SilkS" if ref_at else "Fab"}")',
+        f"      (effects (font (size {_n(REFDES_SIZE)} {_n(REFDES_SIZE)}) "
+        f"(thickness {_n(REFDES_PEN)})){mirror})",
         f"      (tstamp {_ts(f'fp-{key}-ref')})",
         "    )",
         f'    (fp_text value "{value}" (at 0 {_n(ty)} unlocked) (layer "{p}.Fab")',
@@ -3159,6 +3352,7 @@ def _led_unit(
     outline=None,
     tenting: bool = True,
     clk=None,
+    refdes: dict | None = None,
 ) -> str:
     """LED + resistor footprints, connecting traces, and the power via."""
     ang = led.rot
@@ -3218,12 +3412,14 @@ def _led_unit(
         _smd(f"led{i}", f"D{i + 1}", f"LED_{led.color.upper()}",
              *at(0, 0), gnd, an, True, led_side,
              (ang + g.get("led_rot", 0.0)) % 360, g["led_flip"], g["pkg"],
-             led_model, silk_avoid=avoid_led),
+             led_model, silk_avoid=avoid_led,
+             ref_at=(refdes or {}).get("led")),
         _smd(f"res{i}", f"R{i + 1}", f"{LED_COLORS.get(led.color, '220')}R",
              *at(*g["res"]), v33, an, False, led.side,
              (ang + g.get("res_rot", 0.0)) % 360, False, rpkg,
              model_path("Resistor_SMD", f"R_{rpkg}_{PKG_METRIC[rpkg]}Metric"),
-             silk_avoid=avoid_res),
+             silk_avoid=avoid_res,
+             ref_at=(refdes or {}).get("res")),
     ]
     # Resistor pad 2 to LED anode, through any hand-placed bends.
     apts = [(ORIGIN + px, ORIGIN + py)
@@ -4111,9 +4307,16 @@ def generate_pcb(spec: BadgeSpec) -> str:
                     f"(tstamp {_ts(f'jumper-v3link-{n}')}))"
                 )
     bridges = unit_bridges(spec, safe)
+    # One search for the whole board, so each printed reference can keep off
+    # the ink already placed: a per-unit decision cannot see its neighbours,
+    # and two labels 0.45 mm apart is a silk_overlap violation.
+    ref_offsets: dict[int, dict] = {}
+    for lab in refdes_layout(spec, safe):
+        ref_offsets.setdefault(lab["unit"], {})[lab["which"]] = lab["local"]
     for i, led in enumerate(spec.leds):
         body.append(_led_unit(i, led, nets, safe, spec.pins, spec.leds,
-                              spec.outline, spec.tenting, clk))
+                              spec.outline, spec.tenting, clk,
+                              ref_offsets.get(i)))
         for layer, net in (("F.Cu", "3V3"), ("B.Cu", "GND")):
             pts = bridges.get(i, {}).get(layer)
             if pts is None:
