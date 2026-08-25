@@ -1627,47 +1627,192 @@ def test_the_previewed_perimeter_bridges_match_the_generated_ones(ui):
 
     leds = _clamped(_unit_matrix(sides=("front", "back")))
     off_by = []
-    # Both worlds, because the window is now part of the decision: a PAD's
-    # bridge is only cut when the design has one, so without a windowed pass
-    # this test would compare "no pad bridges" against "no pad bridges" and
-    # the whole pad branch -- most of the bridges a real badge carries --
-    # would go unchecked on either side.
-    for label, js_art, py_art in (
-            ("no window", [], []),
-            ("bare window", [{"kind": "rect", "material": "bare",
-                              "side": "through", "cx": 10.16, "cy": 10.16,
-                              "wmm": 14, "h": 14, "rot": 0}],
-             [pcb.ArtLayer("bare", [(3.0, 3.0, 14.0, 14.0)])])):
-        drawn = ui.js("([Ls, art]) => Ls.map(L => { state.leds = [L];"
-                      " state.art = art; return allBridges()[0]; })",
-                      [leds, js_art])
-        for d, js in zip(leds, drawn):
-            board = pcb.unit_bridges(
-                pcb.BadgeSpec(leds=[_py_led(d)], art=list(py_art)))[0]
-            for jkey, bkey in (("F", "F.Cu"), ("B", "B.Cu")):
-                # The canvas answers {pts, ok} per layer now that a bridge can
-                # carry hand-placed bends; the board answers the polyline.
-                drawn_br = js.get(jkey)
-                jseg = drawn_br["pts"] if drawn_br else None
-                bseg = board.get(bkey)
-                if (jseg is None) != (bseg is None):
-                    off_by.append(
-                        f"{label}, {_describe(d)} on {bkey}: the canvas "
-                        f"{'draws a bridge' if jseg else 'cuts none'} but the "
-                        f"board {'routes one' if bseg else 'cuts none'}")
-                elif jseg and _gap(jseg, bseg) > _PARITY_TOL:
-                    off_by.append(
-                        f"{label}, {_describe(d)} on {bkey}: the drawn bridge "
-                        f"is {_gap(jseg, bseg):.4f} mm from the shipped one")
-        assert any(js.get("F") or js.get("B") for js in drawn), (
-            f"{label}: the canvas drew no bridge on any of {len(leds)} units, "
-            "so nothing below was actually compared")
+    # The whole matrix in the no-window world: every contact of every unit
+    # reaches its plane, so BOTH sides must cut nothing. A stray grey line
+    # across a whole plane was the complaint that made this rule fine-grained;
+    # here it is pinned across every package, layout, mount, rotation and
+    # hand-placement. (The severed world goes through the real webapp in
+    # test_a_severed_units_bridges_ship_exactly_as_previewed: raw hand-built
+    # ArtLayers skip the keepout carving the webapp applies to windows, so
+    # comparing against pcb.unit_bridges alone would judge the preview
+    # against a board no design can ship.)
+    drawn = ui.js("([Ls]) => Ls.map(L => { state.leds = [L];"
+                  " state.art = []; return allBridges()[0]; })", [leds])
+    for d, js in zip(leds, drawn):
+        board = pcb.unit_bridges(pcb.BadgeSpec(leds=[_py_led(d)]))[0]
+        for jkey, bkey in (("F", "F.Cu"), ("B", "B.Cu")):
+            drawn_br = js.get(jkey)
+            jseg = drawn_br["pts"] if drawn_br else None
+            bseg = board.get(bkey)
+            if jseg is not None or bseg is not None:
+                off_by.append(
+                    f"{_describe(d)} on {bkey}: the "
+                    f"{'canvas draws' if jseg else 'board routes'} a bridge "
+                    "for a contact the whole plane already reaches")
 
     assert not off_by, (
         f"{len(off_by)} bridge decisions across {len(leds)} units differ "
-        "between preview and board; allBridges() and pcb.unit_bridges have "
-        "drifted:\n" + "\n".join(off_by[:12]))
+        "from 'a whole plane needs no trace to itself'; allBridges() or "
+        "pcb.unit_bridges is cutting copper with no job:\n"
+        + "\n".join(off_by[:12]))
     ui.assert_clean("bridge parity")
+
+
+@pytest.mark.browser
+def test_a_severed_units_bridges_ship_exactly_as_previewed(ui, client):
+    """The bridges drawn for a windowed unit are the segments the zip carries.
+
+    A window over a unit severs its contacts from the pour, and then a bridge
+    per severed contact is the repair. Preview and board reach that answer by
+    different roads -- a raster flood against the display's carved windows on
+    one side, shapely fill components on the other -- and this walks the
+    whole road: the very params the editor would post, through /generate, to
+    the segments in the shipped file. Every drawn bridge leg must ship, and
+    nothing but the unit's own traces may ship beyond them: an extra segment
+    is a trace the user was never shown and cannot move.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+
+    from minibadge_designer import pcb
+
+    cases = _clamped([_js_led(layout=lay, size="0805", side=side, rot=rot,
+                              reverse=rev)
+                      for lay in ("inline", "stacked")
+                      for side in ("front", "back")
+                      for rot, rev in ((0, False), (37, True))])
+    assert len(cases) == 8, "the severed-world matrix lost cases"
+    window = {"kind": "circle", "material": "bare", "side": "through",
+              "cx": 10.16, "cy": 10.16, "wmm": 17.0}
+    any_bridge = False
+    for d in cases:
+        got = ui.js("""([L, win]) => {
+            state.leds = [L]; state.art = [win];
+            renderLedList(); renderArtList(); draw();
+            const br = allBridges()[0];
+            const own = [unitTracePts(state.leds[0], 'a').pts];
+            const r = noviaRoute(state.leds[0]);
+            if (!r && !L.novia) own.push(unitTracePts(state.leds[0], 'v').pts);
+            if (r) own.push(r.pts);
+            return { br, own,
+                     params: designFormData().get('params') };
+        }""", [d, window])
+        params = json.loads(got["params"])
+        params["name"] = "sever"
+        resp = client.post("/generate", data={"params": json.dumps(params)},
+                           content_type="multipart/form-data")
+        assert resp.status_code == 200, (_describe(d), resp.get_json())
+        root = invariants._parse_sexp(zipfile.ZipFile(io.BytesIO(
+            resp.data)).read("sever/sever.kicad_pcb").decode())
+        segs = {"F": [], "B": []}
+        for gseg in invariants._kids(root, "segment"):
+            a = invariants._kid(gseg, "start")
+            b = invariants._kid(gseg, "end")
+            ly = str(invariants._val(gseg, "layer"))[0]
+            segs[ly].append(((float(a[1]) - pcb.ORIGIN, float(a[2]) - pcb.ORIGIN),
+                             (float(b[1]) - pcb.ORIGIN, float(b[2]) - pcb.ORIGIN)))
+        own_legs = [(tuple(p), tuple(q)) for pts in got["own"]
+                    for p, q in zip(pts, pts[1:])]
+        # Board files round coordinates to 1e-4 mm, so the float-exact
+        # _PARITY_TOL can never match a shipped segment; a micron of slack
+        # is still a thousandth of the trace width.
+        tol = 1e-3
+
+        def matches(leg, cand):
+            (ax, ay), (bx, by) = leg
+            (cx2, cy2), (dx2, dy2) = cand
+            straight = max(abs(ax - cx2), abs(ay - cy2),
+                           abs(bx - dx2), abs(by - dy2))
+            flipped = max(abs(ax - dx2), abs(ay - dy2),
+                          abs(bx - cx2), abs(by - cy2))
+            return min(straight, flipped) < tol
+
+        for jkey in ("F", "B"):
+            br = got["br"].get(jkey)
+            legs = ([(tuple(p), tuple(q))
+                     for p, q in zip(br["pts"], br["pts"][1:])]
+                    if br else [])
+            if legs:
+                any_bridge = True
+            shipped = list(segs[jkey])
+            # A layer with no bridge has no legs by design; the any_bridge
+            # assert below proves the matrix still exercises the other case.
+            for leg in legs:  # style-ok: E-VACUOUS-LOOP a bridge-less layer has zero legs to walk; the any_bridge assert after the loop fails if every case came back empty
+                hit = next((c for c in shipped if matches(leg, c)), None)
+                assert hit is not None, (
+                    f"{_describe(d)}: the preview draws a {jkey}-face bridge "
+                    f"leg {leg} that the shipped board does not carry")
+                shipped.remove(hit)
+            # The unit's own traces may ship SPLIT (a reverse unit's anode
+            # trace skips its routed hole), so a leftover is "own copper"
+            # when it lies along an own polyline, not only when it equals a
+            # whole leg of one.
+            def on_own(seg):
+                def near(pt):
+                    px2, py2 = pt
+                    for (ax, ay), (bx, by) in own_legs:
+                        vx, vy = bx - ax, by - ay
+                        L2 = vx * vx + vy * vy
+                        t = 0 if not L2 else max(0, min(
+                            1, ((px2 - ax) * vx + (py2 - ay) * vy) / L2))
+                        if ((px2 - ax - t * vx) ** 2
+                                + (py2 - ay - t * vy) ** 2) < tol ** 2:
+                            return True
+                    return False
+                return near(seg[0]) and near(seg[1])
+
+            leftovers = [c for c in shipped if not on_own(c)]
+            assert not leftovers, (
+                f"{_describe(d)}: the shipped board carries {len(leftovers)} "
+                f"{jkey}-face segment(s) beyond the unit's own traces and the "
+                f"drawn bridges, e.g. {leftovers[0]} -- copper the user was "
+                "never shown and cannot move")
+    assert any_bridge, (
+        "no case drew a bridge at all: the window fixture stopped severing, "
+        "so this test compared nothing")
+    ui.assert_clean("severed bridge shipping")
+@pytest.mark.browser
+def test_a_bridge_announces_itself_when_a_window_severs_the_unit(ui):
+    """The trace that appears for a severed unit says why it appeared.
+
+    A grey line materialising across the board unexplained reads as a bug --
+    it was reported as one, twice. So the line only exists when a contact
+    genuinely has no path to its plane, and the moment it appears the editor
+    says which LED, what for, and that it can be dragged. No window, no
+    line, no message.
+    """
+    page = ui.page
+    ui.js("""() => {
+        state.leds = [{x: 10.16, y: 10.16, color: 'red', side: 'front', rot: 0,
+                       layout: 'stacked', size: '0805', reverse: false,
+                       novia: false, nodes: [], farled: false, adv: null,
+                       clk: false, cnodes: []}];
+        state.art = []; renderLedList(); renderArtList(); draw();
+    }""")
+    assert ui.js("() => allBridges()[0]") == {}, (
+        "a unit alone on a whole plane grew a bridge; nothing here severed it")
+    assert not ui.has_toast(r"no path to the power plane"), (
+        "the editor warned about a severed contact before anything was severed")
+
+    # Cover the unit with a through window: both contacts lose their plane.
+    ui.js("""() => {
+        state.art = [{kind: 'circle', material: 'bare', side: 'through',
+                      cx: 10.16, cy: 10.16, wmm: 17.0, palette: [],
+                      overrides: []}];
+        renderArtList(); draw();
+    }""")
+    ui.wait_state("Object.keys(allBridges()[0]).length === 2")
+    ui.wait_toast(r"LED 1: its .* has no path to the power plane")
+
+    # Take the window away and the bridges go with it -- the plane is whole
+    # again, so the trace has no job (this is the complaint that built the
+    # rule: a trace on copper the pad already reaches is just a line showing).
+    ui.js("() => { state.art = []; renderArtList(); draw(); }")
+    ui.wait_state("Object.keys(allBridges()[0]).length === 0")
+    ui.assert_clean("bridge notice")
 
 
 @pytest.mark.browser

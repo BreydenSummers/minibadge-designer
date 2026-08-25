@@ -2845,11 +2845,12 @@ def _generate_impl(render: bool):
             }, 400
     # A perimeter bridge is editable like any other trace, so its bends can be
     # dragged somewhere the board cannot carry. Judged on the RESOLVED units
-    # (placement has settled by now) and with the same window answer the
-    # bridges were placed with, or a design with no window would be asked
-    # about bridges it does not cut.
+    # (placement has settled by now) and in fine mode -- spec carries the full
+    # art here, so only bridges the board actually cuts are asked about: a
+    # bend left over on a bridge that no longer exists (its contact reaches
+    # the rail again) must not refuse the download over invisible copper.
     for i, layer in pcb.bridge_problems(
-            _dc_replace(spec, leds=resolved), safe, windows=window_art):
+            _dc_replace(spec, leds=resolved), safe):
         face = "front" if layer == "F.Cu" else "back"
         return {
             "error": f"LED {i + 1}: a bend on its {face}-face bridge to the "
