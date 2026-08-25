@@ -588,7 +588,10 @@ def test_zone_fills_have_no_holes():
 
 
 def test_row_selection_drops_pads():
-    out = pcb.generate_pcb(pcb.BadgeSpec(pins=("1", "2", "7", "8")))
+    # Pin captions on, so dropping a pin can be seen to drop its name too:
+    # they are opt-in, and a board without them prints no pin name at all.
+    out = pcb.generate_pcb(pcb.BadgeSpec(pins=("1", "2", "7", "8"),
+                                         pin_labels=True))
     assert len(re.findall(r'\(pad "\d+" thru_hole', out)) == 4
     for num in ("1", "2", "7", "8"):
         assert re.search(rf'\(pad "{num}" thru_hole', out)
@@ -1154,9 +1157,11 @@ def test_novia_art_keepout_follows_the_trace():
 
 
 def test_back_silk_pad_captions_read_correctly_from_the_back():
-    # Each caption names a pad PAIR. Viewed from the back the pair is mirrored,
-    # so the words must swap: otherwise the back silk calls the 3V3 pad GND.
-    out = pcb.generate_pcb(pcb.BadgeSpec(leds=[]))
+    # Each caption names a pad PAIR. Captions print on the BACK -- the face
+    # that gets soldered -- where the pair is mirrored, so the words must swap:
+    # otherwise the back silk calls the 3V3 pad GND, and someone with an iron
+    # in their hand believes it.
+    out = pcb.generate_pcb(pcb.BadgeSpec(leds=[], pin_labels=True))
     import re
 
     def caption(layer, x):
@@ -1164,10 +1169,10 @@ def test_back_silk_pad_captions_read_correctly_from_the_back():
             rf'\(fp_text user "([^"]+)" \(at {x} [\d.]+ unlocked\) \(layer "{layer}"\)', out)
         return m.group(1) if m else None
 
-    assert caption("F.SilkS", "17.78") == "3V3 GND"
     assert caption("B.SilkS", "17.78") == "GND 3V3"
-    assert caption("F.SilkS", "2.54") == "VBAT GND"
     assert caption("B.SilkS", "2.54") == "GND VBAT"
+    assert caption("F.SilkS", "17.78") is None, (
+        "a caption printed on the front too, where the artwork lives")
     # The pair's left-hand pad on each face really does carry that net.
     top = {net: x for _n, x, y, net, row in pcb.CONNECTOR_PADS if row == "top"}
     assert top["3V3"] < top["GND"] or 16.51 < 19.05  # front order: 3V3 then GND
@@ -1726,3 +1731,30 @@ def test_a_hand_placed_label_prints_where_it_was_put_at_any_angle(rot, side,
         assert ink.distance(pad.copper()) >= invariants.REFDES_CLEAR - 1e-4, (
             f"{ref} prints {ink.distance(pad.copper()):.3f} mm from pad "
             f"{pad.ref}.{pad.num}")
+
+
+@pytest.mark.parametrize("asked,faces", [(False, ()), (True, ("B.SilkS",))],
+                         ids=["not-asked", "asked"])
+def test_pin_names_print_only_when_the_design_asks_for_them(asked, faces):
+    """Nothing names the pins unless the design says so, and then on the back.
+
+    The captions are for whoever is soldering the badge, and soldering happens
+    from the back. Printed by default they put four labels across the face the
+    artwork wants and carve the drawing away from them; missing when they were
+    asked for, someone with an iron reads the pads by guesswork and can hang
+    3V3 where GND belongs.
+    """
+    import re
+
+    out = pcb.generate_pcb(pcb.BadgeSpec(pins=("7", "8", "15", "16"),
+                                         pin_labels=asked))
+    printed = {layer for label, layer in re.findall(
+        r'\(fp_text user "([^"]+)"[^\n]*\(layer "([^"]+)"\)', out)
+        if label in ("3V3 GND", "GND 3V3")}
+    assert printed == set(faces), (
+        f"pin_labels={asked}: the pin names print on {sorted(printed) or 'no'} "
+        f"silkscreen, expected {sorted(faces) or 'none'}")
+    assert bool(pcb.caption_boxes(("7", "8", "15", "16"), asked)) == asked, (
+        f"pin_labels={asked}: the caption keepout does not follow the ink, so "
+        "artwork is carved around labels that are not printed (or printed over "
+        "labels that are)")

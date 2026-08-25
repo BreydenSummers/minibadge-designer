@@ -2939,3 +2939,59 @@ def test_a_project_name_reaches_the_zip_as_something_its_owner_can_recognise(
         "something its owner would not recognise")
     assert f"{expect}/{expect}.kicad_pcb" in files, (
         f"the board file inside is not named {expect} either")
+
+
+def _back_silk_polys(zf, name):
+    """Every back-silk polygon on a generated board, as shapely shapes."""
+    from shapely.geometry import Polygon
+
+    root = invariants._parse_sexp(zf.read(f"{name}/{name}.kicad_pcb").decode())
+    out = []
+    for g in invariants._kids(root, "gr_poly"):
+        if str(invariants._val(g, "layer")) != "B.SilkS":
+            continue
+        ring = [(float(q[1]) - pcb_mod.ORIGIN, float(q[2]) - pcb_mod.ORIGIN)
+                for q in invariants._kids(invariants._kid(g, "pts"), "xy")]
+        if len(ring) >= 3:
+            out.append(Polygon(ring))
+    return out
+
+
+@pytest.mark.webapp
+def test_switching_the_pin_captions_off_hands_the_strip_back_to_the_artwork(client):
+    """With the captions gone, artwork prints where they would have been.
+
+    The captions are a soldering aid, and they cost the drawing a band across
+    every connector pair -- artwork is carved around them. Turning them off has
+    to give that band back, or the switch only stops the ink printing while
+    still reserving the room for it.
+    """
+    from shapely.geometry import Point
+
+    png = _logo_bytes()
+    covered = {}
+    for on in (True, False):
+        params = {
+            "name": "strip", "pinlabels": on, "leds": [], "texts": [],
+            "art": [{"mode": "threshold", "cx": 10.16, "cy": 10.16, "w": 22.0,
+                     "material": "silk", "side": "back", "invert": True}],
+        }
+        resp = client.post("/generate", data={
+            "params": json.dumps(params), "art0": (io.BytesIO(png), "ink.png"),
+        }, content_type="multipart/form-data")
+        assert resp.status_code == 200, resp.get_json()
+        polys = _back_silk_polys(zipfile.ZipFile(io.BytesIO(resp.data)), "strip")
+        assert polys, f"pinlabels={on}: the board carries no back silk at all"
+        # The middle of a caption, which is where its ink would print.
+        spots = [Point((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+                 for b in pcb_mod.caption_boxes(pcb_mod.ALL_PINS, True)]
+        covered[on] = sum(any(p.contains(s) for p in polys) for s in spots)
+        assert spots, "no captions to test the strip of"
+
+    assert covered[False] > covered[True], (
+        f"artwork covers {covered[False]} of the caption spots with the "
+        f"captions off and {covered[True]} with them on: switching them off "
+        "stops the ink printing but keeps the room reserved")
+    assert covered[True] == 0, (
+        f"artwork prints over {covered[True]} caption spots while the captions "
+        "are on, and the fab will print them on top of each other")

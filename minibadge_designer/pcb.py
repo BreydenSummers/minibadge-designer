@@ -82,6 +82,27 @@ PAD_PAIRS = {
 # Printed name of each pin, in board order within its pair.
 PIN_LABELS = {"1": "VBAT", "2": "GND", "7": "3V3", "8": "GND",
               "9": "CLK", "10": "NC", "15": "3V3", "16": "GND"}
+
+#: Connector pad copper: 1.75 mm circles.
+CONN_PAD_R = 0.875
+#: How close artwork may come to that copper, by what the artwork becomes.
+#: Three different failures, so three different numbers:
+#: SILK is ink, and ink over a pad's mask opening is clipped by the fab
+#: (silk_over_copper). 0.15 is the gap the units' own silk brackets and the
+#: printed references already keep from their pads, and DRC signs off on those.
+#: COPPER art is not copper at all -- it is a mask opening over the pour, so
+#: the gold shows -- which means bare metal beside a pad that gets an iron put
+#: on it. 0.5 leaves a solder-mask dam well over any fab's minimum (JLCPCB
+#: merges apertures below ~0.2), so solder cannot walk from the pad onto the
+#: artwork and short the pour to it.
+#: A WINDOW is a bigger opening still, and it cuts the copper underneath, so
+#: it keeps the full millimetre it always has.
+PAD_ART_GAP = {"silk": 0.15, "copper": 0.5, "window": 1.125}
+
+
+def pad_art_radius(kind: str) -> float:
+    """Radius art of `kind` keeps clear around a connector pad, mm."""
+    return CONN_PAD_R + PAD_ART_GAP[kind]
 ALL_PINS = ("1", "2", "7", "8", "9", "10", "15", "16")
 
 
@@ -576,8 +597,11 @@ def refdes_layout(spec: BadgeSpec, safe=None) -> list[dict]:
         hw = 0.875 + 0.15
         copper_obs.append([(px - hw, py - hw), (px + hw, py - hw),
                            (px + hw, py + hw), (px - hw, py + hw)])
+    # Captions print on the back only, but a front label is held off them too:
+    # the pair of them is generated ink in the same strip, and the cost of the
+    # conservative reading is a label nudged along the pads it names.
     ink_obs = [[(b[0], b[1]), (b[2], b[1]), (b[2], b[3]), (b[0], b[3])]
-               for b in caption_boxes(spec.pins)]
+               for b in caption_boxes(spec.pins, spec.pin_labels)]
     # Each part's OWN silk -- the pad brackets, a dome's arcs, the cathode bar
     # -- as a box in its own frame. Without it a label sitting past the pads
     # landed straight on the bracket it belongs to (measured on the
@@ -715,10 +739,15 @@ def refdes_boxes(spec: BadgeSpec, safe=None,
     return out
 
 
-def caption_boxes(pins) -> list[tuple[float, float, float, float]]:
-    """Bounding boxes of the printed pin captions (art must stay clear)."""
+def caption_boxes(pins, on: bool = True) -> list[tuple[float, float, float, float]]:
+    """Bounding boxes of the printed pin captions (art must stay clear).
+
+    `on` is the design's `pin_labels`: captions that are not printed reserve
+    nothing, which is most of the point of switching them off -- it hands the
+    strip beside each connector pair back to the artwork.
+    """
     out = []
-    for key in active_pairs(pins):
+    for key in (active_pairs(pins) if on else ()):
         label = pair_caption(key, pins)
         if not label:
             continue
@@ -2953,6 +2982,11 @@ class BadgeSpec:
     # the fab layer, where it documents the part without printing ink -- a
     # badge whose whole front is artwork does not want two labels on it.
     refdes: bool = True
+    # Pin captions ("3V3 GND") on the silkscreen beside each connector pair.
+    # Off by the time a board ships: they are printed for whoever is soldering
+    # the badge, and they cost the artwork the whole strip beside the pads.
+    # On, they print on the BACK only -- the face that gets soldered.
+    pin_labels: bool = False
     # How CLK units (Led.clk) meet the blink clock, once any exist. True =
     # the 3-pad solder jumper (bridge one side: steady 3V3 or blinking CLK);
     # False = their supply is wired straight to pin 9. See clk_info().
@@ -3087,7 +3121,7 @@ def _nets(spec: BadgeSpec) -> tuple[list[str], dict[str, int]]:
 
 
 def _connector_footprint(nets: dict[str, int], pins=ALL_PINS,
-                         clk: bool = False) -> str:
+                         clk: bool = False, pin_labels: bool = False) -> str:
     out = [
         f'  (footprint "MiniBadge:MiniBadge_Simple" (layer "F.Cu") (tstamp {_ts("fp-conn")})',
         f"    (at {_n(ORIGIN)} {_n(ORIGIN)})",
@@ -3101,11 +3135,12 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS,
         f"      (tstamp {_ts('fp-conn-val')})",
         "    )",
     ]
-    # Pin captions print on BOTH silkscreens (the editor preview shows them
-    # on both faces: the fab board should match; the Dwgs.User layer the
-    # official footprint used never prints at all). Centered text mirrors
-    # in place, so the back copy only needs the mirror flag.
-    for i, key in enumerate(active_pairs(pins)):
+    # Pin captions print on the BACK silkscreen, and only when the design asks
+    # for them: they name the pins for whoever is soldering the badge, which
+    # happens from the back, and the front is the face the artwork wants. (The
+    # Dwgs.User layer the official footprint used never prints at all.)
+    # Centered text mirrors in place, so the back copy only needs the flag.
+    for i, key in enumerate(active_pairs(pins) if pin_labels else ()):
         label = pair_caption(key, pins)
         if not label:
             continue
@@ -3116,8 +3151,7 @@ def _connector_footprint(nets: dict[str, int], pins=ALL_PINS,
         # exactly the kind of thing someone hand-soldering trusts. A pair with
         # only one pin kept names just that pin, so nothing to swap.
         flipped = " ".join(reversed(label.split()))
-        for layer, mirror, label in (("F.SilkS", "", label),
-                                     ("B.SilkS", " (justify mirror)", flipped)):
+        for layer, mirror, label in (("B.SilkS", " (justify mirror)", flipped),):
             out += [
                 f'    (fp_text user "{label}" (at {_n(x)} {_n(y)} unlocked) (layer "{layer}")',
                 f"      (effects (font (size 0.6 0.6) (thickness 0.11)){mirror})",
@@ -4372,7 +4406,7 @@ def generate_pcb(spec: BadgeSpec) -> str:
         LAYERS,
         stackup,
         *net_lines,
-        _connector_footprint(nets, spec.pins, clk is not None),
+        _connector_footprint(nets, spec.pins, clk is not None, spec.pin_labels),
     ]
     safe = unit_safe(spec)
     tent = "" if spec.tenting else " (tenting none)"
