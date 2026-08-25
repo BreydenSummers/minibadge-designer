@@ -1091,8 +1091,9 @@ const usesBare = a => usesMat(a, "bare");
 const usesCut = a => usesMat(a, "cut");
 const artHasCut = () => state.art.some(usesCut);
 // Is there a light window anywhere in this design? A window text IS a window.
-// Mirrors the `has_window` test in pcb.unit_bridges, which is what decides
-// whether a unit's pad gets a perimeter bridge at all.
+// Mirrors the coarse `has_window` candidacy in pcb.unit_bridges (the corridor
+// bookkeeping); whether a bridge actually EXISTS is connectivity, decided by
+// railReaches against the real pour.
 const designHasWindow = () =>
   state.art.some(a => usesMat(a, "glow") || usesMat(a, "bare"))
   || state.texts.some(t => isWindowText(t));
@@ -3238,20 +3239,292 @@ function bridgeThroughBends(start, bends, ownPieces, skip, obstacles, rings) {
   }
   return { pts, owners, ok };
 }
-let _bridgeCache = { key: "", map: [] };
+// ---- does a contact already sit on its rail? (mirrors pcb._rail_reaches) --
+// The server judges bridge existence on the real fill; the preview judges it
+// on a raster flood over the same obstacle set -- the board minus its edge
+// inset, the windows exactly as the display carves them, and every piece of
+// other-net copper with the pour's clearance. Exact fills need shapely; a
+// 0.2 mm grid answers the same yes/no everywhere a design does not balance a
+// pour channel on the width of one cell, which is also roughly where the
+// fill's own 0.25 mm minimum-width opening starts eating the channel anyway.
+const RAIL_PITCH = 0.2;      // mm per flood cell
+const POUR_EDGE_INSET = 0.4; // mirrors pcb.POUR_EDGE_INSET
+
+// Copper of one unit that blocks the `net` pour on layer `ly` ("F"/"B"),
+// stamped into the mask ctx (already in board-mm space, destination-out).
+// Mirrors the per-led obstacle block of pcb._fill_geometry.
+function stampUnitPourObstacles(oc, L, ly, net) {
+  const g = geomOf(L), pk = PKG[g.pkg], rp = resPkgOf(g.pkg);
+  const front = L.side !== "back";
+  const unitLy = front ? "F" : "B";
+  const th = !!pk.drill;
+  const far = !!L.farled && !g.hole && !th;
+  const run = noviaRoute(L);          // null when the unit keeps its via
+  const trackR = 0.15 + POUR_CLEARANCE;
+  const circle = (x, y, r) => {
+    oc.beginPath(); oc.arc(mm2px(x), mm2px(y), r * SCALE, 0, 7); oc.fill();
+  };
+  const padRect = (off, extra, pw, ph) => {
+    const [bx, by] = unitPoint(L, off[0], off[1]);
+    oc.save();
+    oc.translate(mm2px(bx), mm2px(by));
+    oc.rotate((((L.rot || 0) + (extra || 0)) % 360) * Math.PI / 180);
+    // buffer(0.35) of a rectangle, with square corners: a hair bigger at the
+    // corners than the true rounded offset, in the direction that only ever
+    // adds a bridge, never hides one.
+    oc.fillRect(mm2px(-pw / 2 - POUR_CLEARANCE), mm2px(-ph / 2 - POUR_CLEARANCE),
+                (pw + 2 * POUR_CLEARANCE) * SCALE, (ph + 2 * POUR_CLEARANCE) * SCALE);
+    oc.restore();
+  };
+  const stroke = (pts, w) => {
+    if (!pts || pts.length < 2) return;
+    oc.beginPath();
+    oc.moveTo(mm2px(pts[0][0]), mm2px(pts[0][1]));
+    for (let i = 1; i < pts.length; i++) oc.lineTo(mm2px(pts[i][0]), mm2px(pts[i][1]));
+    oc.lineWidth = w * SCALE; oc.lineCap = "round"; oc.lineJoin = "round";
+    oc.stroke();
+  };
+  if (g.hole) {
+    const [hx, hy] = unitPoint(L, 0, 0);
+    circle(hx, hy, g.hole / 2 + POUR_EDGE_INSET);
+  }
+  const viaNet = front ? "GND" : "3V3";
+  if (!run) {  // the via barrel exists on BOTH copper layers
+    const [vx, vy] = unitPoint(L, ...(front ? g.viaF : g.viaB));
+    if (viaNet !== net) circle(vx, vy, VIA_SIZE / 2 + POUR_CLEARANCE);
+  }
+  if (far) {   // via-in-pads put the LED nets on both layers
+    for (const [off, pnet] of [[g.ledK, "GND"], [g.ledA, "A"]]) {
+      if (pnet === net) continue;
+      const [bx, by] = unitPoint(L, off[0], off[1]);
+      circle(bx, by, VIA_SIZE / 2 + POUR_CLEARANCE);
+    }
+  }
+  const supply = clkActive() && L.clk ? "CLK" : "3V3";
+  const pads = [
+    [g.ledK, "GND", g.ledRot || 0, pk.pw, pk.ph, th || far],
+    [g.ledA, "A", g.ledRot || 0, pk.pw, pk.ph, th || far],
+    [g.resIn, supply, g.resRot || 0, rp.pw, rp.ph, false],
+    [g.resOut, "A", g.resRot || 0, rp.pw, rp.ph, false],
+  ];
+  for (const [off, pnet, extra, pw, ph, both] of pads) {
+    if (ly !== unitLy && !both) continue;
+    if (pnet !== net) padRect(off, extra, pw, ph);
+  }
+  if (ly !== unitLy) return; // the unit's traces live on its own side only
+  if (net !== "A") stroke(unitTracePts(L, "a").pts, 2 * trackR);
+  if (run) {
+    if (run.net !== net) stroke(run.pts, 2 * trackR);
+  } else if (viaNet !== net) {
+    stroke(unitTracePts(L, "v").pts, 2 * trackR);
+  }
+  const crun = clkRoute(L);
+  if (crun && crun.net !== net) stroke(crun.pts, 2 * trackR);
+}
+
+// The windows that cut `face`'s copper, painted in board-mm space and carved
+// exactly as the display (and the board's final art layers) carve them:
+// keepouts, corridors, the perimeter band. NOT the bridge strokes -- those
+// are mask cosmetics over copper the fill never loses.
+function paintWindowCuts(oc, face, corridorSet) {
+  let any = false;
+  for (const conf of [["glow", false], ["bare", true]]) {
+    const [mat, eraseText] = conf;
+    let drew = false;
+    for (const a of state.art) {
+      if (!layerHasMat(a, mat)) continue;
+      if (!windowFaces(a, mat).includes(face)) continue;
+      // viewSide "front" here means BOARD coordinates: the front view is the
+      // unmirrored one, and back-face layers arrive pre-mirrored through it.
+      drawArtSided(oc, a, mat, "front");
+      drew = any = true;
+    }
+    if (eraseText && drew) {
+      for (const t of state.texts) {
+        if (t.side !== "front" || !t.text.trim()) continue;
+        if (t.material === "glow" || t.material === "bare") continue;
+        clearTextCarve(oc, t);
+      }
+    }
+  }
+  // Window-material TEXTS are windows too (the board turns them into window
+  // art layers); same glyph placement as the display's win group, drawn in
+  // board space: a back text's board geometry is its mirrored ink.
+  const vec = t => t.font && t.font !== "kicad" && t.text.trim();
+  for (const t of state.texts) {
+    if (!vec(t) || (t.material !== "glow" && t.material !== "bare")) continue;
+    oc.fillStyle = "#000";
+    oc.textAlign = "left";
+    oc.font = `${t.size * SCALE / capOf(t.font)}px ${textFontCSS(t)}`;
+    oc.save();
+    oc.translate(mm2px(t.x), mm2px(t.y));
+    if (t.rot) oc.rotate((t.rot % 360) * Math.PI / 180);
+    if (t.side === "back") oc.scale(-1, 1);
+    const base = t.size * SCALE * 0.5;
+    const ink = textInk(t), k = t.size * SCALE / 100;
+    for (const c of ink.run.chars) oc.fillText(c.ch, ink.run.dx * k + c.x * k, base);
+    oc.restore();
+    any = true;
+  }
+  if (!any) return false;
+  const ob = outlineBounds();
+  oc.fillStyle = "#fff";
+  oc.globalCompositeOperation = "destination-in";
+  oc.fillRect(mm2px(ob[0] + WINDOW_EDGE_CLEAR), mm2px(ob[1] + WINDOW_EDGE_CLEAR),
+              (ob[2] - ob[0] - 2 * WINDOW_EDGE_CLEAR) * SCALE,
+              (ob[3] - ob[1] - 2 * WINDOW_EDGE_CLEAR) * SCALE);
+  oc.globalCompositeOperation = "source-over";
+  eraseArtKeepouts(oc, "window", face);
+  state.leds.forEach((L, i) => {
+    if (!corridorSet.has(i)) return;
+    const r = corridorRect(L);
+    oc.clearRect(mm2px(r[0]), mm2px(r[1]), (r[2] - r[0]) * SCALE, (r[3] - r[1]) * SCALE);
+  });
+  return true;
+}
+
+function buildRailMask(ly, corridorSet) {
+  const ob = outlineBounds();
+  const pad = RAIL_PITCH;
+  const x0 = ob[0] - pad, y0 = ob[1] - pad;
+  const w = Math.max(2, Math.ceil((ob[2] - ob[0] + 2 * pad) / RAIL_PITCH));
+  const h = Math.max(2, Math.ceil((ob[3] - ob[1] + 2 * pad) / RAIL_PITCH));
+  const net = ly === "F" ? "3V3" : "GND";
+  const face = ly === "F" ? "front" : "back";
+  const mk = () => {
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    const c = cv.getContext("2d", { willReadFrequently: true });
+    // Board-mm drawing (mm2px = mm * SCALE) lands on grid cells directly.
+    const k = 1 / (SCALE * RAIL_PITCH);
+    c.setTransform(k, 0, 0, k, -x0 / RAIL_PITCH, -y0 / RAIL_PITCH);
+    return [cv, c];
+  };
+  const [cv, c] = mk();
+  paintBoardMask(c, "#fff");            // pourable space: the board itself...
+  eraseBoardEdge(c, POUR_EDGE_INSET);   // ...minus the pour's edge inset
+  const [wcv, wc] = mk();
+  if (paintWindowCuts(wc, face, corridorSet)) {
+    c.save();
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.globalCompositeOperation = "destination-out";
+    c.drawImage(wcv, 0, 0);
+    c.restore();
+  }
+  // Other-net copper opens channels with the pour's clearance.
+  c.globalCompositeOperation = "destination-out";
+  c.fillStyle = "#000";
+  for (const [px, py, lbl, , num] of PADS) {
+    if (!pinOn(num)) continue;          // dropped pads leave no copper at all
+    if (lbl === net) continue;          // the rail's own pads merge into it
+    c.beginPath(); c.arc(mm2px(px), mm2px(py), (0.875 + POUR_CLEARANCE) * SCALE, 0, 7); c.fill();
+  }
+  for (const L of state.leds) stampUnitPourObstacles(c, L, ly, net);
+  const ci = clkActive() ? clkInfo() : null;
+  if (ci && ci.jumper) {
+    for (const [, q] of jumperCopperPieces(ci)) {
+      c.beginPath();
+      c.moveTo(mm2px(q[0][0]), mm2px(q[0][1]));
+      for (let i = 1; i < q.length; i++) c.lineTo(mm2px(q[i][0]), mm2px(q[i][1]));
+      c.closePath(); c.fill();
+      c.lineWidth = 2 * POUR_CLEARANCE * SCALE; c.lineJoin = "round"; c.stroke();
+    }
+    const strokeRun = pts => {
+      if (!pts || pts.length < 2) return;
+      c.beginPath();
+      c.moveTo(mm2px(pts[0][0]), mm2px(pts[0][1]));
+      for (let i = 1; i < pts.length; i++) c.lineTo(mm2px(pts[i][0]), mm2px(pts[i][1]));
+      c.lineWidth = 2 * (0.15 + POUR_CLEARANCE) * SCALE; c.lineCap = "round"; c.stroke();
+    };
+    const lk = clkLink();
+    if (lk) strokeRun(lk.pts);          // the CLK link is never a rail net
+    const v3 = clkV3Link();
+    if (v3 && net !== "3V3") strokeRun(v3.pts);
+  }
+  c.globalCompositeOperation = "source-over";
+  const data = c.getImageData(0, 0, w, h).data;
+  const open = new Uint8Array(w * h);
+  for (let i = 0; i < open.length; i++) open[i] = data[i * 4 + 3] > 127 ? 1 : 0;
+  // Flood from the net's kept connector pads: reachable = on the rail.
+  const reach = new Uint8Array(w * h);
+  const queue = [];
+  const seed = (mx, my) => {
+    const gx = Math.round((mx - x0) / RAIL_PITCH), gy = Math.round((my - y0) / RAIL_PITCH);
+    if (gx < 0 || gy < 0 || gx >= w || gy >= h) return;
+    const j = gy * w + gx;
+    if (!reach[j]) { reach[j] = 1; queue.push(j); }
+  };
+  for (const [px, py, lbl, , num] of PADS) {
+    if (!pinOn(num) || lbl !== net) continue;
+    // Seed the whole pad footprint: its centre cell may sit over the drill.
+    for (const [dx, dy] of [[0, 0], [0.6, 0], [-0.6, 0], [0, 0.6], [0, -0.6]]) {
+      seed(px + dx, py + dy);
+    }
+  }
+  while (queue.length) {
+    const j = queue.pop();
+    const jx = j % w, jy = (j - jx) / w;
+    for (const [nx, ny] of [[jx + 1, jy], [jx - 1, jy], [jx, jy + 1], [jx, jy - 1]]) {
+      if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+      const n = ny * w + nx;
+      if (!reach[n] && open[n]) { reach[n] = 1; queue.push(n); }
+    }
+  }
+  return { x0, y0, w, h, reach };
+}
+
+function railReaches(mask, pt, r) {
+  // The fill counts as reaching the contact when it overlaps the contact's
+  // own copper (radius r), mirroring pcb._rail_reaches: sample every cell
+  // the copper covers, not just its centre -- a pour tongue can hold the
+  // connection at the pad's edge while missing the middle by a hair.
+  const span = Math.max(0, Math.floor((r - 0.02) / RAIL_PITCH));
+  const cx = Math.round((pt[0] - mask.x0) / RAIL_PITCH);
+  const cy = Math.round((pt[1] - mask.y0) / RAIL_PITCH);
+  for (let dy = -span; dy <= span; dy++) {
+    for (let dx = -span; dx <= span; dx++) {
+      if (dx * dx + dy * dy > span * span) continue;
+      const gx = cx + dx, gy = cy + dy;
+      if (gx < 0 || gy < 0 || gx >= mask.w || gy >= mask.h) continue;
+      if (mask.reach[gy * mask.w + gx] === 1) return true;
+    }
+  }
+  return false;
+}
+
+let _bridgeCache = { key: "", map: [], corridors: new Set() };
+// Units whose window corridor the board reserves: a COARSE candidate bridge
+// (any via start; pad starts too once the design has a window) that could not
+// route. Mirrors the webapp's `None in bridges[i].values()` on its pre-art
+// unit_bridges call -- NOT the fine existence answer, which the webapp cannot
+// know at carve time.
+function bridgeCorridors() {
+  allBridges();
+  return _bridgeCache.corridors;
+}
+// One status line per bridge, when it appears: the trace is the repair for a
+// contact the pour no longer reaches, and a grey line showing up across the
+// board unexplained reads as a bug (it did; that is why bridges only exist
+// when they have this job now).
+let _bridgeTold = new Set();
 function allBridges() { // {F: {pts,ok}|null, B: ...} per LED, memoized
   const key = JSON.stringify([
     state.leds.map(L => [L.x, L.y, L.rot, L.layout, L.size, !!L.reverse, L.side,
-                         !!L.novia, !!L.clk, L.adv, L.nodes || null, L.anodes || null,
+                         !!L.novia, !!L.clk, !!L.farled, L.adv, L.nodes || null,
+                         L.anodes || null,
                          L.vnodes || null, L.cnodes || null, L.term || null,
                          L.bnodes || null, L.bfnodes || null]),
     state.clk, [...state.pins],
     state.shape.ringsRev || 0,
-    // A pad's bridge exists only while the design has a window, so adding or
-    // removing one changes every bridge on the board -- and this memo used to
-    // key on the units alone, so it answered from a cache built before the
-    // window existed.
-    designHasWindow(),
+    // A bridge exists only while its contact has no path to the rail, so the
+    // key carries everything the connectivity flood reads: the window art
+    // (clsVer bumps on any reclassification), the window texts, and the ink
+    // that carves the windows' keepouts.
+    state.art.map(a => [a.side, a.window, a.material, a.mode, a.clsVer || 0,
+                        a.cx, a.cy, a.wmm, a.rot || 0, !!a.flip]),
+    state.texts.map(t => [t.x, t.y, t.text, t.size, t.side, t.font,
+                          t.material, t.rot || 0]),
+    state.refdes !== false, state.pinlabels === true,
   ]);
   if (_bridgeCache.key === key) return _bridgeCache.map;
   const hasWindow = designHasWindow();
@@ -3273,7 +3546,8 @@ function allBridges() { // {F: {pts,ok}|null, B: ...} per LED, memoized
     }
   }
   const pieces = state.leds.map(L => unitCopperPieces(L));
-  const map = state.leds.map((L, i) => {
+  const corridors = new Set();
+  const routed = state.leds.map((L, i) => {
     const g = geomOf(L);
     const front = L.side !== "back";
     const obstacles = pads.concat(
@@ -3295,10 +3569,6 @@ function allBridges() { // {F: {pts,ok}|null, B: ...} per LED, memoized
     for (const [layer, spec] of Object.entries(starts)) {
       if (!spec) continue;   // via-less: nothing of this unit on the far layer
       const [lbl, off] = spec;
-      // Mirrors pcb.unit_bridges: a pad already sits in its own pour, so its
-      // bridge is only worth cutting when a window could sever it. A via's
-      // collar can be the only copper tying it to the plane, window or not.
-      if (lbl !== "via" && !hasWindow) continue;
       let own = pieces[i];
       if (lbl === "via") {
         // Mirrors pcb.unit_bridges: this bridge runs on the unit's FAR layer,
@@ -3315,17 +3585,62 @@ function allBridges() { // {F: {pts,ok}|null, B: ...} per LED, memoized
       // different faces and are dragged separately, exactly as on the server.
       const start = unitPoint(L, off[0], off[1]);
       const bends = (lbl === "via" ? L.bfnodes : L.bnodes) || [];
-      if (bends.length) {
-        out[layer] = bridgeThroughBends(start, bends, own,
-                                        BRIDGE_EXCLUDE[lbl], obstacles, rings);
-        continue;
-      }
-      const seg = bridgeRoute(start, own, BRIDGE_EXCLUDE[lbl], obstacles, rings);
-      out[layer] = seg ? { pts: seg, owners: [0], ok: true } : null;
+      const rec = bends.length
+        ? bridgeThroughBends(start, bends, own,
+                             BRIDGE_EXCLUDE[lbl], obstacles, rings)
+        : (() => {
+            const seg = bridgeRoute(start, own, BRIDGE_EXCLUDE[lbl],
+                                    obstacles, rings);
+            return seg ? { pts: seg, owners: [0], ok: true } : null;
+          })();
+      out[layer] = rec;
+      // Coarse candidacy, for the corridor bookkeeping only (mirrors the
+      // webapp's pre-art unit_bridges call): a candidate that cannot route
+      // reserves the 2 mm pour corridor whether or not the fine answer would
+      // keep the bridge.
+      if ((lbl === "via" || hasWindow) && !rec) corridors.add(i);
     }
-    return out;
+    return { L, starts, out };
   });
-  _bridgeCache = { key, map };
+  // Fine existence, judged like pcb._rail_reaches: a contact the pour still
+  // reaches keeps its plane connection and gets NO trace. Runs after the
+  // corridor pass because the windows the flood sees are carved around those
+  // same corridors, exactly as the board's final art layers are.
+  const masks = {};
+  const map = routed.map(({ L, starts, out }, i) => {
+    const fine = {};
+    for (const [layer, spec] of Object.entries(starts)) {
+      if (!spec || !(layer in out)) continue;
+      // No kept pad carries this rail at all: power_missing owns that
+      // refusal, and a trace to a pad that is not there helps nobody
+      // (mirrors pcb._rail_reaches' early return).
+      const net = layer === "F" ? "3V3" : "GND";
+      if (!PADS.some(([, , lbl, , num]) => pinOn(num) && lbl === net)) continue;
+      const start = unitPoint(L, spec[1][0], spec[1][1]);
+      const g = geomOf(L);
+      const pk = spec[0] === "pad_res_in" ? resPkgOf(g.pkg) : PKG[g.pkg];
+      const r = spec[0] === "via" ? VIA_SIZE / 2 : Math.min(pk.pw, pk.ph) / 2;
+      if (!(layer in masks)) masks[layer] = buildRailMask(layer, corridors);
+      if (railReaches(masks[layer], start, r)) continue;
+      fine[layer] = out[layer];
+      const tag = `${i}:${layer}`;
+      if (!_bridgeTold.has(tag) && fine[layer]) {
+        _bridgeTold.add(tag);
+        const what = spec[0] === "via"
+          ? (L.side !== "back" ? "GND via" : "3V3 via")
+          : (layer === "F" ? "3V3 pad" : "GND pad");
+        setStatus(`LED ${i + 1}: its ${what} has no path to the power plane `
+                  + "around your design, so a trace was added to reconnect it "
+                  + "— drag the trace (or its bends) if it's in the way.");
+      }
+    }
+    for (const tag of [..._bridgeTold]) {
+      const [ui, ly] = tag.split(":");
+      if (+ui === i && !(ly in fine)) _bridgeTold.delete(tag);
+    }
+    return fine;
+  });
+  _bridgeCache = { key, map, corridors };
   return map;
 }
 function unitsOverlap(a, b) {
@@ -4773,8 +5088,7 @@ function drawTextLayers(c, mirror) {
     if (!g.stroke) eraseArtKeepouts(oc, g.kind, viewSide);
     if (g.win) {
       state.leds.forEach((L, i) => {
-        const br = allBridges()[i];
-        if (br.F && br.B) return;
+        if (!bridgeCorridors().has(i)) return;
         const r = corridorRect(L);
         oc.clearRect(mm2px(r[0]), mm2px(r[1]), (r[2] - r[0]) * SCALE, (r[3] - r[1]) * SCALE);
       });
@@ -4831,8 +5145,7 @@ function drawWindowLayers(c, mirror, mats, eraseText) {
   // its board-crossing copper here, so no slab shadows it through the window.
   eraseArtKeepouts(oc, "window", viewSide);
   state.leds.forEach((L, i) => { // corridor fallback: only unroutable units
-    const br = allBridges()[i];
-    if (br.F && br.B) return;
+    if (!bridgeCorridors().has(i)) return;
     const r = corridorRect(L);
     oc.clearRect(mm2px(r[0]), mm2px(r[1]), (r[2] - r[0]) * SCALE, (r[3] - r[1]) * SCALE);
   });

@@ -79,20 +79,33 @@ def test_connector_pads_and_nets():
         assert not re.search(rf'\(pad "{num}" thru_hole[^\n]*\(net ', out)
 
 
+def _ring_window(cx, cy, r=3.4, w=1.2):
+    """A square glow ring encircling (cx, cy): the one shape guaranteed to
+    sever whatever sits inside it from the pour, on both faces."""
+    o = [(cx - r, cy - r), (cx + r, cy - r), (cx + r, cy + r), (cx - r, cy + r)]
+    i = [(cx - r + w, cy - r + w), (cx + r - w, cy - r + w),
+         (cx + r - w, cy + r - w), (cx - r + w, cy + r - w)]
+    return [o, i]
+
+
 def test_led_units_scale_with_count():
-    window = [pcb.ArtLayer("bare", [(4.0, 9.0, 12.0, 6.0)])]
     for n in (0, 1, 2):
         out = pcb.generate_pcb(_spec(n))
         assert out.count("(via ") == n
         assert len(re.findall(r'footprint "minibadge-designer:', out)) == 2 * n  # LED + resistor
-        # 2 unit traces + the via's own perimeter bridge per unit. The PAD's
-        # bridge is not cut on a board with no window: the pad already sits
-        # in its pour and nothing could sever it (pcb.unit_bridges).
-        assert out.count("(segment ") == 3 * n
-        # Add a window and it appears -- one more segment per unit, and the
-        # count is what says the bridge is per unit rather than per board.
+        # 2 unit traces per unit and NO perimeter bridges: on a board whose
+        # pours are whole, every contact already sits on its rail -- the pad
+        # in its own pour, the via through its collar -- and a bridge is only
+        # cut for a contact the fill cannot reach (pcb.unit_bridges).
+        assert out.count("(segment ") == 2 * n
+        # Encircle each unit with a glow ring and both its bridges appear --
+        # two more segments per unit, and the count is what says the bridge
+        # is per severed contact rather than per board.
         spec = _spec(n)
-        spec.art = list(window)
+        spec.art = spec.art + [pcb.ArtLayer(
+            "glow", rects=[],
+            polys=[_ring_window(led.x, led.y) for led in spec.leds],
+            window="through")]
         assert pcb.generate_pcb(spec).count("(segment ") == 4 * n
     assert '"/LED2_A"' in pcb.generate_pcb(_spec(2))
     assert '"/LED2_A"' not in pcb.generate_pcb(_spec(1))
@@ -489,22 +502,26 @@ def test_back_led_lands_on_back_layers(layout, size, rot):
     assert fps == ["B", "B"]
     assert '(layers "B.Cu" "B.Paste" "B.Mask")' in out
     assert '(layers "F.Cu" "F.Paste" "F.Mask")' not in out
-    # Back unit's via carries 3V3 up to the front pour; its own two traces
-    # live on B.Cu. The only F.Cu segment is the 3V3 bridge from the via to
-    # the ring. Its GND pad gets no bridge here: this board has no window, so
-    # nothing could sever the pad from the pour it already sits in.
+    # Back unit's via carries 3V3 up to the front pour, where its collar
+    # merges straight into the plane; its own two traces live on B.Cu.
+    # NOTHING else is emitted: every contact of this unit already sits on
+    # its rail, so no perimeter bridge earns its copper (pcb.unit_bridges
+    # judges that on the real fill now, not on "does a window exist").
     assert re.search(r"\(via .*\(net 1\)", out)
     assert len(re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\)', out)) == 2, \
         "a back unit's own two traces live on B.Cu"
-    # Put a window over it and the GND bridge is cut, because now something
-    # CAN sever the pad: that is the whole condition, checked on the same
-    # unit rather than on a board built for the purpose.
+    assert not re.findall(r'\(segment [^\n]+\(layer "F\.Cu"\)', out), \
+        "a via merged into a whole plane needs no trace to it"
+    # Open a window over the whole interior and both bridges appear: the
+    # pour is reduced to its perimeter ring, so the GND pad and the 3V3
+    # via collar are genuinely severed -- the condition is connectivity,
+    # checked on the same unit rather than on a board built for the purpose.
     windowed = pcb.generate_pcb(pcb.BadgeSpec(
         leds=[pcb.Led(10.0, 10.0, "green", side="back",
                       layout=layout, size=size, rot=rot)],
-        art=[pcb.ArtLayer("bare", [(3.0, 3.0, 14.0, 14.0)])]))
+        art=[pcb.ArtLayer("bare", [(1.3, 1.3, 17.7, 17.7)])]))
     assert len(re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\)', windowed)) == 3, \
-        "a window can sever the GND pad, so its perimeter bridge is cut"
+        "a window severing the GND pad cuts its perimeter bridge"
     # The inline cases are the regression gate for the far-layer bridge scan:
     # inline puts the via 1.0 mm from the resistor pad center, INSIDE that
     # pad's inflated art-keepout quad. When the scan treated the unit's own
@@ -512,7 +529,8 @@ def test_back_led_lands_on_back_layers(layout, size, rot):
     # that is not on that layer, no F.Cu bridge routed, and the webapp fell
     # back to the reserved 2 mm window corridor: a fat band of pour across
     # the user's window where this 0.3 mm trace belongs.
-    fsegs = re.findall(r'\(segment [^\n]+\(layer "F\.Cu"\) \(net (\d+)\)', out)
+    fsegs = re.findall(r'\(segment [^\n]+\(layer "F\.Cu"\) \(net (\d+)\)',
+                       windowed)
     assert fsegs == ["1"], \
         "the via's 3V3 feed must reach the front pour as a thin bridge trace"
 
@@ -520,9 +538,16 @@ def test_back_led_lands_on_back_layers(layout, size, rot):
 def test_front_led_unchanged_by_side_default():
     out = pcb.generate_pcb(pcb.BadgeSpec(leds=[pcb.Led(10.0, 10.0, "red")]))
     assert re.search(r"\(via .*\(net 2\)", out)  # GND via
-    # The only B.Cu segment is the GND perimeter bridge from that via.
-    bsegs = re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\) \(net (\d+)\)', out)
-    assert bsegs == ["2"]  # the GND bridge
+    # Nothing at all on B.Cu: the GND via's collar merges into the whole
+    # back plane, so no bridge is cut for it. The same unit inside a glow
+    # ring IS severed, and then the GND bridge is the only B.Cu segment.
+    assert not re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\)', out)
+    ringed = pcb.generate_pcb(pcb.BadgeSpec(
+        leds=[pcb.Led(10.0, 10.0, "red")],
+        art=[pcb.ArtLayer("glow", rects=[], polys=[_ring_window(10.0, 10.0)],
+                          window="through")]))
+    bsegs = re.findall(r'\(segment [^\n]+\(layer "B\.Cu"\) \(net (\d+)\)', ringed)
+    assert bsegs == ["2"]  # the GND bridge, and only when it has a job
 
 
 def test_no_default_text():
