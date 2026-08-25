@@ -18,7 +18,7 @@ import json
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from minibadge_designer import logo, webapp
 
@@ -240,13 +240,13 @@ def test_one_outline_allowance_is_shared_across_all_its_elements(post_generate):
 # The allowance on tracing art
 # ---------------------------------------------------------------------------
 
-#: How many separate polygons an art layer arrives as when it was traced, at
-#: most. A traced layer is whole shapes -- the ring test below traces to a
-#: dozen -- while an untraced one is one polygon per merged cell run, which
-#: for the same image is thousands. Anywhere between is not a case the code
-#: can produce, so this separates the two regimes with three orders of
-#: magnitude of daylight and needs no tuning.
-TRACED_POLY_CEILING = 200
+#: Which regime a layer arrived in is read from the SHAPES, not from how many
+#: of them there are. A printed sampling cell is a bare axis-aligned rectangle
+#: and a traced boundary is not (`_art_poly_counts` sorts them), so the two
+#: regimes are told apart by kind. Counting polygons instead used to work --
+#: a traced layer was a dozen shapes, a printed one thousands -- but that gap
+#: closed as soon as the allowance grew enough to trace art dense enough to
+#: arrive as two thousand separate rings.
 
 
 def _rings_png(px: int = 900, step: int = 40, pen: int = 8) -> bytes:
@@ -295,14 +295,14 @@ def _art_poly_counts(resp, layer: str = "F.SilkS") -> tuple[int, int]:
     return rect, other
 
 
-@pytest.mark.slow  # 0.9 s: proving the rule needs the ACCEPTED eight-layer case
+@pytest.mark.slow  # 5 s: proving the rule needs the ACCEPTED eight-layer case
 @pytest.mark.webapp
 def test_one_art_tracing_allowance_is_shared_across_every_layer(post_generate):
     """Eight art layers cannot each spend the tracing ceiling.
 
     Tracing a layer costs a union and an opening over its sampling cells, and
     a badge may carry eight layers: measured, eight copies of the rings below
-    took `/generate` from 0.48 s to 4.07 s on an unauthenticated route. The
+    took `/generate` from 1.2 s to 4.0 s on an unauthenticated route. The
     allowance therefore belongs to the classification pass, not to the layer.
 
     What makes this safe to cap is the fallback. Over the allowance, a layer
@@ -311,22 +311,27 @@ def test_one_art_tracing_allowance_is_shared_across_every_layer(post_generate):
     with art on the board. Refusing it would take away a badge the user could
     make yesterday, which is the failure this test also rules out.
     """
-    rings = _rings_png()
+    # Dense enough that eight of them cannot all be traced: one layer samples
+    # to ~12 000 cells, so the eighth is well past any allowance one layer is
+    # allowed to spend. (The original rings were a third of this, and stopped
+    # proving anything the day the allowance grew.)
+    rings = _rings_png(step=12, pen=4)
 
     def _request(count):
         return post_generate(
             {"name": "rings", "leds": [], "texts": [],
-             "art": [{"cx": 10.16, "cy": 10.16, "w": 16.0, "mode": "threshold",
+             "art": [{"cx": 10.16, "cy": 10.16, "w": 19.0, "mode": "threshold",
                       "material": "silk"} for _ in range(count)]},
             files={f"art{i}": (rings, "r.png") for i in range(count)})
 
     one = _request(1)
     assert one.status_code == 200, f"one layer was refused: {one.get_json()}"
     rect, traced = _art_poly_counts(one)
-    assert traced, "one layer inside the allowance emitted no traced shape"
-    assert rect + traced <= TRACED_POLY_CEILING, (
-        f"{rect + traced} polygons for one layer inside the allowance: that is "
-        "cell-count order, so it was printed from its cells, not traced")
+    assert rect + traced, "one layer inside the allowance printed nothing"
+    assert rect * 10 < traced, (
+        f"one layer inside the allowance arrived as {rect} bare rectangles "
+        f"against {traced} traced shapes: it was printed from its sampling "
+        "cells, not traced")
     one.close()
 
     many = _request(webapp.MAX_ART)
@@ -334,14 +339,56 @@ def test_one_art_tracing_allowance_is_shared_across_every_layer(post_generate):
         f"{webapp.MAX_ART} layers of art the app accepted one of came back "
         f"{many.status_code}: the allowance must degrade, never refuse")
     rect_many, traced_many = _art_poly_counts(many)
-    assert rect_many > TRACED_POLY_CEILING, (
-        f"every one of {webapp.MAX_ART} layers was traced ({rect_many} "
-        f"rectangles, {traced_many} traced shapes): the allowance is being "
-        "spent per layer, so eight layers can buy eight times the ceiling")
+    assert rect_many, (
+        f"every one of {webapp.MAX_ART} layers was traced ({traced_many} "
+        "traced shapes, not one printed cell): the allowance is being spent "
+        "per layer, so eight layers can buy eight times the ceiling")
     assert traced_many, (
         "no layer was traced at all; the allowance is too small to trace even "
         "the first layer of a design")
     many.close()
+
+
+def _busy_drawing_png() -> bytes:
+    """A picture with the density people actually draw: filled shapes, an
+    inner shape, and printable hatching over the lot."""
+    img = Image.new("RGB", (600, 600), "white")
+    d = ImageDraw.Draw(img)
+    d.ellipse((60, 40, 540, 470), fill=(214, 176, 80))
+    d.ellipse((210, 150, 400, 330), fill=(245, 245, 240))
+    for i in range(0, 900, 20):
+        d.line((i, 0, i - 300, 599), fill=(20, 20, 20), width=8)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.slow  # 0.6 s: the point is a drawing too detailed to be cheap
+@pytest.mark.webapp
+def test_a_detailed_drawing_reaches_the_board_as_curves_not_as_squares(
+        post_generate):
+    """A picture with real detail prints as the curves the editor drew.
+
+    Over the tracing allowance a layer falls back to the pixel path -- 0.18 mm
+    squares, three times coarser than the 0.06 mm it was sampled at -- and
+    nothing says so: the editor keeps drawing the fine trace, so the first
+    anyone hears of it is that the 3D view does not look like their design.
+    A drawing of this density (measured: 6 371 sampling cells, where a plain
+    three-colour logo is ~250) has to fit inside the allowance.
+    """
+    resp = post_generate(
+        {"name": "busy", "leds": [], "texts": [],
+         "art": [{"cx": 10.16, "cy": 10.16, "w": 20.0, "mode": "threshold",
+                  "material": "silk"}]},
+        files={"art0": (_busy_drawing_png(), "busy.png")})
+    assert resp.status_code == 200, f"the drawing was refused: {resp.get_json()}"
+    rect, traced = _art_poly_counts(resp)
+    assert rect + traced, "the drawing printed nothing at all on the silkscreen"
+    assert rect * 10 < traced, (
+        f"the drawing arrived as {rect} bare axis-aligned rectangles against "
+        f"{traced} traced shapes: it blew the tracing allowance and shipped as "
+        "a grid of squares, while the editor drew it as curves")
+    resp.close()
 
 
 # ---------------------------------------------------------------------------
