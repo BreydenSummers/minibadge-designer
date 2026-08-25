@@ -2369,6 +2369,56 @@ def _bridge_through_bends(start, bends, own, skip_labels, obstacles, rings):
     return pts, ok
 
 
+#: When a point counts as sitting ON a fill component: the contact itself
+#: within 0.7 mm (a via collar or pad merged into the pour is at distance 0;
+#: the slack absorbs the fill's morphological opening and simplify), and the
+#: rail's connector pad within 1.0 mm of the same component (pad copper is
+#: 0.875 mm around its centre). These are resolve_novia's measured numbers;
+#: the perimeter-bridge scan judges with the same ones so the two gates can
+#: never disagree about what "attached to the plane" means.
+_RAIL_CONTACT_MM = 0.7
+_RAIL_PAD_MM = 1.0
+
+
+def _rail_reaches(spec: BadgeSpec, layer: str, pt, r: float,
+                  fills: dict) -> bool:
+    """Does the contact copper at `pt` sit on its rail, on the real fill?
+
+    `r` is the contact's own copper radius -- a via collar, or a pad's short
+    half-extent -- and "on the rail" means the fill genuinely OVERLAPS that
+    copper (a solid-connect zone pours right over connected same-net pieces,
+    clearance 0). Measured why neither simpler test survives: the fill's
+    morphological opening can leave a pour tongue whose edge passes 0.057 mm
+    from a connected pad's CENTRE (an exact covers-test calls that severed),
+    while an inline 1206 at rot 90 parks its via 0.49 mm from the ring --
+    near it, wired to nothing (resolve_novia's 0.7 mm slack calls that
+    attached). Overlap by more than a hair tells the two apart everywhere:
+    connected copper overlaps, severed copper sits a clearance or a window
+    away.
+
+    The component must hold BOTH the contact and a kept connector pad of the
+    layer's net: the island filter keeps a pool that touches nothing but the
+    unit's own via (it is same-net copper), and such a pool is exactly the
+    stranded case a bridge exists to repair.
+    """
+    from shapely.geometry import Point
+
+    net = "3V3" if layer == "F.Cu" else "GND"
+    pads = [(px, py) for num, px, py, pnet, _row in CONNECTOR_PADS
+            if pnet == net and num in spec.pins]
+    if not pads:
+        # No rail on this badge at all: power_missing() owns that refusal,
+        # and a trace to a pad that is not there helps nobody.
+        return True
+    if (net, layer) not in fills:
+        fills[(net, layer)] = _fill_geometry(net, layer, spec)
+    p = Point(*pt)
+    return any(
+        part.distance(p) < r - 0.02
+        and any(part.distance(Point(*q)) < _RAIL_PAD_MM for q in pads)
+        for part in fills[(net, layer)])
+
+
 def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
     """Check every via-less unit can actually reach its power. -> (leds, bad).
 
@@ -2452,7 +2502,7 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
         copper = unary_union(
             list(islands(pour, layer))
             + ([LineString(seg).buffer(TRACK_W / 2)] if seg else []))
-        if not any(all(part.distance(Point(*m)) < 0.7 for m in must)
+        if not any(all(part.distance(Point(*m)) < _RAIL_CONTACT_MM for m in must)
                    for part in getattr(copper, "geoms", [copper])):
             problems.append(i)
 
@@ -2502,8 +2552,9 @@ def resolve_novia(spec: BadgeSpec, safe=None) -> tuple[list, list[int]]:
                 list(islands(pour, layer))
                 + ([LineString(seg).buffer(TRACK_W / 2)] if seg else []))
             if copper.is_empty or not any(
-                    part.distance(Point(*pt)) < 0.7
-                    and any(part.distance(Point(*q)) < 1.0 for q in pads)
+                    part.distance(Point(*pt)) < _RAIL_CONTACT_MM
+                    and any(part.distance(Point(*q)) < _RAIL_PAD_MM
+                            for q in pads)
                     for part in getattr(copper, "geoms", [copper])):
                 problems.append(i)
                 break
@@ -2518,27 +2569,26 @@ def unit_bridges(spec: BadgeSpec, safe=None, windows: bool | None = None) -> dic
     the unit can no longer strand its copper island. A None means no clear
     straight path existed; the caller falls back to the reserved corridor.
 
-    A bridge off a PAD is only cut when the design actually has a light
-    window, because a pad already sits in its own pour: without a window
-    there is nothing that could sever it from the ring, and the trace is
-    0.3 mm of copper doing nothing but showing. Measured before making it
-    conditional -- suppressing every bridge across the whole invariant
-    corpus and the kicad-cli DRC battery leaves exactly two boards failing,
-    and both are boards where a window crosses a unit; every other row
-    (each clock hookup, each package, rotation, novia, farled, custom
-    outline, pin subset) stays DRC-clean with no unconnected items.
+    A bridge is cut only when its contact has NO path to the rail without
+    it, judged on the real fill (_fill_geometry, the same polygons the
+    zones ship) with _rail_reaches: the contact and a kept connector pad of
+    the net must sit on one connected component. A pad merged into a whole
+    plane, or a via whose collar pool still reaches the ring around every
+    window, gets no trace -- copper that only shows was the complaint that
+    made this conditional twice, first on "does the board have a window at
+    all" and now on the connectivity itself, which is the question the
+    trace exists to answer. What stays is editable and the preview says why
+    it appeared.
 
-    A bridge off a VIA is cut regardless. Its start is a collar on the
-    unit's far face, and there the plane may not reach it at all: dropping
-    those refused a far-side LED with no power via whose download had been
-    DRC-clean (tests/test_webapp.py:
-    test_a_far_side_led_without_its_power_via_still_downloads).
-
-    `windows` overrides the answer for callers that know it before the art
-    layers exist -- the webapp works its window materials out from the
-    classified uploads and the texts, then places these bridges long before
-    it has an ArtLayer to show for it. Left None, `spec.art` decides, which
-    is what every generate-time caller wants.
+    `windows` (a bool) keeps the old coarse CANDIDATE answer for the one
+    caller that must run before the art layers exist: the webapp works its
+    window materials out from the classified uploads and texts, then needs
+    to know which bridges could ROUTE (an unroutable one reserves the pour
+    corridor instead) long before it has an ArtLayer to show for it. The
+    fine answer would need the fill, and the fill needs the art. Left None,
+    `spec.art` decides on the fill -- what every download-time caller wants,
+    and a needed bridge is always among the coarse candidates' starts, so
+    the corridor bookkeeping never misses one.
 
     Each value is a POLYLINE, two points when the route is automatic and one
     per hand-placed bend beyond that (Led.bnodes / Led.bfnodes). Use
@@ -2573,6 +2623,12 @@ def _bridge_routes(spec: BadgeSpec, safe=None, windows: bool | None = None):
     The shared body behind :func:`unit_bridges` and :func:`bridge_problems`:
     one pass, so the two can never disagree about which bridges exist.
     """
+    # Fine mode (windows is None): spec.art is complete, so each candidate
+    # start is judged on the real fill and only disconnected ones get traces.
+    # Coarse mode (windows is a bool): the pre-art webapp call; every start a
+    # window COULD sever stays a candidate, for the corridor bookkeeping.
+    fine = windows is None
+    fills: dict = {}
     has_window = (windows if windows is not None
                   else any(a.material in ("glow", "bare") for a in spec.art))
     rings = spec.outline if spec.outline else [
@@ -2622,9 +2678,23 @@ def _bridge_routes(spec: BadgeSpec, safe=None, windows: bool | None = None):
             # unit's res_in carries CLK (bridging it to the 3V3 ring would be
             # a dead short), and a back unit's 3V3 via is gone entirely.
             starts.pop("F.Cu", None)
-        if not has_window:
+        if fine:
+            # Every contact that already sits on its rail keeps its plane
+            # connection and needs no trace: not the pad merged into a whole
+            # pour, and not the via whose collar pool reaches the ring around
+            # the windows. What remains is genuinely severed, and the trace
+            # it gets is the warning the editor shows for it.
+            def _contact_r(lbl):
+                if lbl == "via":
+                    return VIA_SIZE / 2
+                pk = PKG[res_pkg(g["pkg"]) if lbl == "pad_res_in" else g["pkg"]]
+                return min(pk["pw"], pk["ph"]) / 2
+            starts = {ly: sv for ly, sv in starts.items()
+                      if not _rail_reaches(spec, ly, pt(sv[1]),
+                                           _contact_r(sv[0]), fills)}
+        elif not has_window:
             # Nothing can sever a pad from the ring on this board, so the
-            # only bridge worth its copper is one that starts at a via.
+            # only bridge worth a candidacy is one that starts at a via.
             starts = {k: v for k, v in starts.items() if v[0] == "via"}
         obstacles = pads + [q for j, ps in enumerate(all_pieces) if j != i
                             for _lbl, q in ps]
@@ -3691,13 +3761,34 @@ WINDOW_EDGE_CLEAR = 1.2
 WINDOW_COPPER_INSET = 1.1
 
 
+#: Memoised fills, in the mould of _ROUTE_CACHE. One /generate now asks for
+#: the same (net, layer) fill from several places -- the perimeter-bridge scan
+#: (which needs it to know whether a contact already sits on its rail), the
+#: resolve_novia gate, and the zone emission itself -- and a fill is ~20 ms
+#: cold. Keyed on the repr of everything the fill reads, so a stale entry is
+#: impossible rather than merely unlikely; any new BadgeSpec field the fill
+#: consults MUST appear in the key (the _ROUTE_CACHE rule).
+_FILL_CACHE: dict = {}
+
+
 def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
     """Compute the filled copper for a zone as shapely polygons (board mm).
 
     KiCad normally computes zone fills when you press B; we precompute a
     solid-connect fill so the board is electrically complete (and DRC-clean)
     straight out of the zip. Refilling in KiCad simply replaces these.
+
+    Callers must treat the result as frozen: it is shared through _FILL_CACHE.
     """
+    key = (zone_net, layer, tuple(spec.pins), repr(spec.outline),
+           tuple(repr(led) for led in spec.leds),
+           tuple(repr(a) for a in spec.art),
+           spec.clk_jumper, repr(spec.jumper), spec.jumper_rot,
+           spec.jumper_side, spec.jumper_via, repr(spec.jumper_nodes),
+           repr(spec.jumper_v3nodes), repr(spec.jumper_v3pin),
+           repr(spec.jumper_via_at), repr(spec.jumper_v3via_at))
+    if key in _FILL_CACHE:
+        return _FILL_CACHE[key]
     from shapely.geometry import LineString, Point, Polygon, box
     from shapely.ops import unary_union
 
@@ -3926,7 +4017,11 @@ def _fill_geometry(zone_net: str, layer: str, spec: BadgeSpec):
     out = []
     for p in polys:
         out += _open_holes(p)
-    return [p for p in out if alive(p)]
+    out = [p for p in out if alive(p)]
+    if len(_FILL_CACHE) > 64:
+        _FILL_CACHE.clear()
+    _FILL_CACHE[key] = out
+    return out
 
 
 SLIT_W = 0.12     # width of the hole-venting slit (see _open_holes)
