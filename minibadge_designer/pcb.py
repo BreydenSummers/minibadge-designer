@@ -42,9 +42,11 @@ OUTLINE = (0.16, 0.16, 20.16, 20.16)
 # 0.2 mm is the bottom of that capability range and the same edge budget this
 # board already gives COPPER (min_copper_edge_clearance in generate_project),
 # which is the more critical layer of the two -- ink that smears into the
-# routed edge is cosmetic, copper there is not. Artwork keeps the wider
-# logo.EDGE_MARGIN 0.5 mm: an uploaded image is framed by the app, not placed
-# by hand, so it has nothing to gain from the last 0.3 mm.
+# routed edge is cosmetic, copper there is not. Uploaded artwork keeps the
+# same 0.2 now (logo.EDGE_MARGIN): it used to keep 0.5 on the grounds that an
+# image is framed by the app rather than placed by hand, which stopped being
+# true when art was allowed to hang off the board and be lined up against a
+# profile.
 TEXT_EDGE_CLEAR = 0.2
 
 # Connector pads: (pad number, x, y, net label or None, row).

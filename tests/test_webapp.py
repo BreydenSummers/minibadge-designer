@@ -1169,11 +1169,12 @@ def test_ttf_texts_all_materials(client):
 #: is also the edge budget generate_project() already gives copper, the more
 #: critical of the two layers.
 _SILK_EDGE_MM = 0.2
-#: Uploaded artwork keeps a wider frame (logo.EDGE_MARGIN, 0.5 mm), because the
-#: app sizes and frames an image rather than letting the user push it about by
-#: the millimetre.  Text used to be clipped to that same frame while the editor
-#: told the user 0.2 mm was fine, so 0.3 mm of their string was quietly cut off
-#: the download.  This is the number the text clip must NOT be.
+#: The wider clip this rule must never regress to. It was the artwork frame --
+#: uploaded images kept 0.5 mm where text kept 0.2, and text clipped to that
+#: frame lost 0.3 mm of the user's string from the download while the editor
+#: told them 0.2 was fine. Artwork keeps the same 0.2 as text now
+#: (logo.EDGE_MARGIN), so nothing on the board is clipped here any more; the
+#: number stays as the sentinel that says so.
 _ART_FRAME_MM = 0.5
 
 
