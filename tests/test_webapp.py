@@ -2996,3 +2996,56 @@ def test_switching_the_pin_captions_off_hands_the_strip_back_to_the_artwork(clie
     assert covered[True] == 0, (
         f"artwork prints over {covered[True]} caption spots while the captions "
         "are on, and the fab will print them on top of each other")
+
+
+@pytest.mark.webapp
+def test_a_window_keeps_off_a_part_label_only_on_the_face_it_prints_on(client):
+    """A back part's label costs the artwork nothing on the front.
+
+    D1/R1 print on the face their part is mounted on, and a window may not
+    open mask under them THERE -- the fab clips ink over an opening. On the
+    other face there is no ink to protect, and the label's box used to be
+    reserved on both cuts anyway: a through window wore a label-shaped hole
+    on the face the label never touches, in the middle of the drawing.
+    """
+    from shapely.geometry import Point, Polygon
+    from shapely.ops import unary_union
+
+    params = {
+        "name": "lab",
+        "leds": [{"x": 10.16, "y": 10.5, "color": "red", "side": "back",
+                  "layout": "inline", "size": "0805"}],
+        "texts": [],
+        "art": [{"kind": "rect", "material": "bare", "side": "through",
+                 "cx": 10.16, "cy": 10.5, "w": 16.0, "h": 13.0}],
+    }
+    resp = client.post("/generate", data={"params": json.dumps(params)},
+                       content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    root = invariants._parse_sexp(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "lab/lab.kicad_pcb").decode())
+
+    def mask(layer):
+        return unary_union([
+            Polygon([(float(q[1]) - pcb_mod.ORIGIN, float(q[2]) - pcb_mod.ORIGIN)
+                     for q in invariants._kids(invariants._kid(g, "pts"), "xy")])
+            for g in invariants._kids(root, "gr_poly")
+            if str(invariants._val(g, "layer")) == layer])
+
+    front, back = mask("F.Mask"), mask("B.Mask")
+    assert not front.is_empty and not back.is_empty, "the window opened nothing"
+    labs = pcb_mod.refdes_layout(pcb_mod.BadgeSpec(leds=[
+        pcb_mod.Led(10.16, 10.5, "red", side="back", layout="inline",
+                    size="0805")]))
+    assert len(labs) == 2, "the unit did not place both its labels"
+    for lab in labs:
+        assert lab["face"] == "back", "fixture drift: the labels moved face"
+        cx = sum(q[0] for q in lab["quad"]) / 4
+        cy = sum(q[1] for q in lab["quad"]) / 4
+        assert front.contains(Point(cx, cy)), (
+            f"{lab['ref']}: the FRONT window cut still avoids this back "
+            "label's box, wearing a label-shaped hole in the artwork on a "
+            "face the label never touches")
+        assert not back.contains(Point(cx, cy)), (
+            f"{lab['ref']}: the BACK window cut opens mask under the printed "
+            "label, and the fab will clip the ink")

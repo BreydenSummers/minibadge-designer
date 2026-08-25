@@ -1679,16 +1679,25 @@ def test_a_severed_units_bridges_ship_exactly_as_previewed(ui, client):
 
     from minibadge_designer import pcb
 
-    cases = _clamped([_js_led(layout=lay, size="0805", side=side, rot=rot,
-                              reverse=rev)
-                      for lay in ("inline", "stacked")
-                      for side in ("front", "back")
-                      for rot, rev in ((0, False), (37, True))])
-    assert len(cases) == 8, "the severed-world matrix lost cases"
-    window = {"kind": "circle", "material": "bare", "side": "through",
-              "cx": 10.16, "cy": 10.16, "wmm": 17.0}
+    cases = [(d, "through")
+             for d in _clamped([_js_led(layout=lay, size="0805", side=side,
+                                        rot=rot, reverse=rev)
+                                for lay in ("inline", "stacked")
+                                for side in ("front", "back")
+                                for rot, rev in ((0, False), (37, True))])]
+    # One-face windows sever one face only, and the two sides reach that
+    # answer through different code (the board picks layers per art.window,
+    # the canvas builds one flood mask per face) -- a back-only window over a
+    # back unit shipped its GND bridge while the preview showed nothing.
+    cases += [(d, w) for d in _clamped([
+                  _js_led(layout="inline", size="0805", side=side)
+                  for side in ("front", "back")])
+              for w in ("front", "back")]
+    assert len(cases) == 12, "the severed-world matrix lost cases"
     any_bridge = False
-    for d in cases:
+    for d, wside in cases:
+        window = {"kind": "circle", "material": "bare", "side": wside,
+                  "cx": 10.16, "cy": 10.16, "wmm": 17.0}
         got = ui.js("""([L, win]) => {
             state.leds = [L]; state.art = [win];
             renderLedList(); renderArtList(); draw();
@@ -1813,6 +1822,57 @@ def test_a_bridge_announces_itself_when_a_window_severs_the_unit(ui):
     ui.js("() => { state.art = []; renderArtList(); draw(); }")
     ui.wait_state("Object.keys(allBridges()[0]).length === 0")
     ui.assert_clean("bridge notice")
+@pytest.mark.browser
+def test_a_back_labels_box_is_not_carved_out_of_the_front_window(ui):
+    """The window shows through where the OTHER face's label sits.
+
+    D1/R1 print on the face their part is mounted on. The window keepout for
+    a label used to be applied to both faces' cuts, so a through window wore
+    a label-shaped hole in the middle of the drawing on the face the label
+    never touches -- visible as an exclusion bite in the artwork, and shipped
+    that way too (the board test owns the shipped half; this pins the pixels
+    the user actually looks at).
+    """
+    ui.js("""() => {
+        state.leds = [{x: 10.16, y: 10.5, color: 'red', side: 'back', rot: 0,
+                       layout: 'inline', size: '0805', reverse: false,
+                       novia: false, nodes: [], farled: false, adv: null,
+                       clk: false, cnodes: []}];
+        state.art = [{kind: 'circle', material: 'bare', side: 'through',
+                      cx: 10.16, cy: 10.5, wmm: 17.0, palette: [],
+                      overrides: []}];
+        renderLedList(); renderArtList(); draw();
+    }""")
+    lab = ui.js("() => { const l = refdesLayout()[0];"
+                " return { face: l.face, x: l.at[0], y: l.at[1] }; }")
+    assert lab and lab["face"] == "back", (
+        "fixture drift: the back unit's first label is not on the back")
+
+    # The pixel at the label's spot, on each view, with the labels on and off:
+    # toggling them must change the BACK view (label ink + kept mask) and
+    # change NOTHING on the front (no ink there, so no carve either).
+    def px(side, on):
+        return ui.js("""([x, y, side, on]) => {
+            state.refdes = on; rebuildAllArt(); draw();
+            const cv = side === 'back' ? cvB : cvF;
+            const sx = side === 'back' ? cv.width - VIEW.tx - x * SCALE
+                                       : VIEW.tx + x * SCALE;
+            return [...cv.getContext('2d').getImageData(
+                Math.round(sx), Math.round(VIEW.ty + y * SCALE), 1, 1).data];
+        }""", [lab["x"], lab["y"], side, on])
+
+    front_on, front_off = px("front", True), px("front", False)
+    back_on, back_off = px("back", True), px("back", False)
+    assert any(abs(a - b) > 8 for a, b in zip(back_on, back_off)), (
+        "toggling part labels changes nothing at the label's own spot on the "
+        "back view: either the label is not drawn or the fixture misses it")
+    # max() refuses an empty read outright, so a blank pixel fetch cannot
+    # pass as "nothing changed".
+    assert max(abs(a - b) for a, b in zip(front_on, front_off)) <= 8, (
+        f"the FRONT view at the back label's spot changes with the labels "
+        f"({front_on} vs {front_off}): the label is carving a hole in the "
+        "window on the face it does not print on")
+    ui.assert_clean("label face carve")
 
 
 @pytest.mark.browser
