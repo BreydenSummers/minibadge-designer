@@ -819,12 +819,28 @@ TRACE_SEAM_MM = 0.002
 #: build fit inside this with room to spare. What does not fit is artwork
 #: carrying detail finer than a fab could print in the first place.
 #:
+#: Raised from 4 000 on 2026-08-24, because "a design a person would actually
+#: build" was measured too small. A six-colour drawing at 35.5 mm -- filled
+#: shapes plus fine hatching, the kind of picture people put on these boards
+#: -- samples to 8 098 cells and was quietly shipping as 0.18 mm squares
+#: while the editor drew it as 0.06 mm curves. The only way to find that out
+#: was to open the 3D view and notice the board did not look like the design.
+#: Traced instead, that drawing costs `/generate` 0.40 s -> 1.58 s and its
+#: board file 256 KB -> 628 KB.
+#:
+#: What the ceiling costs at 40 000, measured: eight 19 mm layers of 0.1 mm
+#: concentric rings -- boundary complexity on purpose -- take `/generate`
+#: from 1.47 s to 4.47 s. `/generate` and `/outline` are unauthenticated
+#: (and `/outline` shares this budget whenever a layer carves the board
+#: outline), so that is the number to weigh before raising it again.
+#:
 #: Unlike `MAX_OUTLINE_RECTS`, blowing this allowance is not a refusal: the
 #: layer falls back to the pixel path -- printing its cells as rectangles,
 #: exactly as this app did before tracing existed. So no design becomes
 #: un-makeable and none gets slower than it used to be; a pathological one
-#: just keeps the staircase it always had.
-MAX_ART_TRACE_RECTS = 4_000
+#: (uniform noise samples to tens of thousands of cells and blows any ceiling
+#: worth having) just keeps the staircase it always had.
+MAX_ART_TRACE_RECTS = 40_000
 
 
 class _TraceBudget:
