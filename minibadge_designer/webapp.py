@@ -2568,8 +2568,13 @@ def _generate_impl(render: bool):
             art_board[2] - win_inset, art_board[3] - win_inset,
         )
         if outline_poly is not None:
-            # Clip artwork to the actual board shape.
-            outside = _OutsideKeepout(outline_poly.buffer(-0.35))
+            # Clip artwork to the actual board shape, by the same edge budget
+            # the straight board uses -- one number for one rule. It was 0.35
+            # here against EDGE_MARGIN's 0.5 in the box clip, so a curved board
+            # cut its artwork at two different depths depending on which of the
+            # two bit first, and hardest where the shape touched its own
+            # bounding box: the sides.
+            outside = _OutsideKeepout(outline_poly.buffer(-EDGE_MARGIN))
             decor_base["front"].append(outside)
             decor_base["back"].append(outside)
             ring = _OutsideKeepout(outline_poly.buffer(-pcb.WINDOW_EDGE_CLEAR))

@@ -890,7 +890,7 @@ const pairCaptionAt = k => {
 // Nets the LED circuits need that no kept pin supplies (mirrors power_missing).
 const powerMissing = () => ["3V3", "GND"].filter(
   net => !activePads().some(p => p[2] === net));
-const PIXEL_MM = 0.18, MAX_COLS = 192, EDGE = 0.5;
+const PIXEL_MM = 0.18, MAX_COLS = 192, EDGE = 0.2;  // mirrors logo.EDGE_MARGIN
 // The tracer's sampling pitch (logo.py TRACE_PIXEL_MM / MAX_TRACE_COLS). Art
 // classification happens here, not on the 0.18 mm board grid: the cells are
 // boundary evidence for a polygon, not squares of ink, so the preview has to
@@ -1884,6 +1884,32 @@ function paintBoardMask(mc, color) {
   mc.fill(platesPath());
 }
 // Erase everything outside the board from a view-space offscreen context.
+// Artwork stops EDGE mm short of the routed edge (mirrors logo.EDGE_MARGIN and
+// the webapp's clip of art to outline.buffer(-EDGE_MARGIN)). Stroking the
+// board's own outline in destination-out erases exactly that band, whatever
+// shape the board is -- offsetting an arbitrary silhouette in canvas would
+// cost a polygon offset per frame. Without this the preview painted ink right
+// up to the cut and the board came back with the last fifth of a millimetre
+// shaved off, which is a lie in the direction that loses the user artwork.
+function eraseBoardEdge(oc, inset) {
+  if (!(inset > 0)) return;
+  oc.save();
+  oc.globalCompositeOperation = "destination-out";
+  oc.strokeStyle = "#000";
+  oc.lineWidth = 2 * inset * SCALE;
+  oc.lineJoin = "round";
+  const s = state.shape;
+  if (!boardCarved()) {
+    oc.strokeRect(mm2px(0.16), mm2px(0.16), 20 * SCALE, 20 * SCALE);
+  } else if (s.rings && !draggingPart() && !draggingCutArt()) {
+    oc.stroke(ringsPath(s.rings));
+  } else if (customHasAdd()) {
+    for (const el of s.elements) if (el.op !== "cut") oc.stroke(elementPath(el));
+  } else {
+    oc.strokeRect(mm2px(0.16), mm2px(0.16), 20 * SCALE, 20 * SCALE);
+  }
+  oc.restore();
+}
 function clipToBoard(oc) {
   const m = document.createElement("canvas");
   m.width = oc.canvas.width; m.height = oc.canvas.height;
@@ -5346,7 +5372,8 @@ function drawView(canvas, side) {
         clearTextCarve(oc, t);
       }
       eraseArtKeepouts(oc, mat, viewSide);
-      // Decor only exists on the board itself.
+      // Decor only exists on the board itself, and keeps off its edge.
+      eraseBoardEdge(oc, EDGE);
       clipToBoard(oc);
       compositeLayer(c, off, mirror);
     }

@@ -682,3 +682,83 @@ def test_a_part_parked_in_the_reclaimed_band_still_passes_drc(tmp_path):
          "-o", str(report), str(board)],
         capture_output=True, text=True, timeout=120, check=False)
     assert result.returncode == 0, f"DRC violations:\n{report.read_text()}"
+
+
+@pytest.mark.kicad
+@pytest.mark.needs("kicad")
+def test_artwork_printed_to_the_edge_of_a_routed_shape_passes_drc(tmp_path):
+    """A drawing may run right up to a curved board edge and still be legal.
+
+    Lining a picture up against a board profile is the point of a custom
+    outline, so the artwork has to reach the cut -- not stop a third of a
+    millimetre short of it, which on a face pushed to the edge is the face.
+    What stops it is the fab's silk-to-edge capability, 0.2 mm; the oracle for
+    "and the board is still buildable" is DRC on the routed shape itself.
+    """
+    import json as _json
+
+    from PIL import Image, ImageDraw
+    from shapely.geometry import Polygon
+    from shapely.ops import unary_union
+
+    from minibadge_designer import pcb as pcb_mod
+    from minibadge_designer.webapp import app
+
+    # A dome wider than the standard square: its sides are exactly where the
+    # shape touches its own bounding box, which is where the two clips used to
+    # disagree (0.35 against the outline, 0.5 against the box).
+    shape = Image.new("RGB", (500, 400), "white")
+    ImageDraw.Draw(shape).pieslice((0, 0, 499, 799), 180, 360, fill="black")
+    sbuf = io.BytesIO()
+    shape.save(sbuf, "PNG")
+    abuf = io.BytesIO()
+    Image.new("RGB", (600, 400), (20, 20, 20)).save(abuf, "PNG")
+
+    params = {"name": "dome", "leds": [], "texts": [],
+              "shape": {"mode": "image", "w": 25.14, "cx": 10.16, "cy": 10.16,
+                        "threshold": 128},
+              "art": [{"mode": "threshold", "cx": 10.16, "cy": 10.16, "w": 35.5,
+                       "material": mat, "side": side}
+                      for mat, side in (("silk", "front"), ("copper", "back"))]}
+    data = {"params": _json.dumps(params),
+            "shape": (io.BytesIO(sbuf.getvalue()), "dome.png"),
+            "art0": (io.BytesIO(abuf.getvalue()), "a0.png"),
+            "art1": (io.BytesIO(abuf.getvalue()), "a1.png")}
+    resp = app.test_client().post("/generate", data=data,
+                                  content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    board = tmp_path / "dome.kicad_pcb"
+    board.write_bytes(zf.read("dome/dome.kicad_pcb"))
+    (tmp_path / "dome.kicad_pro").write_bytes(zf.read("dome/dome.kicad_pro"))
+    report = tmp_path / "drc.txt"
+    result = subprocess.run(
+        [KICAD_CLI, "pcb", "drc", "--severity-all", "--exit-code-violations",
+         "-o", str(report), str(board)],
+        capture_output=True, text=True, timeout=120, check=False)
+    assert result.returncode == 0, f"DRC violations:\n{report.read_text()}"
+
+    import invariants
+
+    root = invariants._parse_sexp(board.read_text())
+
+    def shapes(layer):
+        return [Polygon([(float(q[1]) - pcb_mod.ORIGIN,
+                          float(q[2]) - pcb_mod.ORIGIN)
+                         for q in invariants._kids(invariants._kid(g, "pts"), "xy")])
+                for g in invariants._kids(root, "gr_poly")
+                if str(invariants._val(g, "layer")) == layer]
+
+    outline = unary_union(shapes("Edge.Cuts"))
+    ink = unary_union(shapes("F.SilkS"))
+    assert not outline.is_empty and not ink.is_empty, "board or artwork missing"
+    gap = outline.exterior.distance(ink)
+    # 0.2 mm is the fab's silk-to-edge floor; anything much past it is the
+    # drawing being trimmed for no reason a fab asked for.
+    assert gap < 0.3, (
+        f"artwork stops {gap:.3f} mm short of the routed edge: a drawing lined "
+        "up against the profile loses that band, and the editor does not show "
+        "it going")
+    assert gap > 0.05, (
+        f"artwork comes within {gap:.3f} mm of the routed edge, under any "
+        "fab's silk-to-edge capability")

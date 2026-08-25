@@ -56,12 +56,18 @@ def test_keepouts_exclude_pixels():
 
 
 def test_clipped_to_board_edges():
-    # Logo dragged mostly off-board: emitted pixels stay on it (centers are
-    # kept 0.5 mm inside the outline; edges may overhang by half a pixel).
+    # Logo dragged mostly off-board: emitted pixels stay on it. Cell CENTERS
+    # are kept the silk-to-edge budget inside the outline -- 0.16 mm board
+    # edge + 0.2 mm, the same distance hand-placed text and copper keep, and
+    # the bottom of every fab's published capability -- while an edge may
+    # overhang it by half a pixel.
+    keep_in = 0.16 + 0.2
     rects = logo_to_rects(_disc(), cx=1.0, cy=1.0, width_mm=18)
     assert rects
     for x, y, w, h in rects:
-        assert x + w / 2 >= 0.66 - 0.01 and y + h / 2 >= 0.66 - 0.01
+        assert x + w / 2 >= keep_in - 0.01 and y + h / 2 >= keep_in - 0.01, (
+            f"a cell centred at ({x + w / 2:.2f}, {y + h / 2:.2f}) is inside "
+            f"the {keep_in:.2f} mm the artwork keeps off the routed edge")
 
 
 def _tricolor() -> bytes:
