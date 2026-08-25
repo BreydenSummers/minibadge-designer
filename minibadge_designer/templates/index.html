@@ -704,6 +704,11 @@
             <option value="tented" selected>Tented</option>
             <option value="exposed">Exposed</option>
           </select></div>
+        <div><div class="sub" style="margin-top:0">Pin labels</div>
+          <select id="pinlabels" title="Print the connector pin names (3V3, GND, CLK) on the BACK silkscreen, for whoever solders the badge -- artwork keeps clear of them while they are on">
+            <option value="off" selected>None</option>
+            <option value="on">3V3, GND&hellip;</option>
+          </select></div>
         <div><div class="sub" style="margin-top:0">Part labels</div>
           <select id="refdes" title="Print each part's reference (D1, R1, ...) on the silkscreen, the way a board names its parts for whoever solders it">
             <option value="on" selected>D1, R1&hellip;</option>
@@ -844,13 +849,34 @@ const ALL_PINS = PADS.map(p => p[4]);
 // Corner pairs, mirroring pcb.PAD_PAIRS: the plate, keepout, caption and 3D
 // header all follow the pair, and a pair keeps whichever of its pins survive.
 const PAD_PAIRS = {
-  tl: {pins:["1","2"],  row:"top",    at:[2.54, 2.8],   plate:[0.16,0.16,5.0,3.4],    keepout:[0.04,0.04,5.04,3.0]},
-  tr: {pins:["7","8"],  row:"top",    at:[17.78, 2.8],  plate:[15.32,0.16,20.16,3.4], keepout:[15.28,0.04,20.28,3.0]},
-  bl: {pins:["9","10"], row:"bottom", at:[2.54, 17.78], plate:[0.16,16.92,5.0,20.16], keepout:[0.04,17.32,5.04,20.28]},
-  br: {pins:["15","16"],row:"bottom", at:[17.78,17.78], plate:[15.32,16.92,20.16,20.16], keepout:[15.28,17.32,20.28,20.28]},
+  tl: {pins:["1","2"],  row:"top",    at:[2.54, 2.8],   plate:[0.16,0.16,5.0,3.4],    keepout:[0.04,0.04,5.04,2.5]},
+  tr: {pins:["7","8"],  row:"top",    at:[17.78, 2.8],  plate:[15.32,0.16,20.16,3.4], keepout:[15.28,0.04,20.28,2.5]},
+  bl: {pins:["9","10"], row:"bottom", at:[2.54, 17.88], plate:[0.16,16.92,5.0,20.16], keepout:[0.04,17.82,5.04,20.28]},
+  br: {pins:["15","16"],row:"bottom", at:[17.78,17.88], plate:[15.32,16.92,20.16,20.16], keepout:[15.28,17.82,20.28,20.28]},
 };
 const pinOn = n => (state.pins || ALL_PINS).includes(n);
 const activePads = () => PADS.filter(p => pinOn(p[4]));
+// How close art may come to a connector pad, by what it becomes (mirrors
+// pcb.PAD_ART_GAP: ink clipped by a mask opening, copper beside a powered
+// pad, and a mask opening that could bridge to the pad's own are three
+// different failures, so three different numbers).
+// Which face the pin captions print on when they are switched on: the one
+// that gets soldered (mirrors pcb._connector_footprint).
+const CAPTION_SIDE = "back";
+const pinLabelsOn = () => state.pinlabels === true;
+const CONN_PAD_R = 0.875;
+const PAD_ART_GAP = { silk: 0.15, copper: 0.5, window: 1.125 };
+const padArtRadius = kind => CONN_PAD_R + PAD_ART_GAP[kind];
+// The pin captions print in a 0.5 mm band inside the pads' own keepout, so a
+// unit only has to stay out of that band while they are being printed
+// (mirrors pcb.pair_keepout -- the board hands the half millimetre back too).
+const CAPTION_BAND = 0.5;
+function pairKeepout(key) {
+  const [x0, y0, x1, y1] = PAD_PAIRS[key].keepout;
+  if (!pinLabelsOn()) return [x0, y0, x1, y1];
+  return PAD_PAIRS[key].row === "top"
+    ? [x0, y0, x1, y1 + CAPTION_BAND] : [x0, y0 - CAPTION_BAND, x1, y1];
+}
 const activePairs = () => Object.keys(PAD_PAIRS).filter(k => PAD_PAIRS[k].pins.some(pinOn));
 const pairCaption = k => PAD_PAIRS[k].pins.filter(pinOn)
   .map(n => PADS.find(p => p[4] === n)[2]).join(" ");
@@ -1431,6 +1457,7 @@ const state = {
   // is what the BOM names the parts, and a board that does not say which
   // resistor is R1 hands the person soldering it a puzzle.
   refdes: true,
+  pinlabels: false,
   pins: [...ALL_PINS],
   // Board-level CLK hookup for units with L.clk set: the 3-pad solder
   // jumper (bridge one side: steady 3V3 or blinking CLK) or a direct trace
@@ -3401,7 +3428,7 @@ function strandedParts(L) {
 function padConflict(L) {
   for (const p of unitFootprint(L)) {
     for (const key of activePairs()) {
-      if (!polysClear(p.q, rectPoly(PAD_PAIRS[key].keepout), 0)) return true;
+      if (!polysClear(p.q, rectPoly(pairKeepout(key)), 0)) return true;
     }
   }
   return false;
@@ -3411,7 +3438,7 @@ function padConflict(L) {
 // the pad that is in the way and not at the empty box around all of them.
 function padConflictParts(L) {
   return unitFootprint(L).filter(p => activePairs().some(
-    key => !polysClear(p.q, rectPoly(PAD_PAIRS[key].keepout), 0)));
+    key => !polysClear(p.q, rectPoly(pairKeepout(key)), 0)));
 }
 // ---- CLK jumper placement (mirrors the server's backstop test) ----
 // The jumper's copper and labels must sit on solid board, clear of every
@@ -3443,7 +3470,7 @@ function jumperInfoOk(ci, skipLed) {
     if (quads.some(q => !polysClear(q, poly, 0.2))) return false;
   }
   for (const key of activePairs()) {
-    const kp = rectPoly(PAD_PAIRS[key].keepout);
+    const kp = rectPoly(pairKeepout(key));
     if (quads.some(q => !polysClear(q, kp, 0))) return false;
   }
   for (const b of captionBoxes()) {
@@ -4119,6 +4146,28 @@ function viaOffset(led) {
   return led.side === "back" ? g.viaB : g.viaF;
 }
 
+// Where a grid built by rebuildArt -- the classification, or a highlight mask
+// over it -- lands on the board. The grid covers the CROPPED window, held in
+// image fractions, so the rectangle is worked out from where the layer is now.
+function artCacheRect(a) {
+  const placed = artDims(a);
+  const uv = a.cacheUV || { u0: 0, v0: 0, u1: 1, v1: 1 };
+  return { x0: a.cx - placed.w / 2 + uv.u0 * placed.w,
+           y0: a.cy - placed.h / 2 + uv.v0 * placed.h,
+           w: (uv.u1 - uv.u0) * placed.w, h: (uv.v1 - uv.v0) * placed.h, uv };
+}
+// A pick is stored as a fraction of the whole IMAGE (so it survives moves, and
+// so it means the same thing to the server) -- turn one into a cell of the
+// cropped grid, or -1 for a pick on a part of the image that is not classified
+// because it is off the board.
+function artCellAt(a, u, v, cols, rows) {
+  const { u0, v0, u1, v1 } = (a.cacheUV || { u0: 0, v0: 0, u1: 1, v1: 1 });
+  if (u < u0 || u > u1 || v < v0 || v > v1) return -1;
+  const c0 = Math.min(cols - 1, Math.max(0, Math.floor((u - u0) / (u1 - u0) * cols)));
+  const r0 = Math.min(rows - 1, Math.max(0, Math.floor((v - v0) / (v1 - v0) * rows)));
+  return r0 * cols + c0;
+}
+
 // Which part of an artwork layer the user is about to change (hovering a
 // palette row, the threshold material, or a wand chip): {index, type, j}.
 let artHL = null;
@@ -4131,10 +4180,10 @@ function drawArtHighlight(c) {
   let stale = drawArtHighlight.key !== key;
   let seed = -1;
   if (artHL.type === "wandpick") { // live preview while the wand is armed
-    const c0 = Math.min(cols - 1, Math.max(0, Math.floor(artHL.u * cols)));
-    const r0 = Math.min(rows - 1, Math.max(0, Math.floor(artHL.v * rows)));
-    seed = r0 * cols + c0;
-    if (cls[seed] < 0) return; // transparent: a click here would be a no-op
+    seed = artCellAt(a, artHL.u, artHL.v, cols, rows);
+    // Off the classified window, or transparent: a click here is a no-op, and
+    // lighting something up would promise a region the board will not get.
+    if (seed < 0 || cls[seed] < 0) return;
     // Still hovering the same connected region? The cached mask is exact.
     stale = stale || !(drawArtHighlight.on && drawArtHighlight.on[seed]);
   }
@@ -4149,10 +4198,10 @@ function drawArtHighlight(c) {
     } else { // one existing wand override's connected region
       const ov = a.overrides[artHL.j];
       if (!ov) return;
-      const c0 = Math.min(cols - 1, Math.max(0, Math.floor(ov.u * cols)));
-      const r0 = Math.min(rows - 1, Math.max(0, Math.floor(ov.v * rows)));
-      const s0 = r0 * cols + c0;
-      if (cls[s0] >= 0) for (const idx of floodFill(cls, cols, rows, s0)) on[idx] = 1;
+      const s0 = artCellAt(a, ov.u, ov.v, cols, rows);
+      if (s0 >= 0 && cls[s0] >= 0) {
+        for (const idx of floodFill(cls, cols, rows, s0)) on[idx] = 1;
+      }
     }
     const img = new ImageData(cols, rows);
     for (let i = 0; i < on.length; i++) {
@@ -4167,10 +4216,10 @@ function drawArtHighlight(c) {
     drawArtHighlight.key = key;
     drawArtHighlight.on = on;
   }
-  const d = artDims(a);
+  const r = artCacheRect(a);
   c.imageSmoothingEnabled = false;
   c.drawImage(drawArtHighlight.cache,
-              mm2px(a.cx - d.w / 2), mm2px(a.cy - d.h / 2), d.w * SCALE, d.h * SCALE);
+              mm2px(r.x0), mm2px(r.y0), r.w * SCALE, r.h * SCALE);
   c.imageSmoothingEnabled = true;
 }
 
@@ -4190,13 +4239,7 @@ function drawArtLayer(c, a, mat, viewSide) {
   // Where the cached classification belongs, worked out from where the layer
   // is NOW: the window is stored in image fractions (see rebuildArt), so the
   // pixels follow a drag even though nothing was reclassified.
-  const placed = artDims(a);
-  const uv = a.cacheUV || { u0: 0, v0: 0, u1: 1, v1: 1 };
-  const px0 = a.cx - placed.w / 2 + uv.u0 * placed.w;
-  const py0 = a.cy - placed.h / 2 + uv.v0 * placed.h;
-  const d = { w: (uv.u1 - uv.u0) * placed.w, h: (uv.v1 - uv.v0) * placed.h };
-  const cx = px0 + d.w / 2;
-  const cy = py0 + d.h / 2;
+  const rect = artCacheRect(a);
   // Both kinds of art reach the board as polygons now, so neither has board
   // pixels to show: scale the classification smoothly and the preview edge
   // reads like the traced curve instead of a staircase the board never gets.
@@ -4205,7 +4248,7 @@ function drawArtLayer(c, a, mat, viewSide) {
   // Nothing a badge would carry gets close, and the preview cannot know which
   // side of the allowance a layer landed on without doing the trace itself.)
   c.imageSmoothingEnabled = true;
-  c.drawImage(cache, mm2px(cx - d.w / 2), mm2px(cy - d.h / 2), d.w * SCALE, d.h * SCALE);
+  c.drawImage(cache, mm2px(rect.x0), mm2px(rect.y0), rect.w * SCALE, rect.h * SCALE);
 }
 
 // Server-side art keepouts, mirrored for the preview: decor (silk/copper)
@@ -4214,7 +4257,7 @@ function drawArtLayer(c, a, mat, viewSide) {
 // its far face, the copper that actually crosses the board.
 function captionBoxes() { // mirrors pcb.caption_boxes
   const out = [];
-  for (const key of activePairs()) {
+  for (const key of (pinLabelsOn() ? activePairs() : [])) {
     const label = pairCaption(key);
     if (!label) continue;
     const [x, y] = pairCaptionAt(key);
@@ -4432,18 +4475,23 @@ function refdesOkAt(L, which, x, y) {
   L[key] = was;
   return ok;
 }
-function eraseArtKeepouts(oc, forWindows, unitSide) {
+function eraseArtKeepouts(oc, kind, unitSide) {
+  const forWindows = kind === "window";
   oc.save();
   oc.globalCompositeOperation = "destination-out";
   oc.fillStyle = "#000";
-  const r = forWindows ? 2.0 : 1.65;
+  const r = padArtRadius(kind);
   for (const [x, y] of activePads()) {
     oc.beginPath();
     oc.arc(mm2px(x), mm2px(y), r * SCALE, 0, 7);
     oc.fill();
   }
-  for (const [x0, y0, x1, y1] of captionBoxes()) {
-    oc.fillRect(mm2px(x0), mm2px(y0), (x1 - x0) * SCALE, (y1 - y0) * SCALE);
+  // Captions print on the back only, so only back-face ink is carved around
+  // them -- but a window can cut both faces, so it keeps off either one.
+  if (forWindows || unitSide === CAPTION_SIDE) {
+    for (const [x0, y0, x1, y1] of captionBoxes()) {
+      oc.fillRect(mm2px(x0), mm2px(y0), (x1 - x0) * SCALE, (y1 - y0) * SCALE);
+    }
   }
   // Printed part references are generated ink like the captions: art is
   // carved around them, and a window may not open mask under them either.
@@ -4648,9 +4696,14 @@ function drawTextLayers(c, mirror) {
   const viewSide = mirror ? "back" : "front";
   const vec = t => t.font && t.font !== "kicad" && t.text.trim();
   const groups = [
-    { win: false, list: state.texts.filter(t => vec(t) && t.side === viewSide
-        && (t.material === "silk" || t.material === "copper")) },
-    { win: true, list: state.texts.filter(t => vec(t)
+    // Silk and copper are separate passes because they keep different
+    // distances from the connector pads (PAD_ART_GAP), and a keepout is
+    // erased out of a whole layer at once.
+    { kind: "silk", list: state.texts.filter(t => vec(t) && t.side === viewSide
+        && t.material === "silk") },
+    { kind: "copper", list: state.texts.filter(t => vec(t) && t.side === viewSide
+        && t.material === "copper") },
+    { kind: "window", win: true, list: state.texts.filter(t => vec(t)
         && (t.material === "glow" || t.material === "bare")) },
     // KiCad stroke texts: not carved by keepouts (gr_text isn't), but they
     // ARE clipped by the board edge and holes at the fab; clip the preview
@@ -4691,7 +4744,7 @@ function drawTextLayers(c, mirror) {
       }
       oc.restore();
     }
-    if (!g.stroke) eraseArtKeepouts(oc, g.win, viewSide);
+    if (!g.stroke) eraseArtKeepouts(oc, g.kind, viewSide);
     if (g.win) {
       state.leds.forEach((L, i) => {
         const br = allBridges()[i];
@@ -4750,7 +4803,7 @@ function drawWindowLayers(c, mirror, mats, eraseText) {
   // Each view's window is carved by that face's own keepouts (mirrors the
   // generator's per-face emit): a unit mounted on the other face keeps only
   // its board-crossing copper here, so no slab shadows it through the window.
-  eraseArtKeepouts(oc, true, viewSide);
+  eraseArtKeepouts(oc, "window", viewSide);
   state.leds.forEach((L, i) => { // corridor fallback: only unroutable units
     const br = allBridges()[i];
     if (br.F && br.B) return;
@@ -5279,21 +5332,24 @@ function drawView(canvas, side) {
     // (silk under an opening is carved server-side), then ink text clears
     // its rectangle out of the decor. Each view shows its own side's art.
     const viewSide = mirror ? "back" : "front";
-    const [off, oc] = newLayer(canvas);
+    // Silk first, copper over it, but each on its OWN layer: the two keep
+    // different distances from the connector pads (PAD_ART_GAP) and a keepout
+    // is erased out of a whole layer at once.
     for (const mat of ["silk", "copper"]) {
+      const [off, oc] = newLayer(canvas);
       for (const a of state.art) {
         if (inkSide(a) === viewSide) drawArtSided(oc, a, mat, viewSide);
       }
+      for (const t of state.texts) {
+        if (t.side !== viewSide || !t.text.trim()) continue;
+        if (t.material === "glow" || t.material === "bare") continue;
+        clearTextCarve(oc, t);
+      }
+      eraseArtKeepouts(oc, mat, viewSide);
+      // Decor only exists on the board itself.
+      clipToBoard(oc);
+      compositeLayer(c, off, mirror);
     }
-    for (const t of state.texts) {
-      if (t.side !== viewSide || !t.text.trim()) continue;
-      if (t.material === "glow" || t.material === "bare") continue;
-      clearTextCarve(oc, t);
-    }
-    eraseArtKeepouts(oc, false, viewSide);
-    // Decor only exists on the board itself.
-    clipToBoard(oc);
-    compositeLayer(c, off, mirror);
     drawWindowLayers(c, mirror, ["bare"], true);
   }
   for (const [x, y] of activePads()) {
@@ -5401,7 +5457,8 @@ function drawView(canvas, side) {
   // Each caption names a pad PAIR, left word for the left pad, so in the
   // mirrored back view the words swap with the pads they describe.
   const capText = l => mirror ? l.split(" ").reverse().join(" ") : l;
-  for (const key of activePairs()) {
+  for (const key of (pinLabelsOn() && mirror === (CAPTION_SIDE === "back")
+                     ? activePairs() : [])) {
     const label = pairCaption(key);
     if (!label) continue;
     const [lx, ly] = pairCaptionAt(key);
@@ -8481,6 +8538,13 @@ $("tenting").addEventListener("change", () => {
   state.tenting = $("tenting").value !== "exposed";
   draw(); // vias crossing windows repaint as mask caps or bare annuli
 });
+$("pinlabels").addEventListener("change", () => {
+  state.pinlabels = $("pinlabels").value === "on";
+  // Same reason as the part labels below: artwork is carved around this ink,
+  // so the layers are rebuilt rather than just redrawn.
+  rebuildAllArt();
+  draw(); m3dStale("pin labels changed");
+});
 $("refdes").addEventListener("change", () => {
   state.refdes = $("refdes").value !== "off";
   // Art is carved around this ink, so the layers have to be rebuilt, not
@@ -8516,6 +8580,7 @@ function designFormData() { // the full design, as /generate and /render take it
     finish: state.finish,
     tenting: state.tenting,
     refdes: state.refdes !== false,
+    pinlabels: state.pinlabels === true,
     pins: ALL_PINS.filter(pinOn),
     clk: { jumper: !!state.clk.jumper, rot: state.clk.rot || 0,
            ...(state.clk.via_at ? { via_at: [...state.clk.via_at] } : {}),
@@ -9075,6 +9140,7 @@ const TIPS = {
   pins: { title: "Connector pins: keep only what you use", img: "pins.webp", html: `<ul>
     <li>Each row carries 3V3 + GND, so one row alone powers every LED — untick the top row and the helmet's crown stays clean.</li>
     <li>Board parts that miss a kept pad are bridged in automatically; dropping the last 3V3 or GND pin blocks downloads until a rail comes back.</li>
+    <li><b>Pin labels</b> (under Board) prints each pad's name — 3V3, GND, CLK — on the <b>back</b> silkscreen for whoever solders the badge. Off by default: while they are on, artwork is carved away from them.</li>
   </ul>` },
   art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
     <li>The same helmet PNG, added as artwork, loads in <b>By color</b> mode with a material guessed per color — check every row and fix the guesses (here the body is set to <i>Ignore</i>: plain soldermask).</li>
@@ -9270,6 +9336,7 @@ function designJSON() {
     v: 1, name: $("name").value, mask: state.mask, finish: state.finish,
     tenting: state.tenting,
     refdes: state.refdes !== false,
+    pinlabels: state.pinlabels === true,
     pins: [...(state.pins || ALL_PINS)],
     clk: { ...state.clk },
     shape: {
@@ -9646,6 +9713,8 @@ function applyDesign(d, assets) {
   state.tenting = d.tenting !== false;  // absent (older saves) means tented
   state.refdes = d.refdes !== false;    // ditto: labels are the default
   $("refdes").value = state.refdes ? "on" : "off";
+  state.pinlabels = d.pinlabels === true;  // pin captions are opt-in
+  $("pinlabels").value = state.pinlabels ? "on" : "off";
   $("tenting").value = state.tenting ? "tented" : "exposed";
   // pins arrive already whitelisted (normalizeDesign) and already migrated from
   // the pre-per-pin `rows` shape (MIGRATIONS[1]).

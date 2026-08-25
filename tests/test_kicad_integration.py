@@ -538,3 +538,147 @@ def test_artwork_pushed_past_every_edge_still_passes_drc(tmp_path):
         f"artwork x runs {min(xs):.2f}..{max(xs):.2f}, outside the board")
     assert min(ys) >= -0.01 and max(ys) <= 20.33, (
         f"artwork y runs {min(ys):.2f}..{max(ys):.2f}, outside the board")
+
+
+#: (id, art material, pin captions, how close to a pad centre the artwork is
+#: allowed to reach, mm). The floors are stated here rather than read from
+#: pcb.PAD_ART_GAP: they are the fab rule this test exists to hold. Silk is
+#: 0.875 pad copper + the 0.15 ink gap; "copper" artwork is a mask opening
+#: over the pour, so it keeps a 0.5 mm solder-mask dam instead.
+_PAD_ART = [
+    ("silk-captions-off", "silk", False, 1.02),
+    ("silk-captions-on", "silk", True, 1.02),
+    ("copper-captions-on", "copper", True, 1.37),
+]
+
+
+@pytest.mark.kicad
+@pytest.mark.needs("kicad")
+@pytest.mark.parametrize("label,art_material,labels,floor", _PAD_ART,
+                         ids=[c[0] for c in _PAD_ART])
+def test_artwork_may_print_close_beside_the_connector_pads(
+        tmp_path, label, art_material, labels, floor):
+    """Art runs up near the pads, and the fab still takes the board.
+
+    Artwork used to stop 0.775 mm short of every connector pad's copper,
+    whatever it was made of, which on a 20 mm board is a visible bite out of
+    all four corners. What actually limits it is narrower and different per
+    material -- ink is clipped where it crosses a pad's mask opening, and an
+    exposed-copper drawing has to leave a mask dam so solder cannot walk from
+    the pad onto it -- so each is allowed in as far as its own rule permits,
+    with DRC as the oracle that the fab still accepts the result.
+    """
+    import io
+
+    from PIL import Image
+
+    from minibadge_designer import pcb as pcb_mod
+    from minibadge_designer.webapp import app
+
+    buf = io.BytesIO()
+    Image.new("RGB", (200, 200), (20, 20, 20)).save(buf, "PNG")   # all ink
+    png = buf.getvalue()
+    params = {
+        "name": "beside", "pinlabels": labels,
+        "leds": [{"x": 10.16, "y": 10.16, "color": "red", "side": "back"}],
+        "texts": [],
+        "art": [{"mode": "threshold", "cx": 10.16, "cy": 10.16, "w": 22.0,
+                 "material": art_material, "side": side}
+                for side in ("front", "back")],
+    }
+    data = {"params": json.dumps(params)}
+    for i in range(2):
+        data[f"art{i}"] = (io.BytesIO(png), f"ink{i}.png")
+    resp = app.test_client().post("/generate", data=data,
+                                  content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    board = tmp_path / "beside.kicad_pcb"
+    board.write_bytes(zf.read("beside/beside.kicad_pcb"))
+    (tmp_path / "beside.kicad_pro").write_bytes(zf.read("beside/beside.kicad_pro"))
+    report = tmp_path / "drc.txt"
+    result = subprocess.run(
+        [KICAD_CLI, "pcb", "drc", "--severity-all", "--exit-code-violations",
+         "-o", str(report), str(board)],
+        capture_output=True, text=True, timeout=120, check=False)
+    assert result.returncode == 0, f"DRC violations:\n{report.read_text()}"
+
+    # And it really did come closer: legal-but-unchanged would pass the check
+    # above while the board still wore the old bite out of every corner.
+    import invariants
+
+    root = invariants._parse_sexp(board.read_text())
+    # Ink prints on the silk layers; an exposed-copper drawing is an opening
+    # in the mask, so that is where its outline lives.
+    face = "SilkS" if art_material == "silk" else "Mask"
+    silk = [[(float(q[1]) - pcb_mod.ORIGIN, float(q[2]) - pcb_mod.ORIGIN)
+             for q in invariants._kids(invariants._kid(g, "pts"), "xy")]
+            for g in invariants._kids(root, "gr_poly")
+            if str(invariants._val(g, "layer")).endswith(face)]
+    assert silk, f"the board carries no {art_material} artwork at all"
+    pads = [(x, y) for num, x, y, _net, _row in pcb_mod.CONNECTOR_PADS
+            if num in pcb_mod.ALL_PINS]
+    near = min(((px - x) ** 2 + (py - y) ** 2) ** 0.5
+               for ring in silk for px, py in ring for x, y in pads)
+    assert near >= floor, (
+        f"{label}: artwork reaches {near:.3f} mm from a connector pad centre, "
+        f"inside the {floor:.2f} mm its material has to keep from the pad")
+    assert near < 1.6, (
+        f"{label}: artwork stops {near:.3f} mm from the nearest pad centre: it "
+        "is still keeping the old 0.775 mm distance from the connector copper")
+
+
+@pytest.mark.kicad
+@pytest.mark.needs("kicad")
+def test_a_part_parked_in_the_reclaimed_band_still_passes_drc(tmp_path):
+    """The room the captions gave back is room the fab accepts.
+
+    A part may now sit half a millimetre closer to the connector than it could
+    while the pin captions reserved that band. Closer to the pads is where
+    clearance and silk-overlap violations live, so the board that puts a part
+    there is the one worth handing to DRC.
+    """
+    import json as _json
+
+    from minibadge_designer import pcb as pcb_mod
+    from minibadge_designer.webapp import app
+
+    # As close to the top pads as the keepout allows, found the way the test
+    # above does: walk in until the placement stops conflicting.
+    y = 2.0
+    while pcb_mod.pad_conflict(pcb_mod.Led(2.54, y, "red", size="0805"),
+                               pcb_mod.ALL_PINS, None, False):
+        y += 0.01
+        assert y < 12.0, "nothing fits beside the pads at all"
+    params = {"name": "band", "pinlabels": False, "texts": [], "art": [],
+              "leds": [{"x": 2.54, "y": round(y, 2), "color": "red",
+                        "size": "0805", "side": "front"},
+                       {"x": 17.78, "y": round(y, 2), "color": "green",
+                        "size": "0805", "side": "back"}]}
+    resp = app.test_client().post(
+        "/generate", data={"params": _json.dumps(params)},
+        content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    board = tmp_path / "band.kicad_pcb"
+    board.write_bytes(zf.read("band/band.kicad_pcb"))
+    (tmp_path / "band.kicad_pro").write_bytes(zf.read("band/band.kicad_pro"))
+
+    # The part has to still BE there: the pipeline slides units it dislikes,
+    # and a board whose part was pushed back to the middle would pass DRC
+    # while proving nothing about the band.
+    import invariants
+
+    root = invariants._parse_sexp(board.read_text())
+    placed = [float(invariants._val(f, "at", 2)) - pcb_mod.ORIGIN
+              for f in invariants._kids(root, "footprint")
+              if invariants._val(f, "at", 2) is not None]
+    assert any(abs(fy - y) < 1.0 for fy in placed), (
+        f"no footprint sits near y={y:.2f}; the pipeline moved the part out of "
+        "the band instead of building it there")
+    report = tmp_path / "drc.txt"
+    result = subprocess.run(
+        [KICAD_CLI, "pcb", "drc", "--severity-all", "--exit-code-violations",
+         "-o", str(report), str(board)],
+        capture_output=True, text=True, timeout=120, check=False)
+    assert result.returncode == 0, f"DRC violations:\n{report.read_text()}"
