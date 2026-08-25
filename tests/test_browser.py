@@ -1671,7 +1671,9 @@ def test_the_previewed_perimeter_bridges_match_the_generated_ones(ui):
 
 
 @pytest.mark.browser
-def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
+@pytest.mark.parametrize("labels", [False, True],
+                         ids=["captions-off", "captions-on"])
+def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui, labels):
     """A spot the canvas calls free is one the generator will not shove.
 
     `padConflict` and `pcb.pad_conflict` both ask whether a unit's rotated
@@ -1682,7 +1684,9 @@ def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
     generator then has to move, silently.
 
     Dropped pins are the case worth having: dropping a pair frees its corner,
-    and the two implementations have to free the same corner.
+    and the two implementations have to free the same corner. So are the pin
+    captions: while they print, a unit also has to stay out of the 0.5 mm band
+    they occupy, and both sides have to hand that band back together.
     """
     from minibadge_designer import pcb
 
@@ -1700,16 +1704,18 @@ def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
     for pins in pinsets:
         leds = _clamped([dict(d, x=x, y=y) for d in base for x, y in spots])
         _set_design(ui, leds, list(pins) if pins is not None else None)
-        drawn = ui.js("(Ls) => Ls.map(L => { state.leds = [L];"
-                      " return padConflict(L); })", leds)
+        drawn = ui.js("([Ls, on]) => { state.pinlabels = on;"
+                      " return Ls.map(L => { state.leds = [L];"
+                      " return padConflict(L); }); }", [leds, labels])
         for d, js in zip(leds, drawn):
             board = pcb.pad_conflict(_py_led(d), pcb.ALL_PINS if pins is None
-                                     else pins)
+                                     else pins, None, labels)
             said_yes += bool(board)
             if js != board:
                 disagree.append(
                     f"{_describe(d)} at ({d['x']:.2f}, {d['y']:.2f}) with pins "
-                    f"{'all' if pins is None else pins}: the canvas says "
+                    f"{'all' if pins is None else pins} and captions "
+                    f"{'on' if labels else 'off'}: the canvas says "
                     f"{'blocked' if js else 'free'}, the board says "
                     f"{'blocked' if board else 'free'}")
 
@@ -2405,11 +2411,6 @@ def test_the_preview_never_offers_a_spot_the_board_would_move_the_unit_off(ui, r
 
 
 @pytest.mark.browser
-@pytest.mark.xfail(strict=True, reason=(
-    "the bottom-row caption keepout is 0.10 mm higher in the preview than on "
-    "the board: index.html's PAD_PAIRS.bl/br `at` y is 17.78 where the top row "
-    "carries the same +0.18 mm canvas text-baseline nudge over pcb.PAD_PAIRS "
-    "that captionBoxes() then subtracts, so the bottom rows need 17.88"))
 def test_art_is_kept_off_the_pin_captions_the_same_way_in_both(ui):
     """The band of art the canvas carves out for a caption is the printed one.
 
@@ -2423,10 +2424,12 @@ def test_art_is_kept_off_the_pin_captions_the_same_way_in_both(ui):
 
     off_by = []
     for pins in (None, ("1", "2", "7", "8"), ("2", "7", "9", "16"), ("1",)):
+        # Captions are opt-in now, and reserve nothing while they are off --
+        # which is the state this parity question is only interesting in.
         drawn = ui.js("(p) => { state.pins = p ? p : ALL_PINS.slice();"
-                      " return captionBoxes(); }",
+                      " state.pinlabels = true; return captionBoxes(); }",
                       list(pins) if pins is not None else None)
-        board = pcb.caption_boxes(pcb.ALL_PINS if pins is None else pins)
+        board = pcb.caption_boxes(pcb.ALL_PINS if pins is None else pins, True)
         label = "all" if pins is None else pins
         if len(drawn) != len(board):
             off_by.append(f"pins {label}: the canvas carves {len(drawn)} "
@@ -5472,3 +5475,208 @@ def test_art_dragged_across_the_board_is_painted_where_it_is_dragged(
         f"{label}: the artwork still inks {now_here} of {was_here} pixels "
         "where the layer used to be, after being dragged away from there")
     ui.assert_clean(f"dragged art, {label}")
+#: One row of board pixels off the FRONT canvas, with what it takes to turn a
+#: column back into millimetres.
+_ROW = """([y, x0, x1]) => {
+    const px = Math.round(VIEW.tx + x0 * SCALE);
+    const w = Math.max(1, Math.round((x1 - x0) * SCALE));
+    return {mm0: (px - VIEW.tx) / SCALE, per: 1 / SCALE,
+            data: [...cvF.getContext('2d').getImageData(
+                px, Math.round(VIEW.ty + y * SCALE), w, 1).data]};
+}"""
+
+#: (id, how the user asks for the highlight)
+_HIGHLIGHTS = ["threshold-row", "wand-hover", "override-chip"]
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("how", _HIGHLIGHTS, ids=_HIGHLIGHTS)
+def test_the_highlight_lights_up_the_artwork_it_names(ui, how):
+    """Hovering a control lights up the pixels that control changes.
+
+    The highlight is a mask over the classification grid, and that grid now
+    covers only the cropped window -- the part of the layer over the board.
+    Painted over the whole placed layer instead, or seeded with a pick's
+    whole-image fraction, it lights up somewhere else entirely: the user aims
+    the wand at one region of the drawing and a different one lights up, so
+    the material they choose lands on the wrong part of the badge.
+    """
+    page = ui.page
+    stripe, band = 8.0, 10.16
+    page.click("#tab-art")
+    page.set_input_files("#artfile", {"name": "stripe.png",
+                                      "mimeType": "image/png",
+                                      "buffer": _centre_stripe_png()})
+    page.wait_for_function("() => state.art.length === 1 && state.art[0].img",
+                           timeout=UPLOAD_TIMEOUT)
+    # Overhanging on BOTH sides, which is the only time the cropped window and
+    # the placed layer differ -- and so the only time this can go wrong.
+    ui.js("""([cx]) => {
+        state.leds.length = 0; state.texts.length = 0;
+        const a = state.art[0];
+        a.side = 'front'; a.cx = cx; a.cy = 10.16; a.wmm = 40;
+        a.material = 'silk'; a.mode = 'threshold';
+        rebuildArt(a); renderLedList(); renderArtList(); draw();
+    }""", [stripe])
+    assert ui.js("() => state.art[0].cacheUV.u0 > 0"), (
+        "the layer does not overhang, so the crop is the whole image and a "
+        "mask placed over either rectangle would land in the same place")
+
+    def row():
+        r = ui.js(_ROW, [band, 0.0, 20.32])
+        return r["data"], r["mm0"], r["per"]
+
+    def changed(a, b, mm0, per):
+        """Millimetre span of the columns where two scans differ."""
+        cols = [i // 4 for i in range(0, len(a), 4)
+                if any(abs(a[i + k] - b[i + k]) > 8 for k in range(3))]
+        return (mm0 + cols[0] * per, mm0 + cols[-1] * per, set(cols)) if cols \
+            else (None, None, set())
+
+    if how == "override-chip":
+        page.select_option("#artlist .wandm", "copper")
+        page.click("#artlist .wandb")
+        ui.click_mm(stripe, band)
+        page.wait_for_selector("#artlist .ovchips .chip2")
+
+    ui.js("() => { window.__parked = state.art.pop(); draw(); }")
+    bare, mm0, per = row()
+    ui.js("() => { state.art.push(window.__parked);"
+          " rebuildArt(window.__parked); draw(); }")
+    plain, _, _ = row()
+    lo, hi, ink = changed(plain, bare, mm0, per)
+    assert ink, "the layer inks nothing across the scan line; nothing to test"
+
+    if how == "threshold-row":
+        page.hover("#artlist .m")
+    elif how == "wand-hover":
+        page.select_option("#artlist .wandm", "copper")
+        page.click("#artlist .wandb")
+        x, y = ui.board_to_client(stripe, band, "front")
+        page.mouse.move(x, y)
+    else:
+        page.hover("#artlist .ovchips .chip2")
+    page.wait_for_function("() => artHL !== null", timeout=ELEMENT_TIMEOUT)
+    lit_lo, lit_hi, lit = changed(row()[0], plain, mm0, per)
+
+    assert lit, (
+        f"{how}: nothing on the canvas changed when the highlight came on, so "
+        "the user gets no feedback about what they are about to change")
+    covered = len(lit & ink) / len(ink)
+    assert covered > 0.7, (
+        f"{how}: the highlight lights up {lit_lo:.2f}..{lit_hi:.2f} mm while "
+        f"the artwork it names inks {lo:.2f}..{hi:.2f} mm -- only "
+        f"{100 * covered:.0f}% of it overlaps, so it is pointing at the wrong "
+        "part of the drawing")
+    ui.assert_clean(f"art highlight, {how}")
+
+
+def _solid_ink_png() -> bytes:
+    """A solid dark square: every pixel of it prints, so where the ink stops
+    is the keepout and nothing else."""
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (200, 200), (20, 20, 20)).save(buf, "PNG")
+    return buf.getvalue()
+#: Walk a ray from a pad centre into the board and report, in mm, where the
+#: canvas first paints something the bare board does not.
+_RAY = """([px, py, step, n]) => {
+    const at = t => {
+        const x = Math.round(VIEW.tx + px * SCALE);
+        const y = Math.round(VIEW.ty + (py + t) * SCALE);
+        return [...cvF.getContext('2d').getImageData(x, y, 1, 1).data];
+    };
+    const out = [];
+    for (let i = 0; i <= n; i++) out.push(at(i * step));
+    return out;
+}"""
+
+
+@pytest.mark.browser
+@pytest.mark.parametrize("material", ["silk", "copper"],
+                         ids=["silk", "copper"])
+def test_the_preview_stops_artwork_beside_a_pad_where_the_board_does(
+        ui, client, material):
+    """Art crowds a connector pad by the same margin in both.
+
+    How close ink may come to a pad is not one number: silk stops where the
+    fab would clip it against the mask opening, copper stops at the pour's
+    clearance from a powered pad. The preview draws one and the fab prints the
+    other, so a drift here either hides artwork the board will carry or shows
+    artwork that gets eaten on the way to the fab.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+    from shapely.geometry import Point, Polygon
+
+    from minibadge_designer import pcb
+
+    pad = (16.51, 1.27)          # a top-row pad, ray running into the board
+    step, count = 0.02, 150
+    page = ui.page
+    page.click("#tab-art")
+    png = _solid_ink_png()
+    page.set_input_files("#artfile", {"name": "ink.png", "mimeType": "image/png",
+                                      "buffer": png})
+    page.wait_for_function("() => state.art.length === 1 && state.art[0].img",
+                           timeout=UPLOAD_TIMEOUT)
+    ui.js("""([mat]) => {
+        state.leds.length = 0; state.texts.length = 0;
+        const a = state.art[0];
+        a.side = 'front'; a.cx = 10.16; a.cy = 10.16; a.wmm = 22;
+        a.material = mat; a.mode = 'threshold';
+        rebuildArt(a); renderLedList(); renderArtList(); draw();
+    }""", [material])
+    lit = ui.js(_RAY, [pad[0], pad[1], step, count])
+    ui.js("() => { window.__parked = state.art.pop(); draw(); }")
+    bare = ui.js(_RAY, [pad[0], pad[1], step, count])
+    ui.js("() => { state.art.push(window.__parked);"
+          " rebuildArt(window.__parked); draw(); }")
+    hits = [i for i, (a, b) in enumerate(zip(lit, bare))
+            if any(abs(a[k] - b[k]) > 8 for k in range(3))]
+    assert hits, (
+        f"{material}: the preview paints nothing along the ray out of the pad, "
+        "so there is no edge to compare")
+    canvas_mm = hits[0] * step
+
+    params = json.loads(ui.js('() => designFormData().get("params")'))
+    params["name"] = "gap"
+    resp = client.post("/generate", data={
+        "params": json.dumps(params), "art0": (io.BytesIO(png), "ink.png"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    root = invariants._parse_sexp(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "gap/gap.kicad_pcb").decode())
+    # "Copper" artwork is a mask OPENING over the pour, not a copper polygon:
+    # what the user sees as gold is bare metal where the mask is missing.
+    want = "F.SilkS" if material == "silk" else "F.Mask"
+    polys = []
+    for g in invariants._kids(root, "gr_poly"):
+        if str(invariants._val(g, "layer")) != want:
+            continue
+        ring = [(float(q[1]) - pcb.ORIGIN, float(q[2]) - pcb.ORIGIN)
+                for q in invariants._kids(invariants._kid(g, "pts"), "xy")]
+        if len(ring) >= 3:
+            polys.append(Polygon(ring))
+    assert polys, f"{material}: the board carries no artwork on {want}"
+    board_hits = [i for i in range(count + 1)
+                  if any(p.contains(Point(pad[0], pad[1] + i * step))
+                         for p in polys)]
+    assert board_hits, (
+        f"{material}: the board prints no artwork along the ray out of the pad")
+    board_mm = board_hits[0] * step
+
+    # Four samples of slack: the board's outline is a traced polygon whose
+    # chords cut the corner off a circle, and the canvas is read at whole
+    # pixels. A radius that actually moved is a fifth of a millimetre out.
+    assert abs(canvas_mm - board_mm) <= 4 * step, (
+        f"{material} artwork starts {canvas_mm:.2f} mm from the pad centre in "
+        f"the preview and {board_mm:.2f} mm from it on the board: the two "
+        "disagree about how close to a connector pad the user may draw")
+    ui.assert_clean(f"pad gap parity, {material}")
