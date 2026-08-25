@@ -1671,7 +1671,9 @@ def test_the_previewed_perimeter_bridges_match_the_generated_ones(ui):
 
 
 @pytest.mark.browser
-def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
+@pytest.mark.parametrize("labels", [False, True],
+                         ids=["captions-off", "captions-on"])
+def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui, labels):
     """A spot the canvas calls free is one the generator will not shove.
 
     `padConflict` and `pcb.pad_conflict` both ask whether a unit's rotated
@@ -1682,7 +1684,9 @@ def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
     generator then has to move, silently.
 
     Dropped pins are the case worth having: dropping a pair frees its corner,
-    and the two implementations have to free the same corner.
+    and the two implementations have to free the same corner. So are the pin
+    captions: while they print, a unit also has to stay out of the 0.5 mm band
+    they occupy, and both sides have to hand that band back together.
     """
     from minibadge_designer import pcb
 
@@ -1700,16 +1704,18 @@ def test_the_preview_blocks_the_same_spots_the_connector_pads_block(ui):
     for pins in pinsets:
         leds = _clamped([dict(d, x=x, y=y) for d in base for x, y in spots])
         _set_design(ui, leds, list(pins) if pins is not None else None)
-        drawn = ui.js("(Ls) => Ls.map(L => { state.leds = [L];"
-                      " return padConflict(L); })", leds)
+        drawn = ui.js("([Ls, on]) => { state.pinlabels = on;"
+                      " return Ls.map(L => { state.leds = [L];"
+                      " return padConflict(L); }); }", [leds, labels])
         for d, js in zip(leds, drawn):
             board = pcb.pad_conflict(_py_led(d), pcb.ALL_PINS if pins is None
-                                     else pins)
+                                     else pins, None, labels)
             said_yes += bool(board)
             if js != board:
                 disagree.append(
                     f"{_describe(d)} at ({d['x']:.2f}, {d['y']:.2f}) with pins "
-                    f"{'all' if pins is None else pins}: the canvas says "
+                    f"{'all' if pins is None else pins} and captions "
+                    f"{'on' if labels else 'off'}: the canvas says "
                     f"{'blocked' if js else 'free'}, the board says "
                     f"{'blocked' if board else 'free'}")
 
