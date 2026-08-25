@@ -2508,11 +2508,7 @@ def _generate_impl(render: bool):
         # plus whatever crosses the board regardless (plated pads, routed holes, a
         # LED sitting on the far side). That is what lets a back-only window run
         # right under a part mounted on the front.
-        _window_base = (pad_keep["window"]
-                        # A window may cut both faces, so it stays off ink on
-                        # either one -- the same reading the references get.
-                        + captions + jumper_via_keep
-                        + refdes_keep["front"] + refdes_keep["back"])
+        _window_base = pad_keep["window"] + jumper_via_keep
 
         def _crossers(face: str) -> list:
             out: list = []
@@ -2537,6 +2533,14 @@ def _generate_impl(render: bool):
             # the canvas erases the same band from every window it draws.
             return (_window_base
                     + (jumper_decor if face == jface else jumper_via_keep)
+                    # Each face's cut keeps off the ink printed on THAT face,
+                    # exactly like the decor keepouts: a window may open mask
+                    # under a label only where the label is not -- and a label
+                    # on the OTHER face is not. Reserving both faces for every
+                    # label cost the artwork a label-shaped hole on the face
+                    # the label never touches.
+                    + refdes_keep[face]
+                    + (captions if face == "back" else [])
                     + [_led_keepout(led, safe, pins, leds, outline_rings, face,
                                     clk_i)
                        for led in leds if led.side == face]

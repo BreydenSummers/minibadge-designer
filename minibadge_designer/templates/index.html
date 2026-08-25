@@ -3334,9 +3334,13 @@ function paintWindowCuts(oc, face, corridorSet) {
     for (const a of state.art) {
       if (!layerHasMat(a, mat)) continue;
       if (!windowFaces(a, mat).includes(face)) continue;
-      // viewSide "front" here means BOARD coordinates: the front view is the
-      // unmirrored one, and back-face layers arrive pre-mirrored through it.
-      drawArtSided(oc, a, mat, "front");
+      // viewSide null: which faces this window cuts was decided on the line
+      // above, and drawArtLayer's own bareOpenOn gate must not second-guess
+      // it -- passing "front" here silently dropped every back-only window
+      // from the back-face mask, so a unit severed by one kept its plane in
+      // the preview while the shipped board (correctly) cut it a trace.
+      // drawArtSided still mirrors back-ink layers into board coordinates.
+      drawArtSided(oc, a, mat, null);
       drew = any = true;
     }
     if (eraseText && drew) {
@@ -4827,9 +4831,11 @@ function eraseArtKeepouts(oc, kind, unitSide) {
     oc.arc(mm2px(x), mm2px(y), r * SCALE, 0, 7);
     oc.fill();
   }
-  // Captions print on the back only, so only back-face ink is carved around
-  // them -- but a window can cut both faces, so it keeps off either one.
-  if (forWindows || unitSide === CAPTION_SIDE) {
+  // Captions print on the back only, so only back-face material is carved
+  // around them. Windows are carved per face too: each face's cut keeps off
+  // the ink printed on THAT face -- reserving the front cut for a label that
+  // only exists on the back cost the artwork a label-shaped hole for nothing.
+  if (unitSide === CAPTION_SIDE) {
     for (const [x0, y0, x1, y1] of captionBoxes()) {
       oc.fillRect(mm2px(x0), mm2px(y0), (x1 - x0) * SCALE, (y1 - y0) * SCALE);
     }
@@ -4837,7 +4843,9 @@ function eraseArtKeepouts(oc, kind, unitSide) {
   // Printed part references are generated ink like the captions: art is
   // carved around them, and a window may not open mask under them either.
   for (const lab of refdesLayout()) {
-    if (!forWindows && unitSide && lab.face !== unitSide) continue;
+    // A part's reference prints on one face; only that face's material --
+    // window cut included -- is carved around it.
+    if (unitSide && lab.face !== unitSide) continue;
     const xs = lab.quad.map(q => q[0]), ys = lab.quad.map(q => q[1]);
     oc.fillRect(mm2px(Math.min(...xs)), mm2px(Math.min(...ys)),
                 (Math.max(...xs) - Math.min(...xs)) * SCALE,
