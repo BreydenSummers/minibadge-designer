@@ -71,14 +71,35 @@ CONNECTOR_PADS = [
 # names only the pins that survived.
 PAD_PAIRS = {
     "tl": {"pins": ("1", "2"), "row": "top", "at": (2.54, 2.62), "header": (2.54, 1.27),
-           "plate": (0.16, 0.16, 5.0, 3.4), "keepout": (0.04, 0.04, 5.04, 3.0)},
+           "plate": (0.16, 0.16, 5.0, 3.4), "keepout": (0.04, 0.04, 5.04, 2.5)},
     "tr": {"pins": ("7", "8"), "row": "top", "at": (17.78, 2.62), "header": (17.78, 1.27),
-           "plate": (15.32, 0.16, 20.16, 3.4), "keepout": (15.28, 0.04, 20.28, 3.0)},
+           "plate": (15.32, 0.16, 20.16, 3.4), "keepout": (15.28, 0.04, 20.28, 2.5)},
     "bl": {"pins": ("9", "10"), "row": "bottom", "at": (2.54, 17.7), "header": (2.54, 19.05),
-           "plate": (0.16, 16.92, 5.0, 20.16), "keepout": (0.04, 17.32, 5.04, 20.28)},
+           "plate": (0.16, 16.92, 5.0, 20.16), "keepout": (0.04, 17.82, 5.04, 20.28)},
     "br": {"pins": ("15", "16"), "row": "bottom", "at": (17.78, 17.7), "header": (17.78, 19.05),
-           "plate": (15.32, 16.92, 20.16, 20.16), "keepout": (15.28, 17.32, 20.28, 20.28)},
+           "plate": (15.32, 16.92, 20.16, 20.16), "keepout": (15.28, 17.82, 20.28, 20.28)},
 }
+#: How far the captions reach past the pads, toward the middle of the board.
+#: A unit has to stay out of this band while they are printed -- its own silk
+#: would land on the label -- and it is free the moment they are not.
+CAPTION_BAND = 0.5
+
+
+def pair_keepout(key: str, pin_labels: bool = False):
+    """The box a unit's footprint must stay out of, for one pad pair.
+
+    `PAD_PAIRS[key]["keepout"]` is the pads themselves: their 1.75 mm copper
+    plus 0.35 mm of pour/DRC clearance. The pin captions print in a 0.5 mm
+    band inside that, so they are added here rather than baked into the box --
+    a design that does not print them gets that half millimetre back, which on
+    a 20 mm board is the difference between a part fitting beside the
+    connector and being pushed off it.
+    """
+    x0, y0, x1, y1 = PAD_PAIRS[key]["keepout"]
+    if not pin_labels:
+        return (x0, y0, x1, y1)
+    return ((x0, y0, x1, y1 + CAPTION_BAND) if PAD_PAIRS[key]["row"] == "top"
+            else (x0, y0 - CAPTION_BAND, x1, y1))
 # Printed name of each pin, in board order within its pair.
 PIN_LABELS = {"1": "VBAT", "2": "GND", "7": "3V3", "8": "GND",
               "9": "CLK", "10": "NC", "15": "3V3", "16": "GND"}
@@ -458,9 +479,8 @@ UNIT_SAFE = (0.7, 0.7, 19.62, 19.62)
 # Keepout boxes around each connector pad *pair*: the pads' copper (1.75 mm
 # circles) expanded by 0.35 mm pour/DRC clearance. A unit bbox may not
 # overlap a kept row's boxes, but the strip between the two pairs (and the
-# strip of a dropped row) is fair game.
-# The extra 0.5 mm beyond the pads covers the printed pin captions, so a
-# unit's silk can never collide with them.
+# strip of a dropped row) is fair game. Printed pin captions add their own
+# band on top -- see pair_keepout(), which is what the placement code asks.
 PAD_KEEPOUTS = {
     row: tuple(v["keepout"] for v in PAD_PAIRS.values() if v["row"] == row)
     for row in ("top", "bottom")
@@ -2640,7 +2660,7 @@ def _bridge_routes(spec: BadgeSpec, safe=None, windows: bool | None = None):
 def resolve_overlap(
     a: Led, b: Led, gap: float = 0.2,
     safe: tuple[float, float, float, float] | None = None,
-    pins=ALL_PINS,
+    pins=ALL_PINS, pin_labels: bool = False,
 ) -> Led:
     """Return b, shifted if needed so its unit does not overlap a's.
 
@@ -2676,7 +2696,7 @@ def resolve_overlap(
                 ((_bb[0], _bb[1]), (_bb[2], _bb[1]),
                  (_bb[2], _bb[3]), (_bb[0], _bb[3]))]
     _ox0, _oy0, _ox1, _oy1 = _bbox_offsets_g(_bg, b.rot)
-    _keepouts = [sbox(*PAD_PAIRS[k]["keepout"]) for k in active_pairs(pins)]
+    _keepouts = [sbox(*pair_keepout(k, pin_labels)) for k in active_pairs(pins)]
 
     def fits(x, y, avoid_pads=True):
         # clamp_led_obj would silently pull the probe back onto the board, so
@@ -2795,6 +2815,7 @@ def _resolve_overlap_rings(b, safe, place):
 def pad_conflict(
     led: Led, pins=ALL_PINS,
     safe: tuple[float, float, float, float] | None = None,
+    pin_labels: bool = False,
 ) -> bool:
     """True if the unit's footprint overlaps a kept pad pair.
 
@@ -2803,13 +2824,14 @@ def pad_conflict(
     from shapely.geometry import box as sbox
 
     poly = unit_footprint(led, safe)
-    return any(poly.intersects(sbox(*PAD_PAIRS[k]["keepout"]))
+    return any(poly.intersects(sbox(*pair_keepout(k, pin_labels)))
                for k in active_pairs(pins))
 
 
 def resolve_pad_overlap(
     led: Led, pins=ALL_PINS,
     safe: tuple[float, float, float, float] | None = None,
+    pin_labels: bool = False,
 ) -> Led:
     """Slide a unit off the connector pad keepouts (server-side backstop).
 
@@ -2825,8 +2847,8 @@ def resolve_pad_overlap(
         b = led_unit_bbox(led, safe)
         poly = unit_poly(led, safe)
         hit = next(
-            (PAD_PAIRS[k]["keepout"] for k in active_pairs(pins)
-             if poly.intersects(sbox(*PAD_PAIRS[k]["keepout"]))),
+            (pair_keepout(k, pin_labels) for k in active_pairs(pins)
+             if poly.intersects(sbox(*pair_keepout(k, pin_labels)))),
             None,
         )
         if hit is None:
@@ -2856,7 +2878,8 @@ def resolve_pad_overlap(
         # inline 1206) clearing the pair it started on can drop straight onto
         # the other pair of the same row, and the old first-legal-wins pick
         # then ping-ponged between them until the retry budget ran out.
-        clear = next((p for p in cands if not pad_conflict(p, pins, safe)), None)
+        clear = next((p for p in cands
+                      if not pad_conflict(p, pins, safe, pin_labels)), None)
         if clear is not None:
             return clear
         moved = next((p for p in cands if (p.x, p.y) != (led.x, led.y)), None)
@@ -2887,7 +2910,7 @@ def resolve_pad_overlap(
     bb = g["bbox"]
     corners = [_r(px, py, start.rot) for px, py in
                ((bb[0], bb[1]), (bb[2], bb[1]), (bb[2], bb[3]), (bb[0], bb[3]))]
-    keepouts = [sbox(*PAD_PAIRS[k]["keepout"]) for k in active_pairs(pins)]
+    keepouts = [sbox(*pair_keepout(k, pin_labels)) for k in active_pairs(pins)]
     lim = max(safe[2] - safe[0], safe[3] - safe[1])
     r = 0.5
     while r <= lim:

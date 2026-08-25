@@ -1998,10 +1998,12 @@ def resolved_spec(spec):
     for led in spec.leds:
         x, y = pcb.clamp_led_obj(led, safe)
         leds.append(replace(led, x=x, y=y))
-    leds = [pcb.resolve_pad_overlap(led, spec.pins, safe) for led in leds]
+    leds = [pcb.resolve_pad_overlap(led, spec.pins, safe, spec.pin_labels)
+            for led in leds]
     for i in range(1, len(leds)):
         for prev in leds[:i]:
-            leds[i] = pcb.resolve_overlap(prev, leds[i], safe=safe)
+            leds[i] = pcb.resolve_overlap(prev, leds[i], safe=safe,
+                                          pin_labels=spec.pin_labels)
     return replace(spec, leds=leds)
 
 

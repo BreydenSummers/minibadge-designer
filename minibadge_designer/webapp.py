@@ -2099,10 +2099,12 @@ def _generate_impl(render: bool):
     try:
         # Backstop nudges: units clear the connector pad pairs and each other
         # (the UI prevents both during drag; hand-crafted requests may not).
-        leds = [pcb.resolve_pad_overlap(led, pins, safe) for led in leds]
+        leds = [pcb.resolve_pad_overlap(led, pins, safe, pin_labels)
+                for led in leds]
         for i in range(1, len(leds)):
             for prev in leds[:i]:
-                leds[i] = pcb.resolve_overlap(prev, leds[i], safe=safe)
+                leds[i] = pcb.resolve_overlap(prev, leds[i], safe=safe,
+                                              pin_labels=pin_labels)
         # On custom outlines, every unit must sit on solid board (inside the
         # outline, not over a cut-out hole). Relocate strays on a fixed 1.1 mm
         # grid.
@@ -2153,7 +2155,8 @@ def _generate_impl(render: bool):
                             cx, cy = pcb.clamp_led_obj(probe, safe)
                             probe = _replace(probe, x=cx, y=cy)
                             if (on_board(probe) and not overlaps_any(probe, i)
-                                    and not pcb.pad_conflict(probe, pins, safe)):
+                                    and not pcb.pad_conflict(probe, pins, safe,
+                                                             pin_labels)):
                                 found = probe
                                 break
                             x += 1.1
@@ -2266,7 +2269,7 @@ def _generate_impl(render: bool):
                 return _juu(quads)
 
             unit_polys = [pcb.unit_poly(led, safe) for led in leds]
-            avoid = [_jbox(*pcb.PAD_PAIRS[k]["keepout"])
+            avoid = [_jbox(*pcb.pair_keepout(k, pin_labels))
                      for k in pcb.active_pairs(pins)]
             avoid += [_jbox(*b) for b in pcb.caption_boxes(pins, pin_labels)]
             solid = (outline_poly.buffer(-0.35) if outline_poly is not None

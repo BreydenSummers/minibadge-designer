@@ -211,10 +211,14 @@ def test_a_hand_placed_unit_only_blocks_the_pads_its_copper_reaches(size, side, 
     """
     from shapely.geometry import box as sbox
 
-    spread = {"rx": 5.0, "ry": 12.0, "vx": 2.0, "vy": 10.0}
+    # The resistor thrown up past the connector row and out to the side: the
+    # envelope stretches across the corner pair while every piece of copper
+    # stays off it. (It used to be thrown DOWN the board, which spanned the
+    # pair only while the keepout still carried the pin captions' band.)
+    spread = {"rx": 4.5, "ry": -4.0, "vx": 2.0, "vy": 10.0}
     away = pcb.Led(3.0, 4.5, "red", size=size, side=side, rot=rot, adv=spread)
     hits = [k for k in pcb.active_pairs(pcb.ALL_PINS)
-            if pcb.unit_poly(away).intersects(sbox(*pcb.PAD_PAIRS[k]["keepout"]))]
+            if pcb.unit_poly(away).intersects(sbox(*pcb.pair_keepout(k)))]
     assert hits, ("vacuous: this unit's envelope no longer reaches a pad pair, "
                   "so it cannot show that the envelope is not what is judged")
     assert not pcb.pad_conflict(away, pcb.ALL_PINS), (
@@ -1758,3 +1762,44 @@ def test_pin_names_print_only_when_the_design_asks_for_them(asked, faces):
         f"pin_labels={asked}: the caption keepout does not follow the ink, so "
         "artwork is carved around labels that are not printed (or printed over "
         "labels that are)")
+
+
+@pytest.mark.parametrize("size", ["0603", "0805", "1206"])
+def test_a_part_may_sit_where_a_pin_caption_is_not_printed(size):
+    """Unprinted captions cost a part no room beside the connector.
+
+    The pad keepout carried a 0.5 mm band for the captions whether or not they
+    were printed. On a 20 mm board that band is the difference between a part
+    fitting beside the header and being slid away from where it was put, so it
+    is reserved only while the ink that needs it is actually going on the
+    board.
+    """
+    # Walk in from the middle until the unit is allowed: the first legal spot
+    # with the captions on has to be further from the pads than without them.
+    def first_clear(pin_labels):
+        y = 2.0
+        while y < 12.0:
+            led = pcb.Led(2.54, y, "red", size=size)
+            if not pcb.pad_conflict(led, pcb.ALL_PINS, None, pin_labels):
+                return y
+            y += 0.01
+        raise AssertionError(f"{size}: nothing fits beside the pads at all")
+
+    off, on = first_clear(False), first_clear(True)
+    # The band is 0.5 mm of board; anything less and part of it is still being
+    # held back for ink nobody asked for.
+    assert on - off > 0.45, (
+        f"{size}: a part clears the connector at y={off:.2f} with the captions "
+        f"off and y={on:.2f} with them on -- switching them off gives back "
+        f"{on - off:.2f} mm of the 0.5 mm band they occupy")
+    # And the pads themselves keep every millimetre they had: the band is the
+    # captions' room, not the copper's clearance. Measured on the unit that
+    # just squeezed in, not on its centre -- the centre is millimetres away
+    # from the part of it that comes closest.
+    edge = pcb.unit_poly(pcb.Led(2.54, off, "red", size=size)).bounds[1]
+    row_y = max(y for _n, _x, y, _net, row in pcb.CONNECTOR_PADS
+                if row == "top")
+    assert edge >= row_y + 0.875 + 0.35 - 0.02, (
+        f"{size}: the unit reaches y={edge:.2f}, inside the pad copper (to "
+        f"{row_y + 0.875:.2f}) plus its 0.35 mm clearance -- the tightening "
+        "ate into the pads, not into the ink's band")

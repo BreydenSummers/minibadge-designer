@@ -849,10 +849,10 @@ const ALL_PINS = PADS.map(p => p[4]);
 // Corner pairs, mirroring pcb.PAD_PAIRS: the plate, keepout, caption and 3D
 // header all follow the pair, and a pair keeps whichever of its pins survive.
 const PAD_PAIRS = {
-  tl: {pins:["1","2"],  row:"top",    at:[2.54, 2.8],   plate:[0.16,0.16,5.0,3.4],    keepout:[0.04,0.04,5.04,3.0]},
-  tr: {pins:["7","8"],  row:"top",    at:[17.78, 2.8],  plate:[15.32,0.16,20.16,3.4], keepout:[15.28,0.04,20.28,3.0]},
-  bl: {pins:["9","10"], row:"bottom", at:[2.54, 17.88], plate:[0.16,16.92,5.0,20.16], keepout:[0.04,17.32,5.04,20.28]},
-  br: {pins:["15","16"],row:"bottom", at:[17.78,17.88], plate:[15.32,16.92,20.16,20.16], keepout:[15.28,17.32,20.28,20.28]},
+  tl: {pins:["1","2"],  row:"top",    at:[2.54, 2.8],   plate:[0.16,0.16,5.0,3.4],    keepout:[0.04,0.04,5.04,2.5]},
+  tr: {pins:["7","8"],  row:"top",    at:[17.78, 2.8],  plate:[15.32,0.16,20.16,3.4], keepout:[15.28,0.04,20.28,2.5]},
+  bl: {pins:["9","10"], row:"bottom", at:[2.54, 17.88], plate:[0.16,16.92,5.0,20.16], keepout:[0.04,17.82,5.04,20.28]},
+  br: {pins:["15","16"],row:"bottom", at:[17.78,17.88], plate:[15.32,16.92,20.16,20.16], keepout:[15.28,17.82,20.28,20.28]},
 };
 const pinOn = n => (state.pins || ALL_PINS).includes(n);
 const activePads = () => PADS.filter(p => pinOn(p[4]));
@@ -867,6 +867,16 @@ const pinLabelsOn = () => state.pinlabels === true;
 const CONN_PAD_R = 0.875;
 const PAD_ART_GAP = { silk: 0.15, copper: 0.5, window: 1.125 };
 const padArtRadius = kind => CONN_PAD_R + PAD_ART_GAP[kind];
+// The pin captions print in a 0.5 mm band inside the pads' own keepout, so a
+// unit only has to stay out of that band while they are being printed
+// (mirrors pcb.pair_keepout -- the board hands the half millimetre back too).
+const CAPTION_BAND = 0.5;
+function pairKeepout(key) {
+  const [x0, y0, x1, y1] = PAD_PAIRS[key].keepout;
+  if (!pinLabelsOn()) return [x0, y0, x1, y1];
+  return PAD_PAIRS[key].row === "top"
+    ? [x0, y0, x1, y1 + CAPTION_BAND] : [x0, y0 - CAPTION_BAND, x1, y1];
+}
 const activePairs = () => Object.keys(PAD_PAIRS).filter(k => PAD_PAIRS[k].pins.some(pinOn));
 const pairCaption = k => PAD_PAIRS[k].pins.filter(pinOn)
   .map(n => PADS.find(p => p[4] === n)[2]).join(" ");
@@ -3418,7 +3428,7 @@ function strandedParts(L) {
 function padConflict(L) {
   for (const p of unitFootprint(L)) {
     for (const key of activePairs()) {
-      if (!polysClear(p.q, rectPoly(PAD_PAIRS[key].keepout), 0)) return true;
+      if (!polysClear(p.q, rectPoly(pairKeepout(key)), 0)) return true;
     }
   }
   return false;
@@ -3428,7 +3438,7 @@ function padConflict(L) {
 // the pad that is in the way and not at the empty box around all of them.
 function padConflictParts(L) {
   return unitFootprint(L).filter(p => activePairs().some(
-    key => !polysClear(p.q, rectPoly(PAD_PAIRS[key].keepout), 0)));
+    key => !polysClear(p.q, rectPoly(pairKeepout(key)), 0)));
 }
 // ---- CLK jumper placement (mirrors the server's backstop test) ----
 // The jumper's copper and labels must sit on solid board, clear of every
@@ -3460,7 +3470,7 @@ function jumperInfoOk(ci, skipLed) {
     if (quads.some(q => !polysClear(q, poly, 0.2))) return false;
   }
   for (const key of activePairs()) {
-    const kp = rectPoly(PAD_PAIRS[key].keepout);
+    const kp = rectPoly(pairKeepout(key));
     if (quads.some(q => !polysClear(q, kp, 0))) return false;
   }
   for (const b of captionBoxes()) {
