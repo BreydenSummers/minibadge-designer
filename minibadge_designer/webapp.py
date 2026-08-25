@@ -1909,6 +1909,10 @@ def _generate_impl(render: bool):
     # Printed part references (D1, R1, ...). On unless explicitly turned off,
     # the same contract as tenting: silence means the default a board wants.
     refdes = params.get("refdes") is not False
+    # Pin captions, the other way round: OFF unless asked for. They are a
+    # soldering aid, not part of the design, and while they are on they cost
+    # the artwork the strip beside every connector pair.
+    pin_labels = params.get("pinlabels") is True
 
     try:
         pins = _parse_pins(params)
@@ -2264,7 +2268,7 @@ def _generate_impl(render: bool):
             unit_polys = [pcb.unit_poly(led, safe) for led in leds]
             avoid = [_jbox(*pcb.PAD_PAIRS[k]["keepout"])
                      for k in pcb.active_pairs(pins)]
-            avoid += [_jbox(*b) for b in pcb.caption_boxes(pins)]
+            avoid += [_jbox(*b) for b in pcb.caption_boxes(pins, pin_labels)]
             solid = (outline_poly.buffer(-0.35) if outline_poly is not None
                      else _jbox(*pcb.OUTLINE).buffer(-0.35))
 
@@ -2395,14 +2399,15 @@ def _generate_impl(render: bool):
         # sit on either face, while image art stays front-only.
         # The printed pin captions live on both silks; art keeps clear of them
         # exactly like it keeps clear of the pads.
-        captions = [RectKeepout(*b) for b in pcb.caption_boxes(pins)]
+        captions = [RectKeepout(*b) for b in pcb.caption_boxes(pins, pin_labels)]
         # The printed part references are generated ink like those captions,
         # so artwork is carved around them rather than printed over them --
         # and a window may not open mask under them either, which the fab
         # would clip. Per face: a part's reference prints on the face the part
         # is mounted on.
         _ref_spec = pcb.BadgeSpec(pins=pins, outline=outline_rings, leds=leds,
-                                  refdes=refdes, clk_jumper=clk_jumper,
+                                  refdes=refdes, pin_labels=pin_labels,
+                                  clk_jumper=clk_jumper,
                                   jumper=jpos, jumper_rot=jrot,
                                   jumper_side=jside, jumper_via=jvia)
         refdes_keep = {
@@ -2434,9 +2439,16 @@ def _generate_impl(render: bool):
                                for b in pcb.jumper_caption_boxes(clk_i)])
             jumper_via_keep = [CircleKeepout(v[0], v[1], 0.85)
                                for v in (clk_i["via"], clk_i["v3via"]) if v]
+        # Art keeps its own distance from a connector pad depending on what it
+        # becomes: see pcb.PAD_ART_GAP for why these are three numbers.
+        pad_keep = {kind: [CircleKeepout(x, y, pcb.pad_art_radius(kind))
+                           for x, y in kept_pads]
+                    for kind in ("silk", "copper", "window")}
         decor_base = {
-            side: [CircleKeepout(x, y, 1.65) for x, y in kept_pads]
-            + captions + refdes_keep[side]
+            # Pad circles are added per material at each emit below.
+            # Captions print on the back only, so they are only in the way of
+            # back-face ink.
+            side: (captions if side == "back" else []) + refdes_keep[side]
             + (jumper_decor if side == jface else jumper_via_keep)
             + [_led_keepout(led, safe, pins, leds, outline_rings, side, clk_i)
                for led in leds if led.side == side]
@@ -2477,7 +2489,9 @@ def _generate_impl(render: bool):
         # plus whatever crosses the board regardless (plated pads, routed holes, a
         # LED sitting on the far side). That is what lets a back-only window run
         # right under a part mounted on the front.
-        _window_base = ([CircleKeepout(x, y, 2.0) for x, y in kept_pads]
+        _window_base = (pad_keep["window"]
+                        # A window may cut both faces, so it stays off ink on
+                        # either one -- the same reading the references get.
                         + captions + jumper_via_keep
                         + refdes_keep["front"] + refdes_keep["back"])
 
@@ -2645,7 +2659,8 @@ def _generate_impl(render: bool):
                 if material in ("glow", "bare"):
                     emit_window(i, ci, material, window, art_side)
                 else:
-                    made = emit(i, ci, material, decor_of[art_side], art_board, side=art_side)
+                    made = emit(i, ci, material, decor_of[art_side] + pad_keep[material],
+                                art_board, side=art_side)
                     note_opening(material, art_side, made, window)
         for key, src, side in text_entries:
             for material in ("copper", "glow", "bare"):
@@ -2657,7 +2672,8 @@ def _generate_impl(render: bool):
                     emit_window(key, src, material, "through", side,
                                 carve_text=False)
                 else:
-                    made = emit(key, src, material, decor_base[side], art_board,
+                    made = emit(key, src, material,
+                                decor_base[side] + pad_keep[material], art_board,
                                 side, margin=pcb.TEXT_EDGE_CLEAR)
                     note_opening(material, side, made)
 
@@ -2671,7 +2687,8 @@ def _generate_impl(render: bool):
             return ks
 
         for i, ci, _window, art_side in classified:
-            emit(i, ci, "silk", silk_carve(decor_of[art_side], art_side),
+            emit(i, ci, "silk",
+                 silk_carve(decor_of[art_side] + pad_keep["silk"], art_side),
                  art_board, side=art_side)
         for key, src, side in text_entries:
             if "silk" in src:
@@ -2679,8 +2696,9 @@ def _generate_impl(render: bool):
                 # frame: 0.5 mm used to be shaved off every text the user
                 # pushed toward the edge, silently, while the editor told them
                 # 0.2 mm was fine.
-                emit(key, src, "silk", silk_carve(decor_base[side], side), art_board,
-                     side, margin=pcb.TEXT_EDGE_CLEAR)
+                emit(key, src, "silk",
+                     silk_carve(decor_base[side] + pad_keep["silk"], side),
+                     art_board, side, margin=pcb.TEXT_EDGE_CLEAR)
     except _UPLOAD_REFUSALS as exc:
         return {"error": f"artwork: {exc}"}, 400
     except _GEOMETRY_ERRORS:
@@ -2690,7 +2708,7 @@ def _generate_impl(render: bool):
     spec = pcb.BadgeSpec(
         name=name, leds=leds, texts=texts, art=art_layers, mask_color=mask_color,
         finish=finish, pins=pins, outline=outline_rings, tenting=tenting,
-        refdes=refdes,
+        refdes=refdes, pin_labels=pin_labels,
         clk_jumper=clk_jumper, jumper=jpos, jumper_rot=jrot,
         jumper_side=jside, jumper_via=jvia, jumper_nodes=jnodes,
         jumper_v3nodes=jv3nodes, jumper_v3pin=jv3pin,
