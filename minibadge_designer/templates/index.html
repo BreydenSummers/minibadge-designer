@@ -3970,7 +3970,12 @@ function rebuildArt(a) {
   // part that prints (mirrors logo._crop_to_board).
   const crop = artCrop(a);
   const d = { w: crop.w, h: crop.h, cols: 1, rows: 1 };
-  a.cacheAt = { cx: crop.cx, cy: crop.cy, w: crop.w, h: crop.h };
+  // Recorded as fractions of the IMAGE, not as a rectangle on the board: a
+  // drag moves the layer without reclassifying it, and a stored board
+  // rectangle then paints the old pixels at the old place while the selection
+  // box walks off without them. Fractions travel with the layer, so what is
+  // cached always lands where its pixels belong.
+  a.cacheUV = { u0: crop.u0, v0: crop.v0, u1: crop.u1, v1: crop.v1 };
   // Every image layer becomes polygons on the board -- an SVG from its own
   // vector paths, a raster from a traced contour of this same classification
   // -- so the preview classifies at the tracer's pitch, or at the SVG's own
@@ -4182,12 +4187,16 @@ function drawArtLayer(c, a, mat, viewSide) {
   }
   const cache = a.caches && a.caches[mat];
   if (!cache) return;
-  // Where the classification actually covers: the cropped window, recorded by
-  // rebuildArt. Falling back to the placed rectangle would stretch a crop of
-  // the board area across the whole (possibly much larger) layer.
-  const d = a.cacheAt || artDims(a);
-  const cx = d.cx !== undefined ? d.cx : a.cx;
-  const cy = d.cy !== undefined ? d.cy : a.cy;
+  // Where the cached classification belongs, worked out from where the layer
+  // is NOW: the window is stored in image fractions (see rebuildArt), so the
+  // pixels follow a drag even though nothing was reclassified.
+  const placed = artDims(a);
+  const uv = a.cacheUV || { u0: 0, v0: 0, u1: 1, v1: 1 };
+  const px0 = a.cx - placed.w / 2 + uv.u0 * placed.w;
+  const py0 = a.cy - placed.h / 2 + uv.v0 * placed.h;
+  const d = { w: (uv.u1 - uv.u0) * placed.w, h: (uv.v1 - uv.v0) * placed.h };
+  const cx = px0 + d.w / 2;
+  const cy = py0 + d.h / 2;
   // Both kinds of art reach the board as polygons now, so neither has board
   // pixels to show: scale the classification smoothly and the preview edge
   // reads like the traced curve instead of a staircase the board never gets.
@@ -6469,6 +6478,18 @@ function attachPointer(cv, side) {
                               { kind: "art", index: drag.index });
       a.cx = Math.min(Math.max(asx, ab[0]), ab[2]);
       a.cy = Math.min(Math.max(asy, ab[1]), ab[3]);
+      // Only the part of the layer over the board is classified, so a move
+      // slides fresh image into view. The cached pixels travel with the layer
+      // on their own (rebuildArt stores the window in image fractions); this
+      // is what fills in the newly arrived edge. Same throttle as rotation --
+      // reclassifying is the pricey part -- and the release rebuilds exactly.
+      if (!isShapeArt(a)) {
+        const now = performance.now();
+        if (!drag.lastRebuild || now - drag.lastRebuild > 120) {
+          rebuildArt(a);
+          drag.lastRebuild = now;
+        }
+      }
     } else if (drag.kind === "shapeel") {
       const el = state.shape.elements[drag.index];
       const [esx, esy] = snap(mx + drag.dx, my + drag.dy,
@@ -6558,7 +6579,13 @@ function attachPointer(cv, side) {
     const wasShape = draggingPart();
     const wasText = drag.kind === "text"
       || drag.kind === "resize" && drag.tkind === "text";
-    const wasArt = (drag.kind === "resize" || drag.kind === "rotate") && drag.tkind === "art";
+    // A MOVE counts too: the classified window is the part of the layer over
+    // the board, so dragging one changes which part that is. Mid-drag the
+    // cached pixels travel with the layer (they are stored in image
+    // fractions); this is what fills in whatever has newly arrived over the
+    // board once the gesture ends.
+    const wasArt = drag.kind === "art"
+      || (drag.kind === "resize" || drag.kind === "rotate") && drag.tkind === "art";
     const wasLedRotate = drag.kind === "rotate" && drag.tkind === "led";
     const wasTerm = drag.kind === "ledterm";
     const idx = drag.index;
@@ -6566,7 +6593,7 @@ function attachPointer(cv, side) {
     if (wasTerm) renderLedList(); // the card names the chosen destination
     if (wasArt) {
       const a = state.art[idx];
-      if (a) rebuildArt(a); // final exact rebuild after throttled rotation
+      if (a) rebuildArt(a); // exact rebuild after a throttled move/rotation
       renderArtList();      // sync sliders/number boxes
     }
     if (wasLedRotate) {
@@ -8961,6 +8988,10 @@ window.addEventListener("keydown", e => {
       const ab = artBoard();
       a.cx = Math.min(Math.max(a.cx + dx, ab[0]), ab[2]);
       a.cy = Math.min(Math.max(a.cy + dy, ab[1]), ab[3]);
+      // Nudging moves which part of the layer is over the board, same as a
+      // drag: reclassify so the leading edge is filled in. One keypress is
+      // not a 60 Hz gesture, so this needs no throttle.
+      if (!isShapeArt(a)) rebuildArt(a);
     } else if (selected.kind === "shapeel") {
       const el = state.shape.elements[selected.index];
       if (!el) return;
