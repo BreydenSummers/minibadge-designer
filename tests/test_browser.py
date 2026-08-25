@@ -5776,3 +5776,65 @@ def test_the_preview_stops_artwork_at_the_edge_where_the_board_does(
         f"the preview and {board_mm:.2f} mm in on the board -- the two "
         "disagree about how close to the edge a drawing may be printed")
     ui.assert_clean(f"art edge parity, {axis}")
+@pytest.mark.browser
+def test_an_overhanging_svg_previews_the_half_the_board_gets(ui, client):
+    """A vector drawing pushed off the board previews where it prints.
+
+    The two sides get there by different routes: the browser renders the SVG
+    and crops that raster to the board, the server walks the file's own paths
+    and clips the geometry. A drawing hung half off the edge is where those
+    can disagree about scale -- the vector path used to shrink it to fit while
+    the preview overhung it -- and then the picture the user lines up against
+    the outline is not the one the fab prints.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+
+    from minibadge_designer import pcb
+
+    # Dark right half only: which half lands is the whole assertion.
+    svg = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100">'
+           b'<rect x="100" y="0" width="100" height="100" fill="#101010"/></svg>')
+    page = ui.page
+    page.click("#tab-art")
+    page.set_input_files("#artfile", {"name": "half.svg",
+                                      "mimeType": "image/svg+xml",
+                                      "buffer": svg})
+    page.wait_for_function("() => state.art.length === 1 && state.art[0].img",
+                           timeout=UPLOAD_TIMEOUT)
+    ui.js("""() => {
+        state.leds.length = 0; state.texts.length = 0;
+        const a = state.art[0];
+        a.side = 'front'; a.cx = 2.0; a.cy = 10.16; a.wmm = 34;
+        a.material = 'silk'; a.mode = 'threshold';
+        rebuildArt(a); renderLedList(); renderArtList(); draw();
+    }""")
+    # The dark half spans the layer's right half: placed 34 mm wide centred at
+    # 2.0 it runs 2.0..19.0, so the board should carry ink out to ~19 mm.
+    drawn = ui.js("() => !!(state.art[0].caches && state.art[0].caches.silk)")
+    params = json.loads(ui.js('() => designFormData().get("params")'))
+    params["name"] = "vec"
+    resp = client.post("/generate", data={
+        "params": json.dumps(params), "art0": (io.BytesIO(svg), "half.svg"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    root = invariants._parse_sexp(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "vec/vec.kicad_pcb").decode())
+    xs = [float(q[1]) - pcb.ORIGIN
+          for g in invariants._kids(root, "gr_poly")
+          if str(invariants._val(g, "layer")) == "F.SilkS"
+          for q in invariants._kids(invariants._kid(g, "pts"), "xy")]
+    assert drawn, "the preview painted nothing for an overhanging SVG"
+    assert xs, "the board printed nothing for an overhanging SVG"
+    # Shrunk to fit instead of clipped, the same placement would put the dark
+    # half's right edge near 12 mm rather than out at the board's own edge.
+    assert max(xs) > 17.0, (
+        f"the vector drawing's ink stops at {max(xs):.2f} mm where the layer "
+        "runs to 19 mm: it was resized to fit the board instead of clipped at "
+        "the edge, and the preview showed the size it did not get")
+    assert max(xs) <= 20.33, (
+        f"vector ink runs to {max(xs):.2f} mm, past the board edge")
+    ui.assert_clean("overhanging svg")
