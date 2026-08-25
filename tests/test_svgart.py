@@ -277,3 +277,69 @@ def test_a_ring_of_artwork_prints_as_a_ring():
     assert not inked.intersects(Polygon(void).buffer(-slack)), (
         "ink covers the middle of the ring; the hole the artwork asked for "
         "was flooded shut")
+
+
+#: A drawing whose middle tenth is a stripe: at a known placed width the
+#: stripe has a known width on the board, so a layer that was quietly resized
+#: says so in millimetres.
+_STRIPE_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+    b'<rect x="45" y="0" width="10" height="100" fill="#101010"/></svg>'
+)
+
+
+def _stripe_png() -> bytes:
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (400, 400), "white")
+    ImageDraw.Draw(img).rectangle((180, 0, 219, 399), fill=(16, 16, 16))
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+def _inked_width(resp, name="over", layer="F.SilkS"):
+    """Width of the printed ink, in mm, off a generated board."""
+    import invariants
+
+    root = invariants._parse_sexp(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        f"{name}/{name}.kicad_pcb").decode())
+    xs = [float(q[1]) - pcb.ORIGIN
+          for g in invariants._kids(root, "gr_poly")
+          if str(invariants._val(g, "layer")) == layer
+          for q in invariants._kids(invariants._kid(g, "pts"), "xy")]
+    return (max(xs) - min(xs)) if xs else 0.0
+
+
+@pytest.mark.parametrize("kind", ["svg", "png"], ids=["svg", "png"])
+def test_artwork_wider_than_the_board_keeps_its_size_whatever_it_was_drawn_in(
+        client, kind):
+    """A vector drawing hangs off the board like a raster one does.
+
+    Overhang is how a picture is lined up with a silhouette board: the layer
+    stays the size the user set and the part off the board is clipped. The SVG
+    path used to shrink the drawing to fit instead, so the same artwork placed
+    the same way came out at a different scale depending on which file the user
+    happened to upload -- and the editor, which previews both by overhanging
+    them, showed the scale it did not get.
+    """
+    placed, view = 35.0, 0.10   # the stripe is a tenth of the drawing
+    upload = _STRIPE_SVG if kind == "svg" else _stripe_png()
+    resp = client.post("/generate", data={
+        "params": json.dumps({
+            "name": "over", "leds": [], "texts": [],
+            "art": [{"mode": "threshold", "cx": 10.16, "cy": 10.16,
+                     "w": placed, "material": "silk", "side": "front"}]}),
+        "art0": (io.BytesIO(upload), f"stripe.{kind}"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    width = _inked_width(resp)
+    want = placed * view
+    assert width > 0, f"{kind}: the stripe printed nothing at all"
+    # A tenth of 35 mm is 3.5; shrunk to fit a 20.32 mm board it would be 2.0,
+    # which is what this is really telling apart. Quarter-millimetre of slack
+    # for the tracer's rounding of the two edges.
+    assert abs(width - want) < 0.25, (
+        f"{kind}: the stripe prints {width:.2f} mm wide where the layer's own "
+        f"width puts it at {want:.2f} mm -- the drawing was resized to fit the "
+        "board instead of hanging off it")

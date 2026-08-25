@@ -499,11 +499,19 @@ def test_artwork_pushed_past_every_edge_still_passes_drc(tmp_path):
             "palette": [{"rgb": [20, 20, 20], "material": "silk"},
                         {"rgb": [230, 180, 40], "material": "copper"}]}
            for cx, cy, w in places]
+    # ...and one of them as VECTOR art, which takes the exact SVG pipeline to
+    # the same clip: a path running over the routed edge has to be cut there
+    # too, and its geometry is built by different code than the raster grid.
+    svg = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">'
+           b'<circle cx="50" cy="50" r="48" fill="#101010"/></svg>')
+    art.append({"mode": "threshold", "cx": 24.0, "cy": 10.16, "w": 26.0,
+                "material": "silk", "side": "back"})
     params = {"name": "overhang", "leds": [{"x": 10.16, "y": 10.16, "color": "red"}],
               "texts": [], "art": art}
     data = {"params": json.dumps(params)}
-    for i in range(len(art)):
+    for i in range(len(art) - 1):
         data[f"art{i}"] = (io.BytesIO(png), f"blob{i}.png")
+    data[f"art{len(art) - 1}"] = (io.BytesIO(svg), "over.svg")
     client = app.test_client()
     resp = client.post("/generate", data=data, content_type="multipart/form-data")
     assert resp.status_code == 200, resp.get_json()

@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import io
 
-from .logo import EDGE_MARGIN
+from .logo import MAX_ART_MM
 
 # A parsed document is normalized so its frame is (0, 0, width, height):
 # svgelements applies the viewBox transform, matching what a browser
@@ -216,8 +216,13 @@ def fit_transform(
 
     Mirrors logo._fit + logo._transpose exactly: rotate clockwise by any
     angle FIRST, then mirror horizontally; the width slider applies to the
-    rotated artwork's bounding box, clamped to the board with the same
-    margins and height backpressure. Returns (matrix, placed_w, placed_h).
+    rotated artwork's bounding box. Returns (matrix, placed_w, placed_h).
+
+    The width is the width asked for. Like the raster path, it is NOT shrunk
+    to fit the board -- a drawing may hang off the edge and be clipped there,
+    which is the only way to line one up with a silhouette board. `board` is
+    still taken (and ignored) so the two paths keep the same signature; the
+    clip downstream is what drops the part that cannot print.
     """
     import math
 
@@ -228,13 +233,9 @@ def fit_transform(
     rw = fw * abs(ct) + fh * abs(st)
     rh = fw * abs(st) + fh * abs(ct)
 
-    width_mm = max(2.0, min(width_mm, board[2] - board[0] - 2 * EDGE_MARGIN))
+    width_mm = max(2.0, min(float(width_mm), MAX_ART_MM))
     aspect = rh / rw
     height_mm = width_mm * aspect
-    max_h = board[3] - board[1] - 2 * EDGE_MARGIN
-    if height_mm > max_h:
-        height_mm = max_h
-        width_mm = height_mm / aspect
     s = width_mm / rw
 
     # (x, y) -> rotate cw about the frame center -> mirror x -> scale
