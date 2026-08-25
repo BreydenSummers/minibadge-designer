@@ -3247,7 +3247,7 @@ function bridgeThroughBends(start, bends, ownPieces, skip, obstacles, rings) {
 // 0.2 mm grid answers the same yes/no everywhere a design does not balance a
 // pour channel on the width of one cell, which is also roughly where the
 // fill's own 0.25 mm minimum-width opening starts eating the channel anyway.
-const RAIL_PITCH = 0.2;      // mm per flood cell
+const RAIL_PITCH = 0.1;      // mm per flood cell
 const POUR_EDGE_INSET = 0.4; // mirrors pcb.POUR_EDGE_INSET
 
 // Copper of one unit that blocks the `net` pour on layer `ly` ("F"/"B"),
@@ -3387,7 +3387,7 @@ function paintWindowCuts(oc, face, corridorSet) {
   return true;
 }
 
-function buildRailMask(ly, corridorSet) {
+function buildRailMask(ly, corridorSet, contacts) {
   const ob = outlineBounds();
   const pad = RAIL_PITCH;
   const x0 = ob[0] - pad, y0 = ob[1] - pad;
@@ -3405,13 +3405,24 @@ function buildRailMask(ly, corridorSet) {
     return [cv, c];
   };
   const [cv, c] = mk();
+  // Crisp cells: the mask is a yes/no per cell, and smoothing smears a
+  // window's edge across neighbouring cells -- measured, a via 0.35 mm from
+  // a window cutout read as connected through the blur while the board
+  // (correctly) cut it a bridge.
+  c.imageSmoothingEnabled = false;
   paintBoardMask(c, "#fff");            // pourable space: the board itself...
   eraseBoardEdge(c, POUR_EDGE_INSET);   // ...minus the pour's edge inset
   const [wcv, wc] = mk();
+  wc.imageSmoothingEnabled = false;
   if (paintWindowCuts(wc, face, corridorSet)) {
     c.save();
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.globalCompositeOperation = "destination-out";
+    // No dilation here: the server's window.buffer(0.1) is already matched
+    // by the alpha threshold below, which closes every cell a window so much
+    // as touches (one cell = the same 0.1 mm). Dilating on top of that grew
+    // windows by two cells and severed a via the board keeps connected at
+    // the window's rim.
     c.drawImage(wcv, 0, 0);
     c.restore();
   }
@@ -3446,9 +3457,42 @@ function buildRailMask(ly, corridorSet) {
     if (v3 && net !== "3V3") strokeRun(v3.pts);
   }
   c.globalCompositeOperation = "source-over";
+  // The contacts' own copper is OPEN: a via collar or feed pad conducts
+  // whether or not a window opens the mask over it, and the fill's overlap
+  // test asks exactly "does pour touch this copper". Stamping the copper and
+  // asking for adjacency replaces guessing a sampling radius, which at any
+  // finite pitch flips one threshold case or another (measured both ways:
+  // a via 0.35 mm from a window cutout, and a reverse unit's via kept
+  // connected right at a window's rim).
+  c.fillStyle = "#fff";
+  // Stamped one cell inside the copper's true edge: the server connects on
+  // pour within r - 0.02 of the centre, and the raster adds ~a cell of reach
+  // of its own (the stamp's rim cells plus 4-adjacency), so stamping the
+  // full radius read pour the fill holds a tenth of a millimetre away.
+  // Shrinking centres the raster threshold on the server's.
+  const inset = 0.02 + RAIL_PITCH;
+  for (const ct of contacts || []) {
+    if (ct.r !== undefined) {
+      c.beginPath();
+      c.arc(mm2px(ct.x), mm2px(ct.y), Math.max(0.02, ct.r - inset) * SCALE, 0, 7);
+      c.fill();
+    } else {
+      c.save();
+      c.translate(mm2px(ct.x), mm2px(ct.y));
+      c.rotate((ct.rot % 360) * Math.PI / 180);
+      const w2 = Math.max(0.02, ct.w / 2 - inset);
+      const h2 = Math.max(0.02, ct.h / 2 - inset);
+      c.fillRect(mm2px(-w2), mm2px(-h2), 2 * w2 * SCALE, 2 * h2 * SCALE);
+      c.restore();
+    }
+  }
   const data = c.getImageData(0, 0, w, h).data;
   const open = new Uint8Array(w * h);
-  for (let i = 0; i < open.length; i++) open[i] = data[i * 4 + 3] > 127 ? 1 : 0;
+  // A cell any obstacle touches is closed (alpha eroded at all), not just a
+  // cell an obstacle covers: ties at a window's edge must break toward
+  // SEVERED, because the harmless mistake is drawing a bridge the board
+  // skips and the harmful one is hiding a trace the board ships.
+  for (let i = 0; i < open.length; i++) open[i] = data[i * 4 + 3] > 240 ? 1 : 0;
   // Flood from the net's kept connector pads: reachable = on the rail.
   const reach = new Uint8Array(w * h);
   const queue = [];
@@ -3477,23 +3521,17 @@ function buildRailMask(ly, corridorSet) {
   return { x0, y0, w, h, reach };
 }
 
-function railReaches(mask, pt, r) {
-  // The fill counts as reaching the contact when it overlaps the contact's
-  // own copper (radius r), mirroring pcb._rail_reaches: sample every cell
-  // the copper covers, not just its centre -- a pour tongue can hold the
-  // connection at the pad's edge while missing the middle by a hair.
-  const span = Math.max(0, Math.floor((r - 0.02) / RAIL_PITCH));
-  const cx = Math.round((pt[0] - mask.x0) / RAIL_PITCH);
-  const cy = Math.round((pt[1] - mask.y0) / RAIL_PITCH);
-  for (let dy = -span; dy <= span; dy++) {
-    for (let dx = -span; dx <= span; dx++) {
-      if (dx * dx + dy * dy > span * span) continue;
-      const gx = cx + dx, gy = cy + dy;
-      if (gx < 0 || gy < 0 || gx >= mask.w || gy >= mask.h) continue;
-      if (mask.reach[gy * mask.w + gx] === 1) return true;
-    }
-  }
-  return false;
+function railReaches(mask, pt) {
+  // The contact's own copper was stamped OPEN into the mask before the flood
+  // (see buildRailMask), so pour touching the contact anywhere flows across
+  // it and its centre cell answers alone. Sampling a disk of guessed radius
+  // here instead flipped one threshold case or another at any finite pitch:
+  // measured both ways, a via 0.35 mm from a window cutout, and a reverse
+  // unit's via kept by the pour ring around its routed hole.
+  const gx = Math.round((pt[0] - mask.x0) / RAIL_PITCH);
+  const gy = Math.round((pt[1] - mask.y0) / RAIL_PITCH);
+  if (gx < 0 || gy < 0 || gx >= mask.w || gy >= mask.h) return false;
+  return mask.reach[gy * mask.w + gx] === 1;
 }
 
 let _bridgeCache = { key: "", map: [], corridors: new Set() };
@@ -3611,6 +3649,16 @@ function allBridges() { // {F: {pts,ok}|null, B: ...} per LED, memoized
   // corridor pass because the windows the flood sees are carved around those
   // same corridors, exactly as the board's final art layers are.
   const masks = {};
+  const contactsFor = layer => routed.flatMap(({ L, starts }) => {
+    const spec = starts[layer];
+    if (!spec) return [];
+    const [x, y] = unitPoint(L, spec[1][0], spec[1][1]);
+    if (spec[0] === "via") return [{ x, y, r: VIA_SIZE / 2 }];
+    const g = geomOf(L);
+    const pk = spec[0] === "pad_res_in" ? resPkgOf(g.pkg) : PKG[g.pkg];
+    const extra = spec[0] === "pad_res_in" ? (g.resRot || 0) : (g.ledRot || 0);
+    return [{ x, y, w: pk.pw, h: pk.ph, rot: (L.rot || 0) + extra }];
+  });
   const map = routed.map(({ L, starts, out }, i) => {
     const fine = {};
     for (const [layer, spec] of Object.entries(starts)) {
@@ -3621,11 +3669,10 @@ function allBridges() { // {F: {pts,ok}|null, B: ...} per LED, memoized
       const net = layer === "F" ? "3V3" : "GND";
       if (!PADS.some(([, , lbl, , num]) => pinOn(num) && lbl === net)) continue;
       const start = unitPoint(L, spec[1][0], spec[1][1]);
-      const g = geomOf(L);
-      const pk = spec[0] === "pad_res_in" ? resPkgOf(g.pkg) : PKG[g.pkg];
-      const r = spec[0] === "via" ? VIA_SIZE / 2 : Math.min(pk.pw, pk.ph) / 2;
-      if (!(layer in masks)) masks[layer] = buildRailMask(layer, corridors);
-      if (railReaches(masks[layer], start, r)) continue;
+      if (!(layer in masks)) {
+        masks[layer] = buildRailMask(layer, corridors, contactsFor(layer));
+      }
+      if (railReaches(masks[layer], start)) continue;
       fine[layer] = out[layer];
       const tag = `${i}:${layer}`;
       if (!_bridgeTold.has(tag) && fine[layer]) {
