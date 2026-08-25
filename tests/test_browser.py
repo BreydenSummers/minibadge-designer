@@ -5680,3 +5680,161 @@ def test_the_preview_stops_artwork_beside_a_pad_where_the_board_does(
         f"the preview and {board_mm:.2f} mm from it on the board: the two "
         "disagree about how close to a connector pad the user may draw")
     ui.assert_clean(f"pad gap parity, {material}")
+@pytest.mark.browser
+@pytest.mark.parametrize("axis", ["left", "right", "top"],
+                         ids=["left", "right", "top"])
+def test_the_preview_stops_artwork_at_the_edge_where_the_board_does(
+        ui, client, axis):
+    """Art runs as close to the routed edge in the preview as on the board.
+
+    Lining a drawing up with a board profile puts the part of it the user
+    cares about right against the edge, so the last fraction of a millimetre
+    is the drawing. The preview used to paint ink to the cut while the board
+    trimmed it back, which is the direction that loses artwork: the picture
+    comes back from the fab with a slice shaved off that the editor showed
+    whole.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+    from shapely.geometry import Point, Polygon
+    from shapely.ops import unary_union
+
+    from minibadge_designer import pcb
+
+    step, count = 0.02, 60
+    page = ui.page
+    page.click("#tab-art")
+    png = _solid_ink_png()
+    page.set_input_files("#artfile", {"name": "ink.png", "mimeType": "image/png",
+                                      "buffer": png})
+    page.wait_for_function("() => state.art.length === 1 && state.art[0].img",
+                           timeout=UPLOAD_TIMEOUT)
+    ui.js("""() => {
+        state.leds.length = 0; state.texts.length = 0;
+        const a = state.art[0];
+        a.side = 'front'; a.cx = 10.16; a.cy = 10.16; a.wmm = 26;
+        a.material = 'silk'; a.mode = 'threshold';
+        rebuildArt(a); renderLedList(); renderArtList(); draw();
+    }""")
+    # A ray walking IN from just outside the edge, along a line that misses the
+    # connector pads and their own keepouts.
+    rays = {"left": (0.16, 6.0, 1, 0), "right": (20.16, 6.0, -1, 0),
+            "top": (10.16, 0.16, 0, 1)}
+    x0, y0, dx, dy = rays[axis]
+    lit = ui.js("""([x, y, dx, dy, step, n]) => {
+        const out = [];
+        for (let i = 0; i <= n; i++) {
+            const px = Math.round(VIEW.tx + (x + dx * i * step) * SCALE);
+            const py = Math.round(VIEW.ty + (y + dy * i * step) * SCALE);
+            out.push([...cvF.getContext('2d').getImageData(px, py, 1, 1).data]);
+        }
+        return out;
+    }""", [x0, y0, dx, dy, step, count])
+    ui.js("() => { window.__parked = state.art.pop(); draw(); }")
+    bare = ui.js("""([x, y, dx, dy, step, n]) => {
+        const out = [];
+        for (let i = 0; i <= n; i++) {
+            const px = Math.round(VIEW.tx + (x + dx * i * step) * SCALE);
+            const py = Math.round(VIEW.ty + (y + dy * i * step) * SCALE);
+            out.push([...cvF.getContext('2d').getImageData(px, py, 1, 1).data]);
+        }
+        return out;
+    }""", [x0, y0, dx, dy, step, count])
+    ui.js("() => { state.art.push(window.__parked);"
+          " rebuildArt(window.__parked); draw(); }")
+    hits = [i for i, (a, b) in enumerate(zip(lit, bare))
+            if any(abs(a[k] - b[k]) > 8 for k in range(3))]
+    assert hits, f"{axis}: the preview paints no artwork along this edge at all"
+    canvas_mm = hits[0] * step
+
+    params = json.loads(ui.js('() => designFormData().get("params")'))
+    params["name"] = "edge"
+    resp = client.post("/generate", data={
+        "params": json.dumps(params), "art0": (io.BytesIO(png), "ink.png"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    root = invariants._parse_sexp(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "edge/edge.kicad_pcb").decode())
+    ink = unary_union([
+        Polygon([(float(q[1]) - pcb.ORIGIN, float(q[2]) - pcb.ORIGIN)
+                 for q in invariants._kids(invariants._kid(g, "pts"), "xy")])
+        for g in invariants._kids(root, "gr_poly")
+        if str(invariants._val(g, "layer")) == "F.SilkS"])
+    assert not ink.is_empty, f"{axis}: the board prints no artwork on this edge"
+    board_hits = [i for i in range(count + 1)
+                  if ink.contains(Point(x0 + dx * i * step, y0 + dy * i * step))]
+    assert board_hits, f"{axis}: the board prints nothing along this ray"
+    board_mm = board_hits[0] * step
+
+    # Four samples of slack: the board's edge is a traced polygon whose chords
+    # cut corners, and the canvas is read at whole pixels.
+    assert abs(canvas_mm - board_mm) <= 4 * step, (
+        f"{axis} edge: artwork starts {canvas_mm:.2f} mm in from the cut in "
+        f"the preview and {board_mm:.2f} mm in on the board -- the two "
+        "disagree about how close to the edge a drawing may be printed")
+    ui.assert_clean(f"art edge parity, {axis}")
+@pytest.mark.browser
+def test_an_overhanging_svg_previews_the_half_the_board_gets(ui, client):
+    """A vector drawing pushed off the board previews where it prints.
+
+    The two sides get there by different routes: the browser renders the SVG
+    and crops that raster to the board, the server walks the file's own paths
+    and clips the geometry. A drawing hung half off the edge is where those
+    can disagree about scale -- the vector path used to shrink it to fit while
+    the preview overhung it -- and then the picture the user lines up against
+    the outline is not the one the fab prints.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+
+    from minibadge_designer import pcb
+
+    # Dark right half only: which half lands is the whole assertion.
+    svg = (b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100">'
+           b'<rect x="100" y="0" width="100" height="100" fill="#101010"/></svg>')
+    page = ui.page
+    page.click("#tab-art")
+    page.set_input_files("#artfile", {"name": "half.svg",
+                                      "mimeType": "image/svg+xml",
+                                      "buffer": svg})
+    page.wait_for_function("() => state.art.length === 1 && state.art[0].img",
+                           timeout=UPLOAD_TIMEOUT)
+    ui.js("""() => {
+        state.leds.length = 0; state.texts.length = 0;
+        const a = state.art[0];
+        a.side = 'front'; a.cx = 2.0; a.cy = 10.16; a.wmm = 34;
+        a.material = 'silk'; a.mode = 'threshold';
+        rebuildArt(a); renderLedList(); renderArtList(); draw();
+    }""")
+    # The dark half spans the layer's right half: placed 34 mm wide centred at
+    # 2.0 it runs 2.0..19.0, so the board should carry ink out to ~19 mm.
+    drawn = ui.js("() => !!(state.art[0].caches && state.art[0].caches.silk)")
+    params = json.loads(ui.js('() => designFormData().get("params")'))
+    params["name"] = "vec"
+    resp = client.post("/generate", data={
+        "params": json.dumps(params), "art0": (io.BytesIO(svg), "half.svg"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    root = invariants._parse_sexp(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "vec/vec.kicad_pcb").decode())
+    xs = [float(q[1]) - pcb.ORIGIN
+          for g in invariants._kids(root, "gr_poly")
+          if str(invariants._val(g, "layer")) == "F.SilkS"
+          for q in invariants._kids(invariants._kid(g, "pts"), "xy")]
+    assert drawn, "the preview painted nothing for an overhanging SVG"
+    assert xs, "the board printed nothing for an overhanging SVG"
+    # Shrunk to fit instead of clipped, the same placement would put the dark
+    # half's right edge near 12 mm rather than out at the board's own edge.
+    assert max(xs) > 17.0, (
+        f"the vector drawing's ink stops at {max(xs):.2f} mm where the layer "
+        "runs to 19 mm: it was resized to fit the board instead of clipped at "
+        "the edge, and the preview showed the size it did not get")
+    assert max(xs) <= 20.33, (
+        f"vector ink runs to {max(xs):.2f} mm, past the board edge")
+    ui.assert_clean("overhanging svg")

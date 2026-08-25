@@ -46,7 +46,16 @@ MAX_COLS = 192           # grid cap; binds only for artwork wider than ~34 mm
 #: which is the staircase this replaces).
 TRACE_PIXEL_MM = 0.06
 MAX_TRACE_COLS = 480     # cost ceiling; 28.8 mm of art at the pitch above
-EDGE_MARGIN = 0.5        # keep artwork off the board edge
+#: How far artwork keeps off the routed board edge. The fab rule is the
+#: published silk-to-edge capability, 0.2-0.25 mm, and 0.2 is the number this
+#: board already gives copper and hand-placed text (pcb.TEXT_EDGE_CLEAR).
+#: It was 0.5 on the argument that "an uploaded image is framed by the app,
+#: not placed by hand, so it has nothing to gain from the last 0.3 mm". That
+#: stopped being true when artwork was allowed to hang off the board: lining a
+#: drawing up with a board profile is exactly a case where the outermost
+#: third of a millimetre is the drawing -- a face pushed to the edge came back
+#: from the fab shaved, while the editor had drawn it whole.
+EDGE_MARGIN = 0.2
 BOARD = (0.16, 0.16, 20.16, 20.16)
 MAX_PALETTE = 6
 
