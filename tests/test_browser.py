@@ -1873,6 +1873,103 @@ def test_a_back_labels_box_is_not_carved_out_of_the_front_window(ui):
         f"({front_on} vs {front_off}): the label is carving a hole in the "
         "window on the face it does not print on")
     ui.assert_clean("label face carve")
+def _goggles_png() -> bytes:
+    """A band with two eye arcs cut up from its bottom edge -- the shape a
+    user actually drew when the preview and the board last disagreed."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    img = Image.new("RGB", (840, 250), "white")
+    d = ImageDraw.Draw(img)
+    d.rectangle((10, 10, 830, 180), fill="black")
+    d.ellipse((90, 90, 390, 330), fill="white")
+    d.ellipse((450, 90, 750, 330), fill="white")
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
+@pytest.mark.browser
+def test_an_image_windows_bridges_ship_exactly_as_previewed(ui, client):
+    """Bridges under a drawn window match the board, not just shape windows.
+
+    An IMAGE window reaches the two sides through different machinery again:
+    the canvas floods over its classification raster, the board over the
+    traced polygons -- and this exact goggles shape produced three distinct
+    lies in a row while the shape-art matrix stayed green: a via 0.35 mm from
+    an eye cutout read as connected through raster blur, then as severed
+    through doubled window growth, then as connected through a full-radius
+    contact stamp. The composed thresholds are pinned here on the geometry
+    that measured them.
+    """
+    import io
+    import json
+    import zipfile
+
+    import invariants
+
+    from minibadge_designer import pcb
+
+    page = ui.page
+    png = _goggles_png()
+    page.click("#tab-art")
+    page.set_input_files("#artfile", {"name": "goggles.png",
+                                      "mimeType": "image/png", "buffer": png})
+    page.wait_for_function("() => state.art.length === 1 && state.art[0].img",
+                           timeout=UPLOAD_TIMEOUT)
+    got = ui.js("""() => {
+        const a = state.art[0];
+        a.material = 'bare'; a.mode = 'threshold'; a.side = 'through';
+        a.cx = 10.16; a.cy = 12.6; a.wmm = 17.4;
+        rebuildArt(a);
+        state.leds = [{x: 10.16, y: 12.6, color: 'red', side: 'back', rot: 0,
+                       layout: 'inline', size: '0805', reverse: false,
+                       novia: false, nodes: [], farled: false, adv: null,
+                       clk: false, cnodes: []}];
+        renderLedList(); renderArtList(); draw();
+        const br = allBridges()[0];
+        return { br: Object.fromEntries(Object.entries(br).map(
+                     ([k, v]) => [k, v ? v.pts : null])),
+                 params: designFormData().get('params') };
+    }""")
+    params = json.loads(got["params"])
+    params["name"] = "gog"
+    resp = client.post("/generate", data={
+        "params": json.dumps(params), "art0": (io.BytesIO(png), "goggles.png"),
+    }, content_type="multipart/form-data")
+    assert resp.status_code == 200, resp.get_json()
+    root = invariants._parse_sexp(zipfile.ZipFile(io.BytesIO(resp.data)).read(
+        "gog/gog.kicad_pcb").decode())
+    segs = {"F": [], "B": []}
+    for gseg in invariants._kids(root, "segment"):
+        a = invariants._kid(gseg, "start")
+        b = invariants._kid(gseg, "end")
+        segs[str(invariants._val(gseg, "layer"))[0]].append(
+            ((float(a[1]) - pcb.ORIGIN, float(a[2]) - pcb.ORIGIN),
+             (float(b[1]) - pcb.ORIGIN, float(b[2]) - pcb.ORIGIN)))
+    # The via pokes into the band 0.45 mm from the eye's pour: severed, so
+    # the F bridge must exist AND be drawn; the GND pad's pool escapes above
+    # the band, so B carries the unit's two traces and nothing else.
+    fbr = got["br"].get("F")
+    assert fbr, "the preview draws no F bridge for the severed 3V3 via"
+    assert len(segs["F"]) == 1, (
+        f"the board ships {len(segs['F'])} F segment(s), expected exactly the "
+        "via's bridge")
+    (sa, sb) = segs["F"][0]
+
+    def near(p, q):  # the file rounds to 1e-4; a hundredth is plenty
+        return abs(p[0] - q[0]) < 0.01 and abs(p[1] - q[1]) < 0.01
+
+    ends, drawn = (sa, sb), (tuple(fbr[0]), tuple(fbr[-1]))
+    assert ((near(ends[0], drawn[0]) and near(ends[1], drawn[1]))
+            or (near(ends[0], drawn[1]) and near(ends[1], drawn[0]))), (
+        f"the drawn F bridge runs {drawn} but the shipped one runs {ends}")
+    assert got["br"].get("B") is None and len(segs["B"]) == 2, (
+        f"GND: preview {'draws' if got['br'].get('B') else 'cuts none'}, board "
+        f"ships {len(segs['B'])} segments (2 = the unit's own traces): the two "
+        "disagree about a pad whose pool escapes the band")
+    ui.assert_clean("goggles bridge parity")
 
 
 @pytest.mark.browser
