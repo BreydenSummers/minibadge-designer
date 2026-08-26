@@ -2884,6 +2884,51 @@ def _resolve_overlap_rings(b, safe, place):
     return None  # nothing fits under this pass's rules; the caller relaxes them
 
 
+def resolve_placement(leds, pins=ALL_PINS, safe=None,
+                      pin_labels: bool = False) -> list:
+    """Both placement backstops, alternated until a full round moves nothing.
+
+    resolve_pad_overlap slides each unit off the kept connector pad keepouts;
+    the pairwise resolve_overlap sweep separates units from each other. Run
+    once each, in sequence, a later pair's separation could slide a unit BACK
+    onto a keepout the pad pass had already cleared it from -- and only that
+    pair was re-checked, so the board shipped with unit copper on the
+    connector pads, shorting 3V3 to GND, while a clearing position existed
+    (the defect pinned 2026-08-16: three units, one kept pair, the
+    reverse-1206 parked back on the pads by its neighbours' resolution).
+
+    Alternating to a fixed point closes it: a round that moves nothing is a
+    state both passes accept. Both searches are deterministic, so the loop
+    either settles or oscillates; four rounds bound the oscillation (the
+    pinned counterexample settles in two), and a design still conflicted
+    after that is refused by the download gates rather than shipped.
+
+    The pair sweep gets the real kept pins too (it used to judge its pad
+    tiebreak against every corner): a dropped pair's corner is legal parking,
+    and refusing it starved the search of exactly the free room the settle
+    loop needs.
+    """
+    leds = list(leds)
+    for _ in range(4):
+        moved = False
+        for i, led in enumerate(leds):
+            others = [unit_poly(o, safe) for j, o in enumerate(leds) if j != i]
+            slid = resolve_pad_overlap(led, pins, safe, pin_labels, others)
+            if slid != led:
+                leds[i] = slid
+                moved = True
+        for i in range(1, len(leds)):
+            for prev in leds[:i]:
+                apart = resolve_overlap(prev, leds[i], safe=safe, pins=pins,
+                                        pin_labels=pin_labels)
+                if apart != leds[i]:
+                    leds[i] = apart
+                    moved = True
+        if not moved:
+            break
+    return leds
+
+
 def pad_conflict(
     led: Led, pins=ALL_PINS,
     safe: tuple[float, float, float, float] | None = None,
@@ -2903,12 +2948,19 @@ def pad_conflict(
 def resolve_pad_overlap(
     led: Led, pins=ALL_PINS,
     safe: tuple[float, float, float, float] | None = None,
-    pin_labels: bool = False,
+    pin_labels: bool = False, others=(),
 ) -> Led:
     """Slide a unit off the connector pad keepouts (server-side backstop).
 
     The web UI never drops a unit on a pad pair; this covers hand-crafted
     requests the same way resolve_overlap does for unit-unit overlaps.
+
+    `others` is the neighbouring units' copper (unit_poly shapes): a spot is
+    only "clear" when it also keeps resolve_overlap's 0.2 mm off every one of
+    them. Without it this pass and the pair sweep played tug-of-war -- the
+    pad slide parked the unit on a neighbour, the sweep pushed it back onto
+    the pads -- and the livelock shipped the short the escape existed to
+    prevent. resolve_placement passes them; lone-unit callers need not.
     """
     from dataclasses import replace
 
@@ -2950,8 +3002,11 @@ def resolve_pad_overlap(
         # inline 1206) clearing the pair it started on can drop straight onto
         # the other pair of the same row, and the old first-legal-wins pick
         # then ping-ponged between them until the retry budget ran out.
-        clear = next((p for p in cands
-                      if not pad_conflict(p, pins, safe, pin_labels)), None)
+        clear = next(
+            (p for p in cands
+             if not pad_conflict(p, pins, safe, pin_labels)
+             and all(unit_poly(p, safe).distance(o) >= 0.2 - 1e-6
+                     for o in others)), None)
         if clear is not None:
             return clear
         moved = next((p for p in cands if (p.x, p.y) != (led.x, led.y)), None)
@@ -2992,7 +3047,10 @@ def resolve_pad_overlap(
             if not (lo_x <= x <= hi_x and lo_y <= y <= hi_y):
                 continue  # clamp_led_obj would move it back; not a real choice
             poly = Polygon([(x + px, y + py) for px, py in corners])
-            if not any(poly.intersects(box) for box in keepouts):
+            # The envelope contains the unit's copper, so an envelope that
+            # keeps the pair gap off every neighbour keeps the copper off too.
+            if (not any(poly.intersects(box) for box in keepouts)
+                    and all(poly.distance(o) >= 0.2 - 1e-6 for o in others)):
                 return replace(start, x=x, y=y)
         r += 0.5
     return led  # no room; KiCad DRC will flag it

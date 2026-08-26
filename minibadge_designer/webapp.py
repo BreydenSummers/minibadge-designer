@@ -2115,12 +2115,10 @@ def _generate_impl(render: bool):
     try:
         # Backstop nudges: units clear the connector pad pairs and each other
         # (the UI prevents both during drag; hand-crafted requests may not).
-        leds = [pcb.resolve_pad_overlap(led, pins, safe, pin_labels)
-                for led in leds]
-        for i in range(1, len(leds)):
-            for prev in leds[:i]:
-                leds[i] = pcb.resolve_overlap(prev, leds[i], safe=safe,
-                                              pin_labels=pin_labels)
+        # One settle loop rather than one pass of each: run in sequence, the
+        # pair sweep could park a unit back on the pads the pad pass had just
+        # cleared, and the shipped board shorted 3V3 to GND.
+        leds = pcb.resolve_placement(leds, pins, safe, pin_labels)
         # On custom outlines, every unit must sit on solid board (inside the
         # outline, not over a cut-out hole). Relocate strays on a fixed 1.1 mm
         # grid.
