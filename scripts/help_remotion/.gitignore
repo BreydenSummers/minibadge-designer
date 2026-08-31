@@ -1,0 +1,3 @@
+node_modules/
+# Screenshots staged for a render; help_motion.py rewrites them per asset.
+public/help_src/
