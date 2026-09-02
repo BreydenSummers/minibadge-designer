@@ -92,11 +92,51 @@ def render_storyboard(steps, out_path, src_w=1320, src_h=1150):
             imgs.append(Image.open(p).convert("RGB").resize(
                 (FRAME_W, FRAME_H), Image.LANCZOS))
         durations = [max(20, round(d)) for d in durations]
+        # Frames are encoded independently, NEVER as lossy deltas:
+        # minimize_size/allow_mixed let libwebp diff frames, and on this
+        # low-contrast dark UI the deltas leave the previous step's board
+        # and panel ghosting through every later frame (shipped 2026-08-31,
+        # user-visible). _verify_encode below guards the property.
         imgs[0].save(out_path, save_all=True, append_images=imgs[1:], loop=0,
-                     duration=durations, quality=QUALITY, method=6,
-                     minimize_size=True, allow_mixed=True)
+                     duration=durations, quality=QUALITY, method=6)
+        _verify_encode(out_path, imgs)
     return out_path, {"rendered": len(frames), "kept": len(imgs),
                       "bytes": out_path.stat().st_size}
+
+
+# Backstop against encoder surprises. The real guarantee is structural (no
+# delta flags above); this catches gross ghosting/corruption. Measured on this
+# UI at QUALITY=72: normal lossy noise peaks at a per-block mean of ~11, and
+# the 2026-08-31 delta-ghosting defect read ~12 - too close to threshold away,
+# which is exactly why the flags are gone rather than merely policed.
+GHOST_BLOCK_MEAN = 16.0
+BLOCK = 16
+
+
+def _verify_encode(out_path, srcs):
+    from PIL import ImageChops
+    dec = Image.open(out_path)
+    if getattr(dec, "n_frames", 1) != len(srcs):
+        raise RuntimeError(
+            f"{out_path.name}: encoder wrote {getattr(dec, 'n_frames', 1)} "
+            f"frames, expected {len(srcs)}")
+    worst = (0.0, -1)
+    peaks = []
+    for i, src in enumerate(srcs):
+        dec.seek(i)
+        diff = ImageChops.difference(dec.convert("RGB"), src)
+        w, h = diff.size
+        small = diff.convert("L").resize((w // BLOCK, h // BLOCK), Image.BOX)
+        peak = max(small.getdata())
+        peaks.append((peak, i))
+        if peak > worst[0]:
+            worst = (peak, i)
+        if peak > GHOST_BLOCK_MEAN:
+            raise RuntimeError(
+                f"{out_path.name} frame {i}: a {BLOCK}px block deviates from "
+                f"the rendered frame by mean {peak:.1f} (> {GHOST_BLOCK_MEAN})"
+                " - encoder ghosting or corruption; do not ship this file")
+    return worst
 
 
 def render_still(img, out_path, caption="", src_w=None, src_h=None):
