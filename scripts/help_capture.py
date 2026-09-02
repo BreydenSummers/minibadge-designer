@@ -80,6 +80,7 @@ class Capture:
     def __init__(self, workdir=None):
         self.workdir = Path(workdir) if workdir else Path.cwd()
         self.frames = []
+        self.steps = []  # Remotion storyboard: shot via step(), not shoot()
         self._server = None
         self._pw = None
         self._browser = None
@@ -220,7 +221,60 @@ class Capture:
         self.js("() => { for (const el of document.querySelectorAll"
                 "('.help-ring')) el.remove(); }")
 
-    # -- frames --------------------------------------------------------------
+    # -- Remotion storyboard (the current pipeline) ---------------------------
+    def step(self, caption, ring=None, ring_mm=None, side="front", r_px=36,
+             hold_ms=None):
+        """Record one storyboard step: a CLEAN screenshot plus metadata.
+
+        The ring is NOT baked into the pixels - Remotion draws and animates it
+        at render time. `ring` is a CSS selector (boxed ring around a control),
+        `ring_mm` is (mm_x, mm_y) on the board (circular spot ring). At most
+        one per step; a step needing two rings is two steps. `caption` is the
+        short line shown in the chip (<= ~60 chars; it must survive one line
+        at 660 px). hold_ms defaults to 1400, and render() bumps the last
+        step to 2200 unless it was set explicitly.
+        Assert your app state FIRST, exactly as with shoot()."""
+        self.clear_highlight()  # a DOM ring must never appear in the pixels
+        meta = None
+        if ring is not None:
+            box = self.page.locator(ring).first.bounding_box()
+            if not box:
+                raise AssertionError(f"{ring} has no box - is its panel shown?")
+            meta = {"kind": "box", "x": box["x"], "y": box["y"],
+                    "w": box["width"], "h": box["height"]}
+        elif ring_mm is not None:
+            x, y = self.board_to_client(*ring_mm, side)
+            meta = {"kind": "spot", "x": x, "y": y, "r": r_px}
+        path = self.workdir / f"step_{len(self.steps):02d}.png"
+        self.page.screenshot(path=str(path))
+        self.steps.append({"img": path, "caption": caption, "ring": meta,
+                           "hold_ms": hold_ms})
+        return path
+
+    def render(self, asset_name, out_dir=None):
+        """Render the recorded steps through Remotion (help_motion.py) into
+        the house-style animated webp - or, for a .png asset with exactly one
+        step, a styled still. Returns the output path."""
+        import help_motion
+        out_dir = Path(out_dir) if out_dir else self.workdir
+        out = out_dir / asset_name
+        if not self.steps:
+            raise AssertionError("no steps recorded - call step() first")
+        steps = [dict(s) for s in self.steps]
+        for i, s in enumerate(steps):
+            if s["hold_ms"] is None:
+                s["hold_ms"] = LAST_HOLD_MS if i == len(steps) - 1 else HOLD_MS
+        if out.suffix == ".png":
+            if len(steps) != 1:
+                raise AssertionError(".png assets are single-step stills")
+            return help_motion.render_still(
+                steps[0]["img"], out, caption=steps[0]["caption"])
+        path, stats = help_motion.render_storyboard(
+            steps, out, src_w=VIEW_W, src_h=VIEW_H)
+        print(f"rendered {path}: {stats}")
+        return path
+
+    # -- frames (legacy Pillow slideshow; kept for comparison) -----------------
     def shoot(self, note=""):
         """Capture the viewport as the next frame. Assert your state FIRST."""
         path = self.workdir / f"frame_{len(self.frames):02d}.png"

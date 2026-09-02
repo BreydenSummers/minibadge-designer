@@ -334,25 +334,40 @@ _UNROUTABLE_DESIGNS = {
         "nodes": [[10.2, 10.2], [10.3, 10.25]],
         "adv": {"rx": 0.4, "ry": -0.3, "rrot": 90},
     }],
-    # (b) Three inline 1206 units in a row along the top edge box each other
-    #     in: each one's channel across the pour fences off the pad the next
-    #     was aiming for. Branch: "cannot reach its power without a via".
+    # (b) A via-less unit walled off from the only kept pads: pins 15/16
+    #     alone survive (bottom right), and two tall units stacked into a
+    #     wall at x 13.5 fence every channel to them. This row used to box
+    #     itself in with overlapping units instead, until the placement
+    #     settle loop (resolve_placement) learnt to relocate conflicted
+    #     units around their neighbours and quietly rescued the fixture;
+    #     these three don't conflict, so the pipeline leaves them where the
+    #     refusal needs them. Branch: "cannot reach its power without a via".
     "boxed-in-row": [
-        {"x": 6.0 + 4.0 * i, "y": 17.6, "color": "red", "novia": True,
-         "size": "1206", "layout": "inline"}
-        for i in range(3)
+        {"x": 3.5, "y": 10.16, "color": "red", "novia": True,
+         "size": "1206", "layout": "inline"},
+        {"x": 13.5, "y": 6.0, "color": "red", "size": "1206",
+         "layout": "inline", "rot": 90},
+        {"x": 13.5, "y": 14.3, "color": "red", "size": "1206",
+         "layout": "inline", "rot": 90},
     ],
-    # (c) The same boxed row, but the first unit's trace end was hand-picked.
+    # (c) The same wall, but the first unit's trace end was hand-picked.
     #     Branch: "no clear path to the chosen trace end"; the refusal has
     #     to blame the choice, not the via setting the user turned off on
     #     purpose.
     "chosen-end-blocked": [
-        dict({"x": 6.0 + 4.0 * i, "y": 17.6, "color": "red", "novia": True,
-              "size": "1206", "layout": "inline"},
-             **({"term": {"pad": "16"}} if i == 0 else {}))
-        for i in range(3)
+        {"x": 3.5, "y": 10.16, "color": "red", "novia": True,
+         "size": "1206", "layout": "inline", "term": {"pad": "16"}},
+        {"x": 13.5, "y": 6.0, "color": "red", "size": "1206",
+         "layout": "inline", "rot": 90},
+        {"x": 13.5, "y": 14.3, "color": "red", "size": "1206",
+         "layout": "inline", "rot": 90},
     ],
 }
+
+#: The wall fixtures only fence anything with most pads dropped; the full set
+#: leaves pad 2 reachable on the open left side.
+_UNROUTABLE_PINS = {"boxed-in-row": ["15", "16"],
+                    "chosen-end-blocked": ["15", "16"]}
 
 
 @pytest.mark.webapp
@@ -386,7 +401,10 @@ def test_a_via_less_led_that_cannot_route_is_refused_and_not_crashed(
     whether or not the tool is installed (verified with the locator forced to
     None). If it ever starts needing kicad-cli, that is the regression.
     """
-    payload = {"params": json.dumps({"leds": _UNROUTABLE_DESIGNS[design]})}
+    params = {"leds": _UNROUTABLE_DESIGNS[design]}
+    if design in _UNROUTABLE_PINS:
+        params["pins"] = _UNROUTABLE_PINS[design]
+    payload = {"params": json.dumps(params)}
     try:
         resp = client.post(route, data=payload,
                            content_type="multipart/form-data")
@@ -412,9 +430,12 @@ def test_switching_the_via_back_on_makes_the_same_design_downloadable(
     above plus a project here isolates the cause to `novia`.
     """
     leds = [dict(led, novia=False) for led in _UNROUTABLE_DESIGNS[design]]
+    params = {"name": "viaon", "leds": leds}
+    if design in _UNROUTABLE_PINS:
+        params["pins"] = _UNROUTABLE_PINS[design]
     resp = client.post(
         "/generate",
-        data={"params": json.dumps({"name": "viaon", "leds": leds})},
+        data={"params": json.dumps(params)},
         content_type="multipart/form-data",
     )
     invariants.assert_project_zip(resp, "viaon")

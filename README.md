@@ -24,12 +24,12 @@ window with a hidden LED behind it, and a stencil name on the back.
 | <img src="minibadge_designer/static/help/art.webp" width="330"> | **Paint it with materials.** Flat-colour art loads in *By color* mode: each colour becomes silkscreen, exposed copper, a glow window, bare board, or is ignored (photos use a threshold mode instead). Art reaches the board as polygons either way: a raster is traced around its colour regions at 0.06 mm, an SVG straight from its own vector paths. |
 | <img src="minibadge_designer/static/help/wand.webp" width="330"> | **The magic wand** retargets one connected region — the visor becomes a window while the same-coloured body stays solid. |
 | | **Art can hang off the board.** A layer may be far larger than the outline and sit half off it: only the part over the board prints, the rest is clipped, and the on-board detail is unchanged however far it overhangs — which is how you line a drawing up with a board profile. |
-| <img src="minibadge_designer/static/help/materials.png" width="330"> | **What the materials mean.** Silkscreen is white ink; exposed copper shines gold (ENIG) or silver (HASL); glow windows strip the copper so back-side LED light shines through the laminate; bare board opens the mask too. Windows can't cut off power: a metal ring always survives at the board edge, with thin copper links to every LED. |
+| <img src="minibadge_designer/static/help/materials.webp" width="330"> | **What the materials mean.** Silkscreen is white ink; exposed copper shines gold (ENIG) or silver (HASL); glow windows strip the copper so back-side LED light shines through the laminate; bare board opens the mask too. Windows can't cut off power: a metal ring always survives at the board edge, with thin copper links to every LED. |
 | <img src="minibadge_designer/static/help/leds.webp" width="330"> | **LED circuits, pre-routed.** Each LED brings its series resistor, wired 3V3 → R → LED → GND through the copper pours — no routing, and the project passes KiCad DRC out of the box. Either side; SMD 0603/0805/1206 or through-hole domes and bars. Every part prints its own name (**D1**, **R1**) on the silk, placed clear of the pads and of the other ink, and the BOM matches; drag a label where you want it, drop one part's with Delete, or switch the lot off under *Part labels*. |
 | <img src="minibadge_designer/static/help/placement.webp" width="330"> | **When the standard layouts don't fit**, the LED, resistor, and via drag one by one, an LED can skip its via and run a surface trace to any legal pad, and reverse mount / far-side options shine through the board. |
 | <img src="minibadge_designer/static/help/clk.webp" width="330"> | **Blink with the badge clock.** Any LED can run off the connector's CLK pin instead of steady 3V3 — through the classic 3-pad solder jumper (the builder bridges 3V3 for steady, CLK to blink) or a direct trace to pin 9 that always blinks. |
 | <img src="minibadge_designer/static/help/text.webp" width="330"> | **Text anywhere**, front or back, 0.8–5 mm: KiCad's stroke font on silk, or a dozen display typefaces (see [Third-party assets](#third-party-assets)) as exact polygons in any material. |
-| <img src="minibadge_designer/static/help/final.png" width="330"> | **The download** — the visor stays dark until the host badge lights its LED — is a complete KiCad 7+ project: board, project file, BOM.csv, and a README.txt with fab/assembly steps. Or skip KiCad: **⬇ Gerbers for fab** plots a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the `.kicad_pcb` itself). |
+| <img src="minibadge_designer/static/help/final.png" width="330"> | **The download** — the visor stays dark until the host badge lights its LED — is a complete KiCad 7+ project: board, project file, BOM.csv, and a README.txt with fab/assembly steps. Or skip KiCad: press **⬇ Download** and tick **Gerber fab package** for a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the `.kicad_pcb` itself). |
 
 The board sits on the official minibadge v2 connector footprint (pad geometry
 follows [lukejenkins/minibadge](https://github.com/lukejenkins/minibadge),
@@ -47,7 +47,7 @@ netlist only when an LED runs on it.
   DRC-clean, refilling just replaces the thin slits the file format forces
   with proper holes. Light windows carry keepouts so the refill leaves them
   clear.
-- **⬇ Gerbers for fab** does that refill server-side (`kicad-cli` required)
+- The **Gerber fab package** (tick it in **⬇ Download**) does that refill server-side (`kicad-cli` required)
   and plots RS-274X Gerbers plus a merged Excellon drill file.
 
 ## Architecture

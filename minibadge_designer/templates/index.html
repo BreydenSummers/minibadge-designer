@@ -9526,41 +9526,39 @@ const TIPS = {
     copper stripes, a glowing visor, and a stencil name.</p><ul>
     <li>Drag anything on either view; dashed ghosts live on the other side and can be grabbed here too.</li>
     <li>Click to select, then: <b>arrows</b> nudge (Shift = 1 mm), <b>Delete</b> removes, corner squares resize art and text, the round knob rotates (Shift snaps 15°), <b>double-click</b> = +90°.</li>
-    <li><b>SNAP</b> (top bar, on by default) pulls a drag onto the board's centre lines — pink guide — or onto the centre of anything else placed (blue), and onto a 0.5 mm grid when neither is near; rotation then steps 15°. What lines up is the middle of the thing you are dragging, not the point it hangs from, so a whole LED unit centres as the box you can see. Hold <b>Alt</b> while dragging to ignore it for one move. Arrow-key nudges are never snapped.</li>
+    <li><b>SNAP</b> (top bar, on by default) pulls a drag onto the board's centre lines — pink guide — or onto the centre of anything else placed (blue), and onto a 0.5 mm grid when neither is near; rotation then steps 15°. Hold <b>Alt</b> while dragging to ignore it for one move. Arrow-key nudges are never snapped.</li>
   </ul>` },
   shape: { title: "Step 1: a helmet-shaped board", img: "parts.webp", html: `<ul>
     <li><b>+ Silhouette…</b> turns a picture into the board: dark pixels become material, so the badge IS the helmet. Raise the threshold if bright details get punched out.</li>
     <li>Parts stack; switch one to <b>Cuts a hole</b> to punch openings. SVGs trace exactly unless they paint with gradients — the part says so when that happens; <b>Edge smoothing</b> melts raster pixel stairs.</li>
   </ul>` },
   pins: { title: "Connector pins: keep only what you use", img: "pins.webp", html: `<ul>
-    <li>Each row carries 3V3 + GND, so one row alone powers every LED — untick the top row and the helmet's crown stays clean.</li>
+    <li>Each row carries 3V3 + GND — untick the top row and the helmet's crown stays clean.</li>
     <li>Board parts that miss a kept pad are bridged in automatically; dropping the last 3V3 or GND pin blocks downloads until a rail comes back.</li>
-    <li><b>Pin labels</b> (under Board) prints each pad's name — 3V3, GND, CLK — on the <b>back</b> silkscreen for whoever solders the badge. Off by default: while they are on, artwork is carved away from them.</li>
+    <li><b>Pin labels</b> (under Board, off by default) prints each pad's name on the back silkscreen; artwork is carved clear of the names while it is on.</li>
   </ul>` },
   art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
-    <li>The same helmet PNG, added as artwork, loads in <b>By color</b> mode with a material guessed per color — check every row and fix the guesses (here the body is set to <i>Ignore</i>: plain soldermask).</li>
+    <li>The same helmet PNG, added as artwork, loads in <b>By color</b> mode with a material guessed per color — check every row and fix the guesses (here the white cheek pads are set to <i>Ignore</i>; the dark body was already guessed as Ignore — plain soldermask).</li>
     <li>Hover a color row to light up exactly which pixels it controls.</li>
-    <li><b>Push it past the edge.</b> A layer can be wider than the board and sit half off it: only the part over the board prints and the rest is clipped, which is how you line a drawing up with a board profile. Detail on the board stays the same however far it hangs over.</li>
+    <li><b>Push it past the edge.</b> A layer can be wider than the board and sit half off it: only the part over the board prints and the rest is clipped, which is how you line a drawing up with a board profile.</li>
     <li><b>Ink keeps off solder.</b> Silkscreen and copper are trimmed away where the connector pads, their captions, or a part on that face sit — so a logo placed under a blinker arrives with a bite out of it. Move the layer or the part if you want it whole; nothing is lost from the file.</li>
-    <li>Art reaches the board as curves, not squares: a PNG or JPG is traced around its colors, and an SVG is taken straight from its own vector paths — or traced from a rendered copy, if it paints with gradients, which the layer tells you.</li>
     <li><b>Cut through board</b> removes the board itself — a real hole through copper, mask and laminate. The connector pads always keep a tab of board, and parts get moved off the hole (or flagged) automatically.</li>
   </ul>` },
   wand: { title: "Step 3: the visor, with the magic wand", img: "wand.webp", html: `<ul>
     <li>The visor is the same black as the body, but only the visor should glow: pick <b>Glow window</b>, press <b>Pick region</b>, click the visor. Just that connected patch changes; <b>Esc</b> cancels.</li>
     <li>Retarget or remove any pick from the chip under the layer.</li>
   </ul>` },
-  materials: { title: "What the helmet is made of", img: "materials.png", html: `<ul>
+  materials: { title: "What the helmet is made of", img: "materials.webp", html: `<ul>
     <li><b>Silkscreen</b> — white ink (the vents).</li>
     <li><b>Exposed copper</b> — bare metal (the stripes); gold or silver follows the Finish picker, pads included.</li>
-    <li><b>Glow window</b> — copper stripped so back-side LED light shines through the tinted board (the visor). The canvas shows it as a lightened tint; the real board stays dark until the LED behind it lights.</li>
+    <li><b>Glow window</b> — copper stripped so back-side LED light shines through the tinted board (the visor). The real board stays dark until the LED behind it lights.</li>
     <li><b>Bare board</b> — not used on this badge: like glow but the mask opens too, raw laminate, the brightest window. Its Side select adds <b>Through</b> (both faces) next to Front/Back.</li>
     <li>Windows can't cut off power: a metal ring always survives at the board edge, with thin copper links to every LED.</li>
   </ul>` },
   leds: { title: "Step 4: a red LED behind the visor", img: "leds.webp", html: `<ul>
-    <li>An LED with Side set to <b>Back</b> glows in the window on the Back view; the front view shows only its dashed ghost.</li>
+    <li>An LED with Side set to <b>Back</b> glows in the window on the Back view; from the front you'll see only its 3V3 via — its faint dashed ghost is there too, and can still be clicked and dragged.</li>
     <li>Each part prints its name &mdash; <b>D1</b>, <b>R1</b> &mdash; on the silkscreen beside it, which is what the parts list calls them. <b>Drag a label</b> anywhere it will print, double-click it for the automatic spot, or select it and press <b>Delete</b> to drop just that one; each part's card has a tick for it, and <b>Part labels</b> in Board characteristics turns the lot off.</li>
     <li>Anything you select copies: <b>Ctrl/&#8984;+C</b> then <b>V</b>, or <b>X</b> to move it. Works between tabs, so a unit set up the way you like can be pasted into another badge.</li>
-    <li>Each LED arrives with its series resistor, pre-wired — nothing to route.</li>
     <li><b>In line</b> is a thin strip (fits behind the visor); 0805 is the minibadge standard. The Layout and Size selects carry the rest.</li>
   </ul>` },
   placement: { title: "When the standard layouts don't fit", img: "placement.webp", html: `<ul>
@@ -9573,17 +9571,17 @@ const TIPS = {
     <li>CLK feeds the LED from the host badge's clock pin instead of steady 3V3, so it pulses in time with the badge.</li>
     <li>The <b>solder jumper</b> leaves the choice to whoever solders it: bridge its centre pad to the 3V3 side for steady light, the CLK side to blink — exactly one, never both. <b>Direct trace to pin 9</b> (the CLK pad) always blinks.</li>
     <li>Drag the jumper like a part; double-click for +90&deg;. Hover any of its traces to add a bend (+), drag bends to move them, select one and press <b>Delete</b> to remove it — just like a unit's traces.</li>
-    <li>A back-side jumper feeds its 3V3 pad through a via by default; untick <b>Feed 3V3 through a via</b> to run a surface trace instead, then drag its &#9670; endpoint onto either 3V3 pin (double-click it for the nearest).</li>
-    <li><b>Drag either via</b> off the jumper if the hole is in your way: it only lands where the board can carry it (the stub that feeds it moves too), and a double-click puts it back beside the pads.</li>
+    <li>A back-side jumper feeds 3V3 through vias; its card explains the options — surface-trace feed, draggable vias, double-click to reset.</li>
   </ul>` },
   text: { title: "Step 5: your handle on the back", img: "text.webp", html: `<ul>
     <li>"made by half" in <b>Black Ops One</b>, Side set to <b>Back</b>: the bundled typefaces work in any material; KiCad's own stroke font is silkscreen-only.</li>
-    <li>Text hanging past the board edge blocks downloads — drag it fully onto the board.</li>
+    <li>Typed text lands on a clear spot automatically; text dragged past the board edge blocks downloads until it is fully back on.</li>
     <li>Back text reads correctly once the badge is flipped over; keep decorative fonts <b>≥ 1.2 mm</b> so thin strokes survive fabrication.</li>
   </ul>` },
   download: { title: "Step 6: the finished board", img: "final.png", html: `<ul>
-    <li>The visor stays dark until the host badge lights its LED. The zip is a complete KiCad project (board, BOM, a README with ordering notes) that already passes KiCad's design checks. Open the <b>.kicad_pro</b>, press <b>B</b> to refill zones, plot Gerbers.</li>
+    <li>The visor stays dark until the host badge lights its LED.</li>
     <li><b>⬇ Download</b> asks what to include. <b>Gerber fab package</b> is a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the .kicad_pcb itself) — order 1.6 mm, 2 layers, your mask color and finish. Tick more than one and they arrive together in a single zip.</li>
+    <li>Prefer KiCad? The project zip (board, BOM, a README with ordering notes) already passes its design checks — open the <b>.kicad_pro</b> and export from there.</li>
     <li><b>Design file</b> is the only piece you can open here again: tick it to keep editing later, or drop the saved file anywhere on the page to pick up where you left off. A board zip is not a design.</li>
   </ul>` },
 };

@@ -315,10 +315,7 @@ def normalise(spec: pcb.BadgeSpec) -> pcb.BadgeSpec:
     safe = pcb.unit_safe(spec)
     out = [replace(led, **dict(zip(("x", "y"), pcb.clamp_led_obj(led, safe))))
            for led in spec.leds]
-    out = [pcb.resolve_pad_overlap(led, spec.pins, safe) for led in out]
-    for i in range(1, len(out)):
-        for prev in out[:i]:
-            out[i] = pcb.resolve_overlap(prev, out[i], safe=safe)
+    out = pcb.resolve_placement(out, spec.pins, safe, spec.pin_labels)
     if spec.outline:
         out = _relocate_onto_solid_board(out, spec, safe)
     resolved, unroutable = pcb.resolve_novia(replace(spec, leds=out), safe)
@@ -705,26 +702,26 @@ def _somewhere_clears_the_pads(led, pins, safe, step=0.5):
     return False
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "known placement-pipeline defect (found 2026-08-16): with three units and "
-    "one connector pair kept, the pairwise resolve-overlap sweep parks the "
-    "reverse-1206 unit back on a pad keepout that resolve_pad_overlap had "
-    "cleared it from -- a later pair's resolution moves it and only that pair "
-    "is re-checked. A clearing position exists, so the escape clause does not "
-    "apply and the shipped board shorts 3V3 to GND. When the pipeline is "
-    "fixed this goes red: delete this marker AND the xfail on "
-    "test_no_unit_sits_on_a_kept_connector_pad in the same commit."))
 def test_the_placement_pipeline_never_parks_a_unit_back_on_the_pads():
     """The hypothesis-shrunk counterexample, pinned deterministically.
 
-    The property test below regenerates it on every run (derandomize=True),
-    but only for as long as the draw sequence happens to land there; this pin
-    survives strategy and dataclass changes that would shift the draws.
+    The defect it pinned (found 2026-08-16, fixed 2026-08-26): run once each
+    in sequence, the pairwise resolve-overlap sweep could park the
+    reverse-1206 unit back on a pad keepout resolve_pad_overlap had already
+    cleared it from -- only the moving pair was re-checked -- and the shipped
+    board shorted 3V3 to GND while a clearing position existed. Worse, the
+    two passes could LIVELOCK: the pad slide (blind to other units) parked
+    the unit on a neighbour, the sweep pushed it straight back onto the
+    pads. pcb.resolve_placement now alternates the passes to a fixed point
+    and gives the pad escape the neighbours' copper, and this counterexample
+    is why both halves exist.
 
-    Re-derived on 2026-08-24, when the pad keepouts stopped reserving the pin
-    captions' band: the original draw (pin 1 kept, two 0603s) walked off the
-    smaller tl box, which said nothing about the pipeline. Same mechanism,
-    same third unit -- only the pair it is parked on moved.
+    The property test below regenerates draws on every run
+    (derandomize=True), but only for as long as the sequence happens to land
+    somewhere interesting; this pin survives strategy and dataclass changes
+    that would shift the draws. Re-derived on 2026-08-24, when the pad
+    keepouts stopped reserving the pin captions' band: same mechanism, same
+    third unit -- only the pair it parked on moved.
     """
     zeros = {"rx": 0.0, "ry": 0.0, "rrot": 0.0, "lrot": 0.0,
              "vx": 0.0, "vy": 0.0}
@@ -746,14 +743,6 @@ def test_the_placement_pipeline_never_parks_a_unit_back_on_the_pads():
 
 
 @pytest.mark.slow
-@pytest.mark.xfail(strict=False, reason=(
-    "same placement-pipeline defect as "
-    "test_the_placement_pipeline_never_parks_a_unit_back_on_the_pads. Since "
-    "the pad keepouts stopped reserving the pin captions' band the "
-    "derandomized draws no longer land on a counterexample, so this passes "
-    "today -- which is why it is non-strict, and why it is NOT evidence the "
-    "defect is fixed: the strict pin above owns that signal. Remove together "
-    "with it."))
 @given(specs(n_leds=(1, 3), custom_outline=False,
              led_strategy=leds(allow_novia=False)))
 @BOARD
