@@ -16,6 +16,31 @@ services:
       - "127.0.0.1:8000:8000"
     restart: unless-stopped
 
+    # ---- logs ---------------------------------------------------------------
+    # Two places, two purposes. `docker compose logs` has everything (the
+    # access log on stdout, gunicorn and the app's failure lines on stderr),
+    # capped here so a scanner hammering the site cannot fill the disk under
+    # Docker's default unbounded json-file. ./logs/errors.log on the host is
+    # the *errors only* subset -- one line per refused or failed request, with
+    # the cause the user was not shown, plus worker timeouts -- for tailing and
+    # grepping without Docker (see gunicorn.conf.py). It defaults to the
+    # checkout's own logs/ because that directory exists on every machine that
+    # has the code and is owned by whoever cloned it; set LOG_DIR in .env to
+    # put it somewhere else (/var/log/minibadge, say). The container writes as
+    # uid 1000: if the directory belongs to another uid the container still
+    # starts, says so once on stderr, and keeps the errors on stderr only --
+    # `chown 1000 <dir>` on the host fixes it. Rotation of the file is the
+    # host's job (logrotate stanza in the README); it grows by the incident.
+    environment:
+      LOG_DIR: /var/log/minibadge   # the path *inside* the container, fixed
+    volumes:
+      - ${LOG_DIR:-./logs}:/var/log/minibadge
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
     # ---- resource ceilings ------------------------------------------------
     # Not tuning: containment. Every endpoint here is unauthenticated and
     # every one of them decodes a file the caller chose, so "how much of this

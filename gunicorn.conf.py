@@ -61,3 +61,72 @@ accesslog = "-"  # one line per request on stdout, where docker logs look
 # availability incident actually asks. %(D)s is microseconds; %(h)s is the real
 # client address now that forwarded_allow_ips is set above.
 access_log_format = ('%(h)s "%(r)s" %(s)s %(b)s %(D)sus "%(a)s"')
+
+# ---- Where errors go --------------------------------------------------------
+# The app logs one line per refused or failed request (webapp.py, the
+# after_request hook) and gunicorn logs its own worker events (a WORKER TIMEOUT
+# is the line that explains a user's hung export). Both go to stderr, which is
+# `docker compose logs`, and additionally -- when LOG_DIR names a writable
+# directory -- to a plain file there that the host can tail and grep without
+# Docker. docker-compose.yml mounts the checkout's logs/ there by default.
+#
+# WatchedFileHandler, not RotatingFileHandler: four worker processes append to
+# the same file, and only the former is safe to share across processes (each
+# line is one O_APPEND write; it re-opens the file if something outside rotates
+# or truncates it). Rotation is therefore the host's job, and the file only
+# carries WARNING and up -- refusals, failures, worker deaths -- so it grows by
+# the incident, not by the request. The access log stays on stdout only.
+#
+# logconfig_dict is merged shallowly over gunicorn's defaults, whose root logger
+# has a stdout handler AND whose own loggers propagate to it, so every gunicorn
+# line would print twice. Supplying both `loggers` entries with propagate off
+# is what keeps each line single.
+loglevel = os.environ.get("LOG_LEVEL", "info").lower()
+
+_handlers = {
+    "console": {"class": "logging.StreamHandler", "formatter": "generic",
+                "stream": "ext://sys.stdout"},
+    "error_console": {"class": "logging.StreamHandler", "formatter": "generic",
+                      "stream": "ext://sys.stderr"},
+}
+_error_handlers = ["error_console"]
+_log_dir = os.environ.get("LOG_DIR")
+if _log_dir:
+    if os.path.isdir(_log_dir) and os.access(_log_dir, os.W_OK):
+        _handlers["error_file"] = {
+            "class": "logging.handlers.WatchedFileHandler",
+            "formatter": "generic", "level": "WARNING",
+            "filename": os.path.join(_log_dir, "errors.log"),
+        }
+        _error_handlers.append("error_file")
+    else:
+        # Not fatal: a deploy must not fail because a directory is owned by
+        # the wrong user. Said once on stderr, and the file simply is not kept.
+        import sys
+
+        print(f"gunicorn.conf.py: LOG_DIR={_log_dir!r} is not a writable "
+              f"directory; errors go to stderr only. In the container it must "
+              f"be writable by uid 1000: on the host, "
+              f"`chown 1000 <LOG_DIR from .env, default ./logs>`.",
+              file=sys.stderr)
+
+logconfig_dict = {
+    "formatters": {
+        "generic": {
+            "class": "logging.Formatter",
+            "format": "%(asctime)s [%(process)d] [%(levelname)s] %(name)s: %(message)s",
+            "datefmt": "[%Y-%m-%d %H:%M:%S %z]",
+        },
+    },
+    "handlers": _handlers,
+    # The app's logger (minibadge_designer.webapp) has no handlers of its own
+    # and inherits these from root; so does Flask's unhandled-exception
+    # traceback, which goes through that same logger.
+    "root": {"level": loglevel.upper(), "handlers": _error_handlers},
+    "loggers": {
+        "gunicorn.error": {"level": loglevel.upper(), "handlers": _error_handlers,
+                           "propagate": False, "qualname": "gunicorn.error"},
+        "gunicorn.access": {"level": "INFO", "handlers": ["console"],
+                            "propagate": False, "qualname": "gunicorn.access"},
+    },
+}
