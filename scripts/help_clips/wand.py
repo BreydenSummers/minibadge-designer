@@ -5,10 +5,9 @@
 Step 3 of the helmet story, on the shared Recorder (scripts/help_recorder.py).
 Starts from stage2-art (helmet, by-colour art, no overrides) with the Art
 panel scrolled to the Magic wand row and the camera at 1:1 on that row. The
-hand rests on the wand material select so the viewer reads what the wand
-will paint (Bare board, the app's default; an earlier take staged Glow window
-to show a change, and the reviewer found that sent newcomers hunting for a
-switch already made), presses Pick region, then the camera pulls back to the whole window and the hand
+hand sets the wand material to Ignore, presses Pick region and clicks the
+goggle FRAME (it goes; the same-grey mouth detail stays, because the flood
+takes one connected patch), then sets Bare board, presses Pick region again, then the camera pulls back to the whole window and the hand
 travels onto the FRONT canvas: over the crown first, where the whole body
 lights up as the region a click would grab, then down onto the visor lens,
 where only the lens lights up; it clicks and the visor turns bare (tan) while
@@ -51,6 +50,7 @@ from help_recorder import (
 FIXTURE = "stage2-art"
 VISOR_UV = (0.4988, 0.4891)   # the visor lens, in art image space (stage3-wand.json)
 BODY_UV = (0.5, 0.25)         # the crown: black body, above the grey rim
+FRAME_UV = (0.4988, 0.4091)   # the grey goggle frame, straight above the lens
 WAND_MATERIAL = "bare"
 
 
@@ -86,37 +86,52 @@ def record(rec: Recorder) -> dict:
     rec.mark("stage2-art: helmet with by-colour art, wand row at 1:1")
     rec.hold(400)
 
-    # 1. The material select: the hand rests on it so the viewer reads what the
-    # wand will paint (Bare board, the default), without changing it.
-    rec.move_to(*rec.center("#artlist select.wandm"))
-    rec.hold(500)
-    rec.mark("wand material read: Bare board (default)")
-
-    # 2. Pick region.
-    rec.click("#artlist .wandb", after_ms=200)
+    # 1. First pick: the goggle FRAME goes away. The grey row must stay
+    # silkscreen (the same grey draws the detail around the mouthpiece), so the
+    # wand takes just this one connected patch: material Ignore, Pick region,
+    # click the frame at full view.
+    rec.choose("#artlist select.wandm", "ignore", after_ms=250)
+    cap.wait_state("document.querySelector('#artlist select.wandm').value === 'ignore'")
+    rec.mark("wand material: Ignore")
+    rec.click("#artlist .wandb", after_ms=150)
     cap.wait_state("!!picking")
-    rec.mark("Pick region pressed (picking)")
+    (_, frame_pt) = art_client(cap, FRAME_UV)
+    rec.focus_full(ms=700)
+    rec.move_to(*frame_pt, ms=900)
+    cap.wait_state("artHL !== null && artHL.type === 'wandpick'")
+    rec.hold(250)
+    rec.press()
+    rec.wait_shown("state.art[0].overrides.length === 1"
+                   " && state.art[0].overrides[0].material === 'ignore'", 15_000)
+    rec.mark("frame clicked -> gone; the mouth detail stays")
+    rec.hold(700)
 
-    # 3. Onto the FRONT canvas at full view: the camera pulls back while the
-    # hand travels to the crown. With the wand armed, the region under the
-    # cursor lights up: the whole body over the crown, then only the lens.
+    # 2. Second pick: the visor lens becomes bare board. Back to the wand row
+    # for the material, then out to the board; over the crown the whole body
+    # lights up, over the lens only the lens.
+    rec.focus_on("#artlist select.wandm", pad=70, ms=600, include=["#artlist .wandb"])
+    rec.choose("#artlist select.wandm", WAND_MATERIAL, after_ms=250)
+    cap.wait_state(f"document.querySelector('#artlist select.wandm').value === '{WAND_MATERIAL}'")
+    rec.mark("wand material: Bare board")
+    rec.click("#artlist .wandb", after_ms=150)
+    cap.wait_state("!!picking")
     (_, body_pt) = art_client(cap, BODY_UV)
-    rec.focus_full(ms=800)
-    rec.move_to(*body_pt, ms=900)
+    rec.focus_full(ms=700)
+    rec.move_to(*body_pt, ms=800)
     cap.wait_state("artHL !== null && artHL.type === 'wandpick'")
     rec.mark("hover crown: whole body lights up")
-    rec.hold(400)
+    rec.hold(350)
     ((vx, vy), lens_pt) = art_client(cap, VISOR_UV)
     rec.click_at(*lens_pt, settle_ms=300, after_ms=150)
-    rec.wait_shown("state.art[0].overrides.length === 1"
-                   f" && state.art[0].overrides[0].material === '{WAND_MATERIAL}'", 15_000)
+    rec.wait_shown("state.art[0].overrides.length === 2"
+                   f" && state.art[0].overrides[1].material === '{WAND_MATERIAL}'", 15_000)
     rec.mark("visor clicked -> bare board override")
     rec.hold(600)
 
     # 4. The override chip under the layer: the camera closes on the chips
     # while the hand travels; hovering the chip highlights its region.
     rec.focus_on("#artlist .ovchips", pad=90, ms=700)
-    rec.move_to(*rec.center("#artlist .ovchips .chip2"))
+    rec.move_to(*rec.center("#artlist .ovchips .chip2 >> nth=1"))
     cap.wait_state("artHL !== null && artHL.type === 'override'")
     rec.mark("hover override chip (region highlighted)")
     rec.hold(600)
@@ -135,7 +150,9 @@ def record(rec: Recorder) -> dict:
     body_mat = cap.js("() => state.art[0].palette[0].material")   # the black class
     problems = cap.js("() => blockingProblems()")
     return {"overrides": n_over, "black_class_material": body_mat,
-            "override": cap.js("() => state.art[0].overrides[0]"),
+            "override": cap.js("() => state.art[0].overrides[1]"),
+            "frame_override": cap.js("() => state.art[0].overrides[0]"),
+            "grey_class_material": cap.js("() => state.art[0].palette[3].material"),
             "select_value": cap.js("() => document.querySelector('#artlist select.wandm').value"),
             "hovered_at_end": cap.js("() => artHL"),
             "blocking_problems": problems, "visor_mm": (vx, vy)}
@@ -220,8 +237,12 @@ def main() -> None:
     # Ignore (mask), nothing hovered, and a legal board.
     if result["blocking_problems"]:
         raise SystemExit(f"blocking problems: {result['blocking_problems']}")
-    if result["overrides"] != 1 or result["override"]["material"] != WAND_MATERIAL:
-        raise SystemExit(f"expected one {WAND_MATERIAL} override, got {result['override']}")
+    if result["overrides"] != 2 or result["override"]["material"] != WAND_MATERIAL \
+            or result["frame_override"]["material"] != "ignore":
+        raise SystemExit(f"expected an ignore override then a {WAND_MATERIAL} one, got "
+                         f"{result['frame_override']} / {result['override']}")
+    if result["grey_class_material"] != "silk":
+        raise SystemExit("the grey row must stay silkscreen; the wand, not the row, removes the frame")
     if result["black_class_material"] != "ignore":
         raise SystemExit(f"the black class should still be Ignore, got {result['black_class_material']}")
     if result["hovered_at_end"] is not None:

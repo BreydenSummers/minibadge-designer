@@ -5,7 +5,8 @@
 A tour by hovering, on the shared Recorder (scripts/help_recorder.py). Starts
 from stage3-wand (helmet; by-colour art with the gold stripes as exposed
 copper, the white and the grey goggle frame Ignore; the visor lens bare board
-through the wand override), Art panel open. The helmet has NO silkscreen row:
+through the wand override, the goggle frame removed by another), Art panel
+open. The grey row is silkscreen (the mouth detail); the frame is gone by the wand:
 its palette reads Ignore / Ignore / Exposed copper / Ignore, so only the gold
 row and the wand chip are hovered.
 
@@ -55,7 +56,7 @@ FIXTURE = "stage3-wand"
 GOLD_J = 2                 # palette index of the gold stripes (copper) in the fixture
 ROWS = "#artlist .swrow"
 GOLD_ROW = f"{ROWS} >> nth={GOLD_J}"
-OVERRIDE_CHIP = "#artlist .ovchips .chip2"
+OVERRIDE_CHIP = "#artlist .ovchips .chip2:nth-child(2)"   # the visor (bare) chip; the first is the frame
 SILVER = "hasl"            # the Finish option that is not gold
 RESULT_HOLD_MS = 650       # every highlight / finish result stays on the board this long
 
@@ -86,14 +87,14 @@ def record(rec: Recorder) -> dict:
     cap, page = rec.cap, rec.page
     cap.load_fixture(FIXTURE)
     cap.show_panel("art")
-    cap.wait_state("state.art.length === 1 && state.art[0].overrides.length === 1"
+    cap.wait_state("state.art.length === 1 && state.art[0].overrides.length === 2"
                    f" && state.art[0].palette[{GOLD_J}].material === 'copper'")
     finish0 = cap.js("() => state.finish")
     if finish0 == SILVER:
         raise AssertionError(f"fixture finish is already {SILVER}; the clip needs to start on gold")
     mats = cap.js("() => state.art[0].palette.map(p => p.material)")
-    if "silk" in mats:
-        raise AssertionError(f"the helmet story has no silkscreen row, but the palette is {mats}")
+    if mats.count("silk") != 1:
+        raise AssertionError(f"the grey row (goggle frame, mouth detail) must be silkscreen; palette is {mats}")
     # Palette rows and the override chip must both be on screen before the
     # first frame so nothing jumps; the front canvas too, for the highlights.
     cap.js("(s) => document.querySelector(s).scrollIntoView({block: 'center'})", OVERRIDE_CHIP)
@@ -127,7 +128,7 @@ def record(rec: Recorder) -> dict:
     # visor lights up.
     rec.focus_on(OVERRIDE_CHIP, pad=36, include=[f"{ROWS} >> nth=0"])
     rec.move_to(*rec.center(OVERRIDE_CHIP, fx=0.3), ms=600)
-    cap.wait_state("artHL !== null && artHL.type === 'override' && artHL.j === 0")
+    cap.wait_state("artHL !== null && artHL.type === 'override' && artHL.j === 1")
     rec.mark("hover wand chip (bare board)")
     rec.hold(320)
     _show_result(rec)
@@ -171,7 +172,7 @@ def record(rec: Recorder) -> dict:
             "finish_select": cap.js("() => $('finish').value"),
             "palette_materials": mats,
             "gold_material": cap.js(f"() => state.art[0].palette[{GOLD_J}].material"),
-            "override": cap.js("() => state.art[0].overrides[0]"),
+            "override": cap.js("() => state.art[0].overrides[1]"),
             "mask": cap.js("() => state.mask")}
 
 

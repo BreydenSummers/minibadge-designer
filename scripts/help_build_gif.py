@@ -6,8 +6,9 @@ This is the README's hero image: one continuous take of the real app, driven
 the way a person would drive it, from the blank square board to the finished
 badge in the 3D view: black mask, the helmet silhouette as the board shape
 (threshold 220, 18 mm), the top row of connector pins unticked, the same
-picture as by-colour artwork (gold stripes copper, white and the grey goggle
-frame both Ignore), the
+picture as by-colour artwork (gold stripes copper, grey silkscreen, white
+Ignore), the wand taking the goggle frame away (Ignore) and then turning the
+visor lens into BARE BOARD; the
 magic wand turning the visor lens into BARE BOARD (the fixtures use a glow
 window there; this take does not), the red LED on the back behind it, the
 stencil text "half" on the back (Black Ops One, 2 mm at (10.16, 14.9), legal
@@ -97,6 +98,7 @@ TEXT_SIZE = 2.0               # "half" alone is short enough for 2 mm on the chi
 TEXT_TO = (10.16, 14.9)       # the fixtures' spot; measured legal for "half" up to 2.2 mm
 TOP_PINS = ("1", "2", "7", "8")  # the row the stage fixtures untick
 VISOR_UV = (0.4988, 0.4891)   # the visor lens, in art image space (stage3-wand.json)
+FRAME_UV = (0.4988, 0.4091)   # the grey goggle frame, straight above the lens
 
 
 # -- the take ------------------------------------------------------------------
@@ -161,28 +163,33 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
     # White is background, not ink.
     rec.choose("#artlist select.pm[data-j='1']", "ignore")
     cap.wait_state("state.art[0].palette[1].material === 'ignore'")
-    # The grey goggle frame is not ink either: Ignore it so the goggles read
-    # as one shape once the visor is picked. It stays its own colour class,
-    # so the wand's flood still stops at it.
-    rec.choose("#artlist select.pm[data-j='3']", "ignore")
-    cap.wait_state("state.art[0].palette[3].material === 'ignore'")
     rec.set_number("#artlist input.wdn", f"{ART_W:g}")
     cap.wait_state(f"Math.abs(state.art[0].wmm - {ART_W}) < 0.01")
-    rec.mark("art width 18 mm, white and grey ignored")
+    rec.mark("art width 18 mm, white ignored")
     rec.hold(500)
-    # The visor lens becomes bare board: wand, one connected region. The rim
-    # stays silkscreen and the body stays mask because the flood runs on the
-    # 0.18 mm class grid and the rim is wide enough (>=10 px) to stop it.
+    # Two wand picks, one connected region each. The grey row stays
+    # silkscreen because the same grey draws the detail around the mouthpiece;
+    # only the goggle FRAME is taken out (wand -> Ignore), then the visor lens
+    # becomes bare board. The flood runs on the 0.18 mm class grid, and the
+    # frame is its own component there (measured: the mouth details are two
+    # separate components 13 cells below it), so neither pick spills.
+    a = cap.js("() => ({cx: state.art[0].cx, cy: state.art[0].cy, w: state.art[0].wmm,"
+               " h: state.art[0].wmm * state.art[0].ih / state.art[0].iw})")
+    def art_pt(uv):
+        return (a["cx"] + (uv[0] - 0.5) * a["w"], a["cy"] + (uv[1] - 0.5) * a["h"])
+    cap.scroll_into_view("front")
+    rec.choose("#artlist select.wandm", "ignore", after_ms=250)
+    rec.click("#artlist .wandb", after_ms=250)
+    cap.wait_state("!!picking")
+    rec.click_at(*cap.board_to_client(*art_pt(FRAME_UV), "front"), after_ms=200)
+    rec.wait_shown("state.art[0].overrides.length === 1 && state.art[0].overrides[0].material === 'ignore'", 15_000)
+    rec.mark("goggle frame picked away (wand -> Ignore)")
+    rec.hold(500)
     rec.choose("#artlist select.wandm", "bare", after_ms=250)
     rec.click("#artlist .wandb", after_ms=250)
     cap.wait_state("!!picking")
-    a = cap.js("() => ({cx: state.art[0].cx, cy: state.art[0].cy, w: state.art[0].wmm,"
-               " h: state.art[0].wmm * state.art[0].ih / state.art[0].iw})")
-    vx = a["cx"] + (VISOR_UV[0] - 0.5) * a["w"]
-    vy = a["cy"] + (VISOR_UV[1] - 0.5) * a["h"]
-    cap.scroll_into_view("front")
-    rec.click_at(*cap.board_to_client(vx, vy, "front"), after_ms=200)
-    rec.wait_shown("state.art[0].overrides.length === 1 && state.art[0].overrides[0].material === 'bare'", 15_000)
+    rec.click_at(*cap.board_to_client(*art_pt(VISOR_UV), "front"), after_ms=200)
+    rec.wait_shown("state.art[0].overrides.length === 2 && state.art[0].overrides[1].material === 'bare'", 15_000)
     rec.mark("visor picked as bare board")
     rec.hold(700)
     if stop_after <= 2:
@@ -293,6 +300,13 @@ def finish(rec: Recorder, problems) -> dict:
             page.mouse.wheel(0, -100)
             rec.frame(200)
         rec.mark(f"profile view, orbit {rec.orbit()}")
+        rec.hold(1800)
+        # 9. Last: turn the board over so the back, with its LED, resistor and
+        # the name, is what the viewer is left with. The back only shows once
+        # the camera drops below the board plane (phi ~125-130, measured);
+        # azimuth alone never reveals it.
+        rec.orbit_drag(-240, -165)
+        rec.mark(f"turned over to the back, orbit {rec.orbit()}")
     else:
         rec.mark(f"3D view FAILED: {err}")
     rec.hold(2500)

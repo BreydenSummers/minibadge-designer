@@ -7,7 +7,7 @@ stage1-shape fixture (helmet board, black mask, bottom pins only) with the Art
 panel open. The cursor presses **+ Image**, the helmet PNG lands as artwork in
 By color mode and the per-colour rows appear; the cursor hovers the gold row
 and then the grey row so their pixels light up on the front canvas, switches
-the white row and then the grey goggle-frame row to Ignore (cheek pads and
+the white row to Ignore (the cheek pads go; the grey goggle frame and
 frame vanish; the goggles are mask only, the stripes stay copper), sets the
 width to 18 mm, and rests on the painted helmet. 8-11 s, 660 px wide, animated webp.
 
@@ -127,19 +127,8 @@ def record(rec: Recorder) -> dict:
     rec.choose("#artlist select.pm[data-j='1']", "ignore", after_ms=250)
     cap.wait_state("state.art[0].palette[1].material === 'ignore'")
     rec.mark("white row -> Ignore")
-    # ...and the grey goggle frame is mask only too, so the goggles read as
-    # a shape in the black rather than a white outline. Its select sits
-    # right under the white one: a short hop, the same press-then-pick.
-    grey_sel = f"#artlist select.pm[data-j='{grey}']"
-    rec.move_to(*rec.center(grey_sel), ms=300)
-    rec.hold(150)
-    rec.press()
-    rec.hold(120)
-    page.select_option(grey_sel, "ignore")
-    cap.wait_state(f"state.art[0].palette[{grey}].material === 'ignore'")
-    rec.hold(200)
-    rec.mark("grey row -> Ignore")
-    # Result beat: the frame is gone and the stripes are copper on the board.
+    # Result beat: the cheeks are gone and the stripes are copper on the board;
+    # the grey (goggle frame, mouth detail) stays white silkscreen for Step 3.
     # The hand leaves the rows on the way (down to the Width label, the next
     # control), or the grey row's hover keeps its pixels lit magenta through
     # the hold and the clean board is never seen.
@@ -147,7 +136,7 @@ def record(rec: Recorder) -> dict:
     rec.move_to(*rec.center("#artlist .sub:has-text('Width')", fx=0.3), ms=450)
     cap.wait_state("artHL === null")
     rec.settle_camera(250)
-    rec.mark("goggle frame gone, stripes copper")
+    rec.mark("white gone, stripes copper, grey silk")
     rec.hold(600)
 
     # 4. Width 18 mm, same as the board.

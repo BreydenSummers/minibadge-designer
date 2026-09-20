@@ -9532,17 +9532,17 @@ const TIPS = {
     <li>Untick the last 3V3 or GND and downloads are blocked until you tick one again.</li>
   </ul>` },
   art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
-    <li><b>+ Image</b> opens a file picker. A flat-colour picture loads <b>By color</b>: each colour gets a row and a guessed material; hover a row to see the pixels it owns light up on the front view. Here white and the grey goggle frame are set to <i>Ignore</i>, so only the gold stripes print as copper; the dark body is plain soldermask, the board's paint.</li>
+    <li><b>+ Image</b> opens a file picker. A flat-colour picture loads <b>By color</b>: each colour gets a row and a guessed material; hover a row to see the pixels it owns light up on the front view. Here white is set to <i>Ignore</i>; the gold stripes print as copper, the grey (goggle frame, mouth detail) as white silkscreen, and the dark body is plain soldermask, the board's paint.</li>
     <li>Set <b>Width</b> to the board's 18 mm so the picture lands on itself.</li>
   </ul>` },
   wand: { title: "Step 3: the visor, with the magic wand", img: "wand.webp", html: `<ul>
-    <li>The visor is the same black as the body, so no colour row can single it out. The select beside <b>Pick region</b> is what the wand paints; leave it on <b>Bare board</b>: press Pick region, move over the front view &mdash; the region under the cursor lights up, the whole body until the cursor is on the visor &mdash; and click the visor. <b>Esc</b> cancels.</li>
+    <li>The wand retargets one connected patch of a colour. The select beside <b>Pick region</b> is what it paints: set it to <b>Ignore</b>, press Pick region, click the goggle frame, and the frame is gone while the same grey around the mouth stays. Then set it to <b>Bare board</b> and click the visor lens; the region under the cursor lights up as you move, the whole body until the cursor is on the lens. <b>Esc</b> cancels.</li>
     <li>Bare board opens a window right through, so the Front box at the top of the picture's card flips to <b>Through</b>; set it back to Front or Back to open one side only.</li>
     <li>Hover the wand chip under the layer to see its region; retarget or remove the pick there.</li>
   </ul>` },
   materials: { title: "What the helmet is made of", img: "materials.webp", html: `<ul>
     <li>Hover a colour row or the <b>wand &rarr;</b> chip: its pixels light up magenta on the board.</li>
-    <li><b>Silkscreen</b> &mdash; white print (the D1/R1 names, the name on the back).</li>
+    <li><b>Silkscreen</b> &mdash; white print (the mouth detail, the D1/R1 names, the name on the back).</li>
     <li><b>Exposed copper</b> &mdash; bare metal (the stripes); gold or silver follows <b>Finish</b> (Board characteristics), pads included.</li>
     <li><b>Bare board</b> &mdash; paint and metal both removed, down to the fibreglass (the visor): the brightest window for an LED behind it.</li>
     <li><b>Glow window</b> &mdash; metal removed but the coloured paint kept, so an LED behind it glows through dimly.</li>
