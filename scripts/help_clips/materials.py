@@ -93,7 +93,7 @@ def record(rec: Recorder) -> dict:
     if finish0 == SILVER:
         raise AssertionError(f"fixture finish is already {SILVER}; the clip needs to start on gold")
     mats = cap.js("() => state.art[0].palette.map(p => p.material)")
-    if mats.count("silk") != 1:
+    if mats.count("silk") < 1:
         raise AssertionError(f"the grey row (goggle frame, mouth detail) must be silkscreen; palette is {mats}")
     # Palette rows and the override chip must both be on screen before the
     # first frame so nothing jumps; the front canvas too, for the highlights.

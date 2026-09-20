@@ -5,9 +5,11 @@
 This is the README's hero image: one continuous take of the real app, driven
 the way a person would drive it, from the blank square board to the finished
 badge in the 3D view: black mask, the helmet silhouette as the board shape
-(threshold 220, 18 mm), the top row of connector pins unticked, the same
-picture as by-colour artwork (gold stripes copper, grey silkscreen, white
-Ignore), the wand taking the goggle frame away (Ignore) and then turning the
+(threshold 220, 18 mm; the app keeps a foot of board under each pin pair and
+now closes the sliver where the chin meets it), the top row of connector pins
+unticked, the same
+picture as by-colour artwork at 19.6 mm (gold stripes copper, grey cheeks and
+frame silkscreen, the white background Ignored), the wand taking the goggle frame away (Ignore) and then turning the
 visor lens into BARE BOARD; the
 magic wand turning the visor lens into BARE BOARD (the fixtures use a glow
 window there; this take does not), the red LED on the back behind it, the
@@ -90,7 +92,7 @@ from help_recorder import (
 
 SHAPE_THRESHOLD = 220         # 128 punches the vents out of the outline
 SHAPE_W = 18.0
-ART_W = 18.0
+ART_W = 19.6                  # a little over the board, so the drawing runs to the edges
 LED_TO = (10.3625, 10.0)      # back, behind the visor (stage4-led.json)
 TEXT = "half"
 TEXT_FONT = "blackops"
@@ -160,12 +162,14 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
     rec.wait_shown("state.art.length === 1 && state.art[0].palette && state.art[0].palette.length > 0", 20_000)
     rec.mark("artwork uploaded, by colour")
     rec.hold(700)
-    # White is background, not ink.
+    # White is the picture's background, not ink: Ignore it, or it prints
+    # over the feet under the pins. The grey panels (cheeks, goggle frame,
+    # mouth detail) are silkscreen as guessed, the gold stripes copper.
     rec.choose("#artlist select.pm[data-j='1']", "ignore")
     cap.wait_state("state.art[0].palette[1].material === 'ignore'")
     rec.set_number("#artlist input.wdn", f"{ART_W:g}")
     cap.wait_state(f"Math.abs(state.art[0].wmm - {ART_W}) < 0.01")
-    rec.mark("art width 18 mm, white ignored")
+    rec.mark("art width 19.6 mm (bleeds past the edge), white background ignored")
     rec.hold(500)
     # Two wand picks, one connected region each. The grey row stays
     # silkscreen because the same grey draws the detail around the mouthpiece;

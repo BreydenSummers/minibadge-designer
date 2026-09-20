@@ -9525,15 +9525,15 @@ const TIPS = {
   </ul>` },
   shape: { title: "Step 1: a helmet-shaped board", img: "parts.webp", html: `<ul>
     <li><b>+ Silhouette&hellip;</b> opens a file picker. Dark pixels of the picture become board, so the badge IS the helmet. Raise <b>Threshold</b> if bright details get punched out: at the default 128 the vents are holes and the LED has no solid board under it, so it is boxed red with a warning; at 220 (used here) the vents close and the box clears. Then set <b>Width</b> to the real size, 18 mm.</li>
-    <li>The message about bridges means the helmet does not reach the corner pads, so small necks of board were added to them.</li>
+    <li>The message about bridges means the chin does not cover the corner pads, so the app keeps a foot of board under each pin pair and joins it to the chin.</li>
   </ul>` },
   pins: { title: "Connector pins: keep only what you use", img: "pins.webp", html: `<ul>
     <li>Each row of the connector carries 3V3 and GND. Untick the top row's four boxes (<b>VBAT, GND, 3V3, GND</b>) and the top corners stay clean; the bottom row (<b>CLK, NC, 3V3, GND</b>) still powers the badge.</li>
     <li>Untick the last 3V3 or GND and downloads are blocked until you tick one again.</li>
   </ul>` },
   art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
-    <li><b>+ Image</b> opens a file picker. A flat-colour picture loads <b>By color</b>: each colour gets a row and a guessed material; hover a row to see the pixels it owns light up on the front view. Here white is set to <i>Ignore</i>; the gold stripes print as copper, the grey (goggle frame, mouth detail) as white silkscreen, and the dark body is plain soldermask, the board's paint.</li>
-    <li>Set <b>Width</b> to the board's 18 mm so the picture lands on itself.</li>
+    <li><b>+ Image</b> opens a file picker. A flat-colour picture loads <b>By color</b>: each colour gets a row and a guessed material; hover a row to see the pixels it owns light up on the front view. Here white is the picture's background, so it is set to <i>Ignore</i> (otherwise it prints over the feet under the pins); the gold stripes print as copper, the grey panels (cheeks, goggle frame, mouth detail) as white silkscreen, and the dark body is plain soldermask, the board's paint.</li>
+    <li>Set <b>Width</b> a little over the board's 18 mm (19.6 here) so the drawing runs right to the edges; only the part over the board prints.</li>
   </ul>` },
   wand: { title: "Step 3: the visor, with the magic wand", img: "wand.webp", html: `<ul>
     <li>The wand retargets one connected patch of a colour. The select beside <b>Pick region</b> is what it paints: set it to <b>Ignore</b>, press Pick region, click the goggle frame, and the frame is gone while the same grey around the mouth stays. Then set it to <b>Bare board</b> and click the visor lens; the region under the cursor lights up as you move, the whole body until the cursor is on the lens. <b>Esc</b> cancels.</li>
@@ -9542,7 +9542,7 @@ const TIPS = {
   </ul>` },
   materials: { title: "What the helmet is made of", img: "materials.webp", html: `<ul>
     <li>Hover a colour row or the <b>wand &rarr;</b> chip: its pixels light up magenta on the board.</li>
-    <li><b>Silkscreen</b> &mdash; white print (the mouth detail, the D1/R1 names, the name on the back).</li>
+    <li><b>Silkscreen</b> &mdash; white print (the cheek pads, the mouth detail, the D1/R1 names, the name on the back).</li>
     <li><b>Exposed copper</b> &mdash; bare metal (the stripes); gold or silver follows <b>Finish</b> (Board characteristics), pads included.</li>
     <li><b>Bare board</b> &mdash; paint and metal both removed, down to the fibreglass (the visor): the brightest window for an LED behind it.</li>
     <li><b>Glow window</b> &mdash; metal removed but the coloured paint kept, so an LED behind it glows through dimly.</li>
