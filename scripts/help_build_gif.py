@@ -6,7 +6,8 @@ This is the README's hero image: one continuous take of the real app, driven
 the way a person would drive it, from the blank square board to the finished
 badge in the 3D view: black mask, the helmet silhouette as the board shape
 (threshold 220, 18 mm), the top row of connector pins unticked, the same
-picture as by-colour artwork (gold stripes copper, goggle rim silkscreen), the
+picture as by-colour artwork (gold stripes copper, white and the grey goggle
+frame both Ignore), the
 magic wand turning the visor lens into BARE BOARD (the fixtures use a glow
 window there; this take does not), the red LED on the back behind it, the
 stencil text "half" on the back (Black Ops One, 2 mm at (10.16, 14.9), legal
@@ -160,9 +161,14 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
     # White is background, not ink.
     rec.choose("#artlist select.pm[data-j='1']", "ignore")
     cap.wait_state("state.art[0].palette[1].material === 'ignore'")
+    # The grey goggle frame is not ink either: Ignore it so the goggles read
+    # as one shape once the visor is picked. It stays its own colour class,
+    # so the wand's flood still stops at it.
+    rec.choose("#artlist select.pm[data-j='3']", "ignore")
+    cap.wait_state("state.art[0].palette[3].material === 'ignore'")
     rec.set_number("#artlist input.wdn", f"{ART_W:g}")
     cap.wait_state(f"Math.abs(state.art[0].wmm - {ART_W}) < 0.01")
-    rec.mark("art width 18 mm, white ignored")
+    rec.mark("art width 18 mm, white and grey ignored")
     rec.hold(500)
     # The visor lens becomes bare board: wand, one connected region. The rim
     # stays silkscreen and the body stays mask because the flood runs on the
