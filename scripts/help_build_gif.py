@@ -10,7 +10,10 @@ picture as by-colour artwork (gold stripes copper, goggle rim silkscreen), the
 magic wand turning the visor lens into BARE BOARD (the fixtures use a glow
 window there; this take does not), the red LED on the back behind it, the
 stencil text "half" on the back (Black Ops One, 2 mm at (10.16, 14.9), legal
-under all three gates), then the 3D view. It reuses the help-example harness (scripts/help_capture.py:
+under all three gates), then the 3D view: an orbit, the Soldermask and Board
+opacity sliders dragged to 0 so the copper stands alone, a near top-down look
+at the routing, and a low profile with a wheel zoom-in where the vias show as
+pillars between the two copper layers. It reuses the help-example harness (scripts/help_capture.py:
 private server, Chromium, the 1320x1150 dark viewport, mm->client conversion)
 and adds two things the harness does not have.
 
@@ -327,6 +330,31 @@ class Recorder:
             self.page.keyboard.up("Alt")
         self.hold(300)
 
+    def orbit_drag(self, dx: float, dy: float, bump: float = 0, ms: int = 1800) -> None:
+        """Turn the <model-viewer> camera with a real drag from the current
+        pointer spot. Measured in this app: ~0.33 deg of azimuth per px of
+        horizontal drag (rightwards = camera to the left), and ~0.33 deg of
+        elevation per px vertically (dragging DOWN raises the camera toward
+        top-down, phi -> 0; dragging UP lowers it toward the board plane,
+        phi -> 90). `bump` adds a sine wobble across the drag."""
+        self.page.mouse.down()
+        self.down_ms = self.clock_ms
+        steps = max(8, round(ms / STEP_MS))
+        x0, y0 = self.mx, self.my
+        for i in range(1, steps + 1):
+            u = (1 - math.cos(math.pi * i / steps)) / 2
+            self.mx = x0 + dx * u
+            self.my = y0 + dy * u + bump * math.sin(math.pi * u)
+            self.page.mouse.move(self.mx, self.my)
+            self.frame(STEP_MS)
+        self.page.mouse.up()
+        self.frame(STEP_MS)
+
+    def orbit(self) -> str:
+        return self.cap.js("() => { const o = $('d3mv').getCameraOrbit();"
+                           " return 'theta ' + Math.round(o.theta*180/Math.PI)"
+                           " + ' phi ' + Math.round(o.phi*180/Math.PI); }")
+
     def wait_shown(self, predicate: str, timeout_ms: int = 30_000) -> None:
         """Wait on app state; show the wait as one held frame, capped."""
         t0 = time.monotonic()
@@ -355,7 +383,7 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
         rec.hold(600)
         return finish(rec, problems=cap.js("() => blockingProblems()"))
     rec.mark("blank square board")
-    rec.hold(1200)
+    rec.hold(1000)
 
     # 1. Board shape from the helmet silhouette, on a black mask.
     cap.show_panel("shape")
@@ -389,7 +417,7 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
     rec.wait_outline_shown()
     cap.wait_state("state.pins.length === 4 && ['9','10','15','16'].every(n => state.pins.includes(n))")
     rec.mark("top-row pins unticked")
-    rec.hold(700)
+    rec.hold(500)
     if stop_after <= 1:
         return finish(rec, problems=cap.js("() => blockingProblems()"))
 
@@ -422,7 +450,7 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
     rec.click_at(*cap.board_to_client(vx, vy, "front"), after_ms=200)
     rec.wait_shown("state.art[0].overrides.length === 1 && state.art[0].overrides[0].material === 'bare'", 15_000)
     rec.mark("visor picked as bare board")
-    rec.hold(900)
+    rec.hold(700)
     if stop_after <= 2:
         return finish(rec, problems=cap.js("() => blockingProblems()"))
 
@@ -473,7 +501,7 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
     cap.js("() => draw()")
     problems = cap.js("() => blockingProblems()")
     rec.mark("text placed on the back")
-    rec.hold(900)
+    rec.hold(700)
     return finish(rec, problems)
 
 
@@ -500,17 +528,39 @@ def finish(rec: Recorder, problems) -> dict:
         mv = rec.center("#d3mv")
         rec.move_to(mv[0] + 60, mv[1] + 20)
         rec.hold(200)
-        page.mouse.down()
-        rec.down_ms = rec.clock_ms
-        steps = 22
-        x0, y0 = rec.mx, rec.my
-        for i in range(1, steps + 1):
-            u = (1 - math.cos(math.pi * i / steps)) / 2
-            rec.mx, rec.my = x0 - 170 * u, y0 - 40 * math.sin(math.pi * u)
-            page.mouse.move(rec.mx, rec.my)
-            rec.frame(STEP_MS)
-        page.mouse.up()
-    rec.mark("3D view" + (f" FAILED: {err}" if err else ""))
+        rec.orbit_drag(-170, 0, bump=-40)
+        rec.mark(f"3D view, orbit {rec.orbit()}")
+        rec.hold(800)
+        # 6. Peel the layers: mask off, then the board body, so the copper
+        # pours, traces, vias and parts stand on their own.
+        rec.drag_slider("#d3layers input[data-layer=soldermask]", 0)
+        cap.wait_state("document.querySelector('#d3layers input[data-layer=soldermask]').value === '0'")
+        rec.mark("soldermask opacity 0")
+        rec.hold(1100)
+        rec.drag_slider("#d3layers input[data-layer=board]", 0)
+        cap.wait_state("document.querySelector('#d3layers input[data-layer=board]').value === '0'")
+        rec.mark("board opacity 0")
+        rec.hold(1100)
+        # 7. Inspect the routing from nearly above (phi -> ~20 deg), squared
+        # up (theta -> ~90 deg): pads -> resistor -> LED reads left to right.
+        rec.move_to(mv[0] - 40, mv[1] - 60)
+        rec.hold(200)
+        rec.orbit_drag(-40, 135)
+        rec.mark(f"top-down inspection, orbit {rec.orbit()}")
+        rec.hold(1500)
+        # 8. Then a near side-on profile (phi -> ~72 deg, measured: at 85+
+        # the two copper sheets merge into one line and the vias vanish): the
+        # vias become pillars between the copper layers, LED and pins standing
+        # up. Two wheel notches zoom in (radius 0.06 -> ~0.053) so the 1.5 mm
+        # stack reads at hero-image scale while the pins stay in frame (four
+        # notches pushed the connector out of the picture).
+        rec.orbit_drag(0, -155)
+        for _ in range(2):
+            page.mouse.wheel(0, -100)
+            rec.frame(200)
+        rec.mark(f"profile view, orbit {rec.orbit()}")
+    else:
+        rec.mark(f"3D view FAILED: {err}")
     rec.hold(2500)
     return {"blocking_problems": problems, "model3d_error": err,
             "design": cap.js("() => designJSON()")}
