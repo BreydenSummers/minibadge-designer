@@ -75,6 +75,9 @@ badge usually comes together in this order:
 5. Download. You get a KiCad project with the board, a BOM and assembly notes,
    or you tick **Gerber fab package** for a zip that goes straight to JLCPCB or
    PCBWay, and either way the board already passes KiCad's design rule check.
+   Tick **Design file** as well if you want to come back to it later: it is
+   the only download the app can open again, with the **Open** button or by
+   dropping it anywhere on the page.
 
 Everything you place can be dragged, resized and rotated on either view, and
 parts on the far side show through as dashed ghosts so you can grab them from
