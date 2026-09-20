@@ -1264,6 +1264,13 @@ def _shape_geometry(shape_meta: dict, uploads: dict, rasters: dict):
     return None if shape.is_empty else shape
 
 
+#: Half the widest gap closed where a shape meets a pad tab, mm. 0.3 closes the
+#: slivers a curve leaves against a tab's straight edge (measured 0.2-0.5 mm on
+#: a helmet chin) and is under the 0.8 mm slot a fab can actually rout, so
+#: nothing a board house could make is filled in.
+TAB_CLOSE_R = 0.3
+
+
 def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict,
                      cuts=None):
     """Board outline rings from the shape params: (rings, bridged) or (None, False).
@@ -1313,10 +1320,64 @@ def _compute_outline(shape_meta: dict, uploads: dict, pins, rasters: dict,
         if not pieces:
             return None, False
         outline = max(pieces, key=lambda g: g.area)
+    # Where the shape's edge crosses a tab (or a bridge) at a shallow angle,
+    # the plain union leaves a wedge of non-board between the curve and the
+    # tab's straight edge: a slit no fab can rout, and the preview shows it
+    # as a notch in the mask beside the pins. Close gaps narrower than
+    # 2 * TAB_CLOSE_R, but only within a millimetre of the tab, so the shape's
+    # own notches and vents elsewhere stay exactly as drawn. The closing is
+    # computed on a wider neighbourhood than it is applied to, so the cut
+    # edge of that neighbourhood cannot leave artifacts of its own.
+    for anchor in (*plates, *bridges):
+        near = outline.intersection(anchor.buffer(2.0))
+        if near.is_empty:
+            continue
+        # Mitre joins: the fill keeps the shape's own edge directions, so a
+        # raw pixel staircase against a tab stays axis-parallel (round joins
+        # would draw arcs into it).
+        closed = near.buffer(TAB_CLOSE_R, join_style=2).buffer(-TAB_CLOSE_R, join_style=2)
+        fill = closed.difference(outline).intersection(anchor.buffer(1.0))
+        # The difference can carry zero-width lines along shared edges; only
+        # the polygonal wedges are board.
+        wedges = [g for g in getattr(fill, "geoms", [fill])
+                  if g.geom_type == "Polygon" and g.area > 1e-6]
+        if not wedges:
+            continue
+        merged = unary_union([outline, *wedges])
+        if not merged.is_valid:
+            # A wedge sharing an edge with the outline can leave a self-touch
+            # at its tip; buffer(0) renodes it. An invalid outline here broke
+            # every clip downstream (silk ran into the edge, and DRC said so).
+            merged = merged.buffer(0)
+        if merged.geom_type == "MultiPolygon":
+            merged = max(merged.geoms, key=lambda g: g.area)
+        outline = merged
     outline = outline.simplify(0.02)
+    if not outline.is_valid:
+        # simplify() can pinch a ring into a self-touch; every clip downstream
+        # (art keepouts, the pour, KiCad's edge) needs a clean polygon.
+        outline = outline.buffer(0)
+        if outline.geom_type == "MultiPolygon":
+            outline = max(outline.geoms, key=lambda g: g.area)
     if not isinstance(outline, Polygon) or outline.is_empty:
         return None, False
-    return _geom_rings(outline), bool(bridges)
+    rings = _geom_rings(outline)
+    # _geom_rings rounds to a thousandth of a millimetre, and two vertices
+    # that close together (the closing's round joins leave them) can round
+    # onto a self-intersection. Check the rings as they will be consumed and
+    # renode once if that happened; buffer(0) lands on the same rounded
+    # coordinates, so a second pass is not needed in practice.
+    for _ in range(2):
+        check = Polygon(rings[0], rings[1:])
+        if check.is_valid:
+            break
+        fixed = check.buffer(0)
+        if fixed.geom_type == "MultiPolygon":
+            fixed = max(fixed.geoms, key=lambda g: g.area)
+        if not isinstance(fixed, Polygon) or fixed.is_empty:
+            return None, False
+        rings = _geom_rings(fixed)
+    return rings, bool(bridges)
 
 
 def _rings_signature(rings) -> tuple:

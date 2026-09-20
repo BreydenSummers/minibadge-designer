@@ -408,7 +408,7 @@ def test_a_via_less_led_that_cannot_route_is_refused_and_not_crashed(
     try:
         resp = client.post(route, data=payload,
                            content_type="multipart/form-data")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # TESTING=True propagates rather than 500ing; in production this same
         # escape is the 500 the user's browser receives.
         raise AssertionError(
@@ -2065,7 +2065,7 @@ def test_a_malformed_design_is_refused_with_a_message_the_ui_can_show(
     try:
         resp = client.post(route, data={"params": _MALFORMED_DESIGNS[design]},
                            content_type="multipart/form-data")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         # TESTING=True propagates instead of 500ing; in production this same
         # escape is the 500 page the browser renders.
         raise AssertionError(
@@ -2848,7 +2848,8 @@ def test_the_preview_resolves_artwork_at_the_pitch_the_tracer_samples_it_at():
     import re
     from pathlib import Path
 
-    from minibadge_designer import logo, pcb as pcb_for_path
+    from minibadge_designer import logo
+    from minibadge_designer import pcb as pcb_for_path
 
     html = (Path(pcb_for_path.__file__).parent / "templates" / "index.html").read_text()
     m = re.search(r"const TRACE_PIXEL_MM = ([\d.]+), MAX_TRACE_COLS = (\d+);", html)
@@ -3070,3 +3071,71 @@ def test_a_window_keeps_off_a_part_label_only_on_the_face_it_prints_on(client):
         assert not back.contains(Point(cx, cy)), (
             f"{lab['ref']}: the BACK window cut opens mask under the printed "
             "label, and the fab will clip the ink")
+
+
+def _tab_slivers_mm2(rings, pins=("9", "10", "15", "16")) -> float:
+    """Non-board wedges narrower than 0.6 mm within 1 mm of a kept pad tab.
+
+    A closing (dilate then erode by 0.3 mm) of the outline near a tab fills
+    exactly such wedges; whatever it fills that the outline itself lacks is
+    the sliver. Calibrated: a flat triangle whose slanted sides cross the
+    bottom tabs' top edges reads 0.213 mm^2 on the un-fixed union and the
+    helmet silhouette reads 1.16 mm^2; both read 0.000 once the outline
+    closes the gap.
+    """
+    from shapely.geometry import Polygon, box
+
+    outline = Polygon(rings[0], rings[1:])
+    total = 0.0
+    for key in pcb_mod.active_pairs(pins):
+        plate = box(*pcb_mod.PAD_PAIRS[key]["plate"])
+        near = outline.intersection(plate.buffer(2.0))
+        closed = near.buffer(0.3, join_style=2).buffer(-0.3, join_style=2)
+        total += closed.difference(outline).intersection(plate.buffer(1.0)).area
+    return total
+
+
+def test_a_shape_meeting_a_pad_tab_at_a_shallow_angle_leaves_no_sliver():
+    """A curved or slanted board edge crossing the straight top of a pad tab
+    used to leave a wedge of non-board between them: a slit no fab can rout,
+    and a notch in the mask right beside the pins on the badge. The outline
+    must close that wedge -- and nothing else: a narrow slot the user cut on
+    purpose away from the tabs is theirs to keep.
+
+    Varied off the defaults: a triangle part (not the image or circle every
+    other outline test uses), rotated 180 so it points down, wider than the
+    board so both slanted edges cross the bottom tabs with a solid overlap
+    (no bridge involved); the top pins dropped so only the bottom tabs exist.
+    """
+    from shapely.geometry import Polygon
+
+    from minibadge_designer import webapp
+
+    pins = ("9", "10", "15", "16")
+    tri = {"mode": "custom", "smooth": 0, "elements": [
+        {"kind": "triangle", "op": "add", "cx": 10.16, "cy": 15.5, "w": 30.0, "h": 11.0,
+         "rot": 180, "sides": 6, "threshold": 128, "invert": False}]}
+    rings, bridged = webapp._compute_outline(tri, {}, pins, {})
+    assert rings is not None and not bridged, "the triangle overlaps both tabs solidly; no bridge expected"
+    assert len(rings) == 1, f"closing the wedge must not open a hole: {len(rings)} rings"
+    assert Polygon(rings[0]).is_valid, (
+        "the closed outline must be a clean polygon: an invalid one broke every clip "
+        "downstream and DRC saw silk run into the edge")
+    assert _tab_slivers_mm2(rings, pins) < 0.02, (
+        f"a sliver survives where the slanted edge meets a tab: {_tab_slivers_mm2(rings, pins):.3f} mm^2")
+
+    # Contrast: a 0.4 mm slit the user drew into a silhouette, far from any
+    # tab, is kept. (Shape parts clamp to 2 mm, so the slit comes from an
+    # image: a 20 x 20 mm black square at 0.05 mm/px with an 8 px x 6 mm cut
+    # from the top edge.) An unbounded closing fills it: area 401.6 vs 398.6.
+    img = Image.new("L", (400, 400), 0)
+    ImageDraw.Draw(img).rectangle((196, 0, 203, 120), fill=255)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    slit = {"mode": "custom", "smooth": 0, "elements": [
+        {"kind": "image", "op": "add", "cx": 10.16, "cy": 10.16, "w": 20, "h": 20, "rot": 0,
+         "sides": 6, "threshold": 128, "invert": False, "fname": "slit.png"}]}
+    rings, _ = webapp._compute_outline(slit, {0: buf.getvalue()}, pins, {})
+    area = Polygon(rings[0], rings[1:]).area
+    assert area < 399.0, (
+        f"the user's own 0.4 x 6 mm slit was filled in (area {area:.2f}); closing must stay within 1 mm of a tab")
