@@ -4,6 +4,23 @@ The long version: what the Docker build does, how the container is tuned and
 contained, where the logs go, and how the site deploys. The README covers
 getting it running; this covers keeping it running.
 
+## The code
+
+| File | What it does |
+|---|---|
+| `minibadge_designer/webapp.py` | Flask app: the routes, upload checks, and the zip |
+| `minibadge_designer/pcb.py` | Writes the `.kicad_pcb`, project file, and BOM |
+| `minibadge_designer/logo.py` | Turns images into silkscreen and window polygons |
+| `minibadge_designer/svgart.py` | Same, for SVG |
+| `minibadge_designer/templates/index.html` | The whole browser editor |
+
+The download is a KiCad 7+ project: `<name>.kicad_pcb`, `<name>.kicad_pro`,
+`BOM.csv`, and a `README.txt` with fab and assembly steps. Press **B** once in
+KiCad to refill the copper zones; the shipped fills already pass DRC, refilling
+only tidies the slits the file format forces. The board sits on the official
+minibadge v2 connector footprint; VBATT and NC stay unconnected per the
+standard, and CLK is wired only when an LED uses it.
+
 ## What the build does
 
 1. Pulls KiCad 9.x from Debian and keeps **only the ten 3D models** this app
@@ -63,19 +80,28 @@ a Cloudflare address".
 Two records, for two questions.
 
 - **What is happening?** `docker compose logs -f`. Every request is one line on
-  stdout (client, request, status, bytes, duration in µs, user agent); gunicorn's
-  own events and the app's failures are on stderr. Docker keeps the last 5 × 20 MB
-  of it (`logging:` in `docker-compose.yml`), so a scanner cannot fill the disk.
+  stdout (client, request, status, bytes, duration in µs, upload size, user
+  agent); gunicorn's own events and the app's failures are on stderr. Docker
+  keeps the last 5 × 20 MB of it (`logging:` in `docker-compose.yml`), so a
+  scanner cannot fill the disk.
 - **What went wrong?** `tail -f logs/errors.log` in the checkout, no Docker
   needed. One line per refused (4xx, `WARNING`) or failed (5xx, `ERROR`) request:
-  the client, the endpoint, the status, the message the user saw, and where the
-  handler knew more than it said, the cause — the exception behind a "could not
-  process the board shape", or kicad-cli's full stderr behind a "KiCad could not
-  export this board". Worker timeouts and crashes from gunicorn land there too.
-  The HTML 404s bots generate are left out on purpose.
+  the client, the endpoint, the status, the upload size, the message the user
+  saw, and where the handler knew more than it said, the cause — the exception
+  behind a "could not process the board shape", or kicad-cli's full stderr
+  behind a "KiCad could not export this board". Three more things land there
+  because they are what abuse looks like: any request slower than
+  `SLOW_REQUEST_S` (default 20 s) even when it succeeded; every worker gunicorn
+  kills on its timeout, **with the client, URL, upload size and user agent of the
+  request it was serving** (gunicorn's own line has only a pid); and worker
+  crashes. The HTML 404s bots generate are left out on purpose.
 
-The file lives in the checkout's own `logs/` by default because that directory
-exists wherever the code does and belongs to whoever cloned it. To put it
+`logs/access.log` is the access log again, as a file: the same lines as stdout,
+kept for as long as you rotate them rather than for Docker's 100 MB, and the
+input to the report below.
+
+The files live in the checkout's own `logs/` by default because that directory
+exists wherever the code does and belongs to whoever cloned it. To put them
 somewhere else, set `LOG_DIR` in `.env` to a directory the container's uid 1000
 can write:
 
@@ -86,14 +112,14 @@ echo LOG_DIR=/var/log/minibadge >> .env
 
 If the directory turns out not to be writable, the container still starts: it
 says so once on stderr and keeps the errors on stderr only, so a wrong `LOG_DIR`
-costs the file, never the site. `LOG_LEVEL` (default `info`) sets both gunicorn's
-and the app's verbosity; the file itself only ever takes `WARNING` and up, so it
-grows by the incident, not by the request. Rotation is the host's job; a
-`logrotate` stanza that works with the shared append handler the workers use
-(no `copytruncate`, no restart):
+costs the files, never the site. `LOG_LEVEL` (default `info`) sets both
+gunicorn's and the app's verbosity; `errors.log` only ever takes `WARNING` and
+up, so it grows by the incident, while `access.log` grows by traffic at about
+150 bytes a request. Rotation is the host's job; a `logrotate` stanza that works
+with the shared append handler the workers use (no `copytruncate`, no restart):
 
 ```
-/opt/minibadge-designer/logs/errors.log {
+/opt/minibadge-designer/logs/*.log {
     weekly
     rotate 8
     compress
@@ -104,6 +130,32 @@ grows by the incident, not by the request. Rotation is the host's job; a
 
 The dev server (`python3 main.py`, `minibadge-designer`) writes the same failure
 lines to stderr and never to a file.
+
+### How many people, and who is misbehaving
+
+```bash
+python3 scripts/usage_report.py                 # logs/access.log, last 7 days
+python3 scripts/usage_report.py --since 30
+docker compose logs --no-log-prefix | python3 scripts/usage_report.py -
+```
+
+It prints, per day, visitors, designers, downloads, exports, refusals and
+failures, then the busiest paths, then four watch lists of addresses: most
+refusals, most bytes uploaded, most slow requests, most 404 probes for
+`wp-login`/`.env`/admin paths. "Visitor" is strict on purpose: an address counts
+only if it fetched the page **and** then did something only the running editor
+does (POSTed `/outline`, which fires on every edit, or fetched a `/static/`
+asset), and its user agent is not a known bot. A "designer" POSTed `/outline`; a
+"download" is a 200 from `/generate`. These are addresses, not people: a
+household behind one router is one, a person on two networks is two, so the
+number is an honest floor.
+
+When an address on a watch list needs stopping, that happens at the edge, not
+here: the app has no rate limiting or blocking of its own. Cloudflare fronts the
+site, so a WAF rule on the address, or a rate-limiting rule on `POST /generate`,
+`/gerbers` and `/model3d`, is the tool. Cloudflare's own analytics also give a
+"unique visitors" figure that filters bots better than a user-agent list can;
+the report here is what tells you what those visitors actually did.
 
 ## Limits on what one request can spend
 

@@ -60,7 +60,30 @@ accesslog = "-"  # one line per request on stdout, where docker logs look
 # watching, and "which requests are slow, from where" is the question an
 # availability incident actually asks. %(D)s is microseconds; %(h)s is the real
 # client address now that forwarded_allow_ips is set above.
-access_log_format = ('%(h)s "%(r)s" %(s)s %(b)s %(D)sus "%(a)s"')
+# %({content-length}i)s is the upload size the client declared ("-" for none):
+# it is what separates a person downloading a badge from an address feeding the
+# app maximum-size images all afternoon, and the report script keys on it.
+access_log_format = ('%(h)s "%(r)s" %(s)s %(b)s %(D)sus %({content-length}i)s "%(a)s"')
+
+
+def worker_abort(worker):
+    """Runs in the worker the arbiter is killing for exceeding `timeout`.
+
+    Gunicorn's own line for that event is "WORKER TIMEOUT (pid:NNN)" and no
+    more. The request being served gets no access line and no failure line,
+    because the process dies here, so this is the only moment its address and
+    URL can be written down. The app keeps them in a module global for exactly
+    this reader (webapp._in_flight). Logged through gunicorn's error logger so
+    it lands wherever WORKER TIMEOUT does: stderr and, with LOG_DIR, errors.log.
+    """
+    try:
+        from minibadge_designer import webapp
+
+        report = webapp.in_flight_report()
+    except Exception as exc:  # noqa: BLE001 -- a dying worker must not die worse
+        report = f"(could not read the in-flight request: {exc!r})"
+    worker.log.critical("WORKER TIMEOUT killed the request in flight: %s",
+                        report or "none; the worker was idle")
 
 # ---- Where errors go --------------------------------------------------------
 # The app logs one line per refused or failed request (webapp.py, the
@@ -90,6 +113,7 @@ _handlers = {
                       "stream": "ext://sys.stderr"},
 }
 _error_handlers = ["error_console"]
+_access_handlers = ["console"]
 _log_dir = os.environ.get("LOG_DIR")
 if _log_dir:
     if os.path.isdir(_log_dir) and os.access(_log_dir, os.W_OK):
@@ -99,6 +123,16 @@ if _log_dir:
             "filename": os.path.join(_log_dir, "errors.log"),
         }
         _error_handlers.append("error_file")
+        # The access log too, as a file the host can keep for longer than
+        # Docker's capped json-file and feed to scripts/usage_report.py: every
+        # request, so it grows by traffic (about 150 bytes a line), and it is
+        # what answers "how many people" and "who keeps hammering this".
+        _handlers["access_file"] = {
+            "class": "logging.handlers.WatchedFileHandler",
+            "formatter": "generic",
+            "filename": os.path.join(_log_dir, "access.log"),
+        }
+        _access_handlers.append("access_file")
     else:
         # Not fatal: a deploy must not fail because a directory is owned by
         # the wrong user. Said once on stderr, and the file simply is not kept.
@@ -126,7 +160,7 @@ logconfig_dict = {
     "loggers": {
         "gunicorn.error": {"level": loglevel.upper(), "handlers": _error_handlers,
                            "propagate": False, "qualname": "gunicorn.error"},
-        "gunicorn.access": {"level": "INFO", "handlers": ["console"],
+        "gunicorn.access": {"level": "INFO", "handlers": _access_handlers,
                             "propagate": False, "qualname": "gunicorn.access"},
     },
 }
