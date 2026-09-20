@@ -546,6 +546,50 @@ log = logging.getLogger(__name__)
 #: a page of Qt and OpenCascade chatter; the tail is where the reason is.
 _CAUSE_CHARS = 2000
 
+#: A request that takes longer than this many seconds is logged at WARNING even
+#: when it succeeds. A 200 that took 90 s is either the heaviest legitimate board
+#: or someone feeding the app maximum-size uploads on purpose, and the access
+#: log alone cannot tell an operator which addresses keep doing it.
+SLOW_REQUEST_S = float(os.environ.get("SLOW_REQUEST_S", "20"))
+
+#: The request this worker process is serving right now, or None. Workers are
+#: single-threaded (gunicorn.conf.py), so a module global is exact. It exists
+#: for one reader: the worker_abort hook in gunicorn.conf.py, which runs when
+#: the arbiter kills a worker for exceeding its timeout. That request gets no
+#: access line and no failure line -- the process is dead -- so without this the
+#: one request most likely to be a deliberate resource attack is the one that
+#: cannot be attributed to anyone.
+_in_flight: dict | None = None
+
+
+@app.before_request
+def _mark_in_flight():
+    global _in_flight
+    g.started = time.monotonic()
+    _in_flight = {
+        "client": request.remote_addr, "method": request.method,
+        "path": request.full_path.rstrip("?"),
+        "bytes": request.content_length or 0,
+        "ua": request.user_agent.string[:200], "started": g.started,
+    }
+
+
+@app.teardown_request
+def _clear_in_flight(_exc):
+    global _in_flight
+    _in_flight = None
+
+
+def in_flight_report() -> str | None:
+    """One line naming the request this process is serving, or None when idle.
+    Called from gunicorn's worker_abort hook, outside any request context."""
+    r = _in_flight
+    if r is None:
+        return None
+    return (f"{r['client']} {r['method']} {r['path']} after "
+            f"{time.monotonic() - r['started']:.0f}s, {r['bytes']} bytes uploaded, "
+            f"ua={r['ua']!r}")
+
 
 def _cause(text: str) -> None:
     """Attach a server-only cause to the failure this request is about to
@@ -581,6 +625,15 @@ def _log_failed_responses(resp):
     Flask logs that itself, with the traceback, through this same logger.
     """
     status = resp.status_code
+    started = getattr(g, "started", None)
+    elapsed = time.monotonic() - started if started is not None else 0.0
+    uploaded = request.content_length or 0
+    if elapsed > SLOW_REQUEST_S:
+        # Success or not: a slow request is a line of its own, because the
+        # addresses that keep producing them are the ones worth rate-limiting.
+        log.warning("slow request: %s %s %s -> %d in %.1fs, %d bytes uploaded",
+                    request.remote_addr, request.method,
+                    request.full_path.rstrip("?"), status, elapsed, uploaded)
     if status < 400:
         return resp
     if not (resp.is_json or status >= 500 or status == 413):
@@ -593,9 +646,10 @@ def _log_failed_responses(resp):
     cause = getattr(g, "failure_cause", None)
     log.log(
         logging.ERROR if status >= 500 else logging.WARNING,
-        "%s %s %s -> %d: %s%s",
+        "%s %s %s -> %d: %s%s%s",
         request.remote_addr, request.method, request.full_path.rstrip("?"),
         status, message or resp.status,
+        f" ({uploaded} bytes uploaded)" if uploaded else "",
         f"\n  cause: {cause}" if cause else "",
     )
     return resp
