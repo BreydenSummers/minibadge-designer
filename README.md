@@ -1,320 +1,136 @@
 # minibadge designer
 
-A web-based designer for [minibadges](https://github.com/lukejenkins/minibadge): upload a
-logo, drop as many LEDs as fit on the board (front or back side), add text in a dozen
-typefaces and any material, and download a ready-to-fab KiCad project.
+A web app for designing [minibadges](https://github.com/lukejenkins/minibadge):
+the little 20 × 20 mm add-on boards that clip onto a conference badge and light
+up from its power. You draw the badge in the browser, and the app hands you a
+KiCad project (or a Gerber zip) that a board house can make as-is.
 
-```
-┌──────────────┐      ┌─────────────────────┐      ┌──────────────────────┐
-│ logo + LEDs  │─────▶│ minibadge-designer  │─────▶│ KiCad project (.zip) │
-└──────────────┘      └─────────────────────┘      └──────────────────────┘
-```
+<img src="minibadge_designer/static/help/final.png" width="420" alt="A helmet-shaped minibadge in the app's 3D view">
 
-## The walkthrough
+You don't need to know PCB design. Upload a logo, put LEDs where you want
+light, type some text, download. The connector, the resistors, the copper
+routing and the design-rule checks are all done for you, and if you do know
+KiCad, the download opens there and you can take it as far as you like.
 
-Every picture below is from the app's own "?" help, and they all build the
-same badge: a helmet-shaped board with copper stripes, a see-through visor
-window with a hidden LED behind it, and a stencil name on the back.
+## Getting started
 
-| | |
-|---|---|
-| <img src="minibadge_designer/static/help/rotate.webp" width="330"> | **One board, two views.** Drag anything on either view; parts on the other side show as dashed ghosts and can be grabbed there too. Select to nudge, resize, rotate to any angle, or delete. **SNAP** (top bar, on by default) lines drags up on the board's centre lines, on the centre of anything else placed, or on a 0.5 mm grid, with rotation in 15° steps — what gets centred is the middle of the item you are dragging, and each free-placed part snaps on its own. Hold Alt to slip past it for one move. |
-| <img src="minibadge_designer/static/help/parts.webp" width="330"> | **Shape the board.** A picture becomes the outline — dark pixels are board, up to ~120 mm across, with edge smoothing for rasters; SVG silhouettes trace exactly, unless they paint with gradients — not one flat colour per shape, so the part is traced from a rendered copy instead and says so on its card. Basic shapes stack on top, each adding material or cutting a hole. No parts = the standard 20 × 20 mm square. |
-| <img src="minibadge_designer/static/help/pins.webp" width="330"> | **Keep only the pins you use.** Every connector pin unticks individually — a pad, a row, a corner. Each row carries 3V3 + GND, so one row powers everything; parts that miss a kept pad are bridged in automatically, and dropping the last power pin blocks downloads until a rail comes back. *Pin labels* prints the pad names (3V3, GND, CLK) on the back silkscreen for whoever solders the badge — off by default, so the artwork keeps the corners. |
-| <img src="minibadge_designer/static/help/art.webp" width="330"> | **Paint it with materials.** Flat-colour art loads in *By color* mode: each colour becomes silkscreen, exposed copper, a glow window, bare board, or is ignored (photos use a threshold mode instead). Art reaches the board as polygons either way: a raster is traced around its colour regions at 0.06 mm, an SVG straight from its own vector paths. |
-| <img src="minibadge_designer/static/help/wand.webp" width="330"> | **The magic wand** retargets one connected region — the visor becomes a window while the same-coloured body stays solid. |
-| | **Art can hang off the board.** A layer may be far larger than the outline and sit half off it: only the part over the board prints, the rest is clipped, and the on-board detail is unchanged however far it overhangs — which is how you line a drawing up with a board profile. |
-| <img src="minibadge_designer/static/help/materials.webp" width="330"> | **What the materials mean.** Silkscreen is white ink; exposed copper shines gold (ENIG) or silver (HASL); glow windows strip the copper so back-side LED light shines through the laminate; bare board opens the mask too. Windows can't cut off power: a metal ring always survives at the board edge, with thin copper links to every LED. |
-| <img src="minibadge_designer/static/help/leds.webp" width="330"> | **LED circuits, pre-routed.** Each LED brings its series resistor, wired 3V3 → R → LED → GND through the copper pours — no routing, and the project passes KiCad DRC out of the box. Either side; SMD 0603/0805/1206 or through-hole domes and bars. Every part prints its own name (**D1**, **R1**) on the silk, placed clear of the pads and of the other ink, and the BOM matches; drag a label where you want it, drop one part's with Delete, or switch the lot off under *Part labels*. |
-| <img src="minibadge_designer/static/help/placement.webp" width="330"> | **When the standard layouts don't fit**, the LED, resistor, and via drag one by one, an LED can skip its via and run a surface trace to any legal pad, and reverse mount / far-side options shine through the board. |
-| <img src="minibadge_designer/static/help/clk.webp" width="330"> | **Blink with the badge clock.** Any LED can run off the connector's CLK pin instead of steady 3V3 — through the classic 3-pad solder jumper (the builder bridges 3V3 for steady, CLK to blink) or a direct trace to pin 9 that always blinks. |
-| <img src="minibadge_designer/static/help/text.webp" width="330"> | **Text anywhere**, front or back, 0.8–5 mm: KiCad's stroke font on silk, or a dozen display typefaces (see [Third-party assets](#third-party-assets)) as exact polygons in any material. |
-| <img src="minibadge_designer/static/help/final.png" width="330"> | **The download** — the visor stays dark until the host badge lights its LED — is a complete KiCad 7+ project: board, project file, BOM.csv, and a README.txt with fab/assembly steps. Or skip KiCad: press **⬇ Download** and tick **Gerber fab package** for a zip you upload as-is to JLCPCB or PCBWay (OSH Park prefers the `.kicad_pcb` itself). |
-
-The board sits on the official minibadge v2 connector footprint (pad geometry
-follows [lukejenkins/minibadge](https://github.com/lukejenkins/minibadge),
-Apache-2.0). VBATT and NC stay unconnected per the standard; CLK joins the
-netlist only when an LED runs on it.
-
-## How It Works
-
-- The browser canvas runs the same threshold math the server uses — the
-  silkscreen you see is the silkscreen you get — and on download Flask
-  (`webapp.py`) turns rasters into run-length-merged rectangles (`logo.py`),
-  SVGs into exact polygons (`svgart.py`), and emits the `.kicad_pcb` with
-  shapely-computed zone fills (`pcb.py`).
-- In KiCad, press **B** once to refill zones: the shipped fills are already
-  DRC-clean, refilling just replaces the thin slits the file format forces
-  with proper holes. Light windows carry keepouts so the refill leaves them
-  clear.
-- The **Gerber fab package** (tick it in **⬇ Download**) does that refill server-side (`kicad-cli` required)
-  and plots RS-274X Gerbers plus a merged Excellon drill file.
-
-## Architecture
-
-| Component | Responsibility |
-|---|---|
-| `minibadge_designer/webapp.py` | Flask app: serves the UI, validates params, zips the project |
-| `minibadge_designer/pcb.py` | `.kicad_pcb` / `.kicad_pro` / BOM generation, zone-fill geometry |
-| `minibadge_designer/logo.py` | image → thresholded silkscreen rectangles with keepouts |
-| `minibadge_designer/templates/index.html` | canvas editor: front + mirrored back views, drag logo/LEDs |
-
-## Running it with Docker (recommended)
-
-Docker is the supported way to run minibadge-designer and the only one that is
-feature-complete out of the box. The image carries KiCad's command line tools,
-so the interactive **3D view** works, generated boards are **DRC-clean**, and
-the 3D model shows the **populated board** in real part colours. The host needs
-nothing but Docker: no KiCad, no Python.
-
-### Requirements
-
-- Docker Engine 20.10+ (or Docker Desktop) with the Compose plugin
-- ~1 GB of disk for the image, and network access during the build
-
-### Start it
+The only thing you need is Docker: Engine 20.10 or newer, or Docker Desktop,
+with the Compose plugin. The image takes about 1 GB of disk.
 
 ```bash
-git clone <this repo> && cd minibadge-designer
-docker compose up --build       # first build takes a few minutes
+git clone https://github.com/BreydenSummers/minibadge-designer.git
+cd minibadge-designer
+docker compose up --build
 ```
 
-Then open <http://localhost:8000>. Use `Ctrl-C` to stop, or run it detached:
+The first build takes a few minutes, because it installs KiCad's command-line
+tools inside the image so that the 3D view and the Gerber export work without
+KiCad on your machine. Then open <http://localhost:8000>.
+
+To run it in the background instead:
 
 ```bash
-docker compose up -d --build    # background
-docker compose logs -f          # follow the log
-docker compose down             # stop and remove
+docker compose up -d --build    # start
+docker compose logs -f          # watch it
+docker compose down             # stop
 ```
 
-Rebuild after changing the code with `docker compose up --build`; only the
-layers you touched are redone. The port is published on **loopback only**
-(`127.0.0.1:8000:8000`), so the app is reachable from this machine and not
-from the network. To serve on another port, change the middle field of that
-`ports` mapping (`"127.0.0.1:9000:8000"`); to deliberately serve other people
-on the LAN, drop the `127.0.0.1:` prefix.
+The app only listens on this machine (`127.0.0.1:8000`), so if you want other
+people on your network to use it, remove the `127.0.0.1:` prefix from the
+`ports` line in `docker-compose.yml`. That is the only change.
 
-### What the build does
+### Without Docker
 
-1. Pulls KiCad 9.x from Debian and keeps **only the ten 3D models** this app
-   can place; the stock library is ~5 GB, this is half a megabyte. The result
-   is ~800 MB rather than the 6.3 GB of the official `kicad/kicad:9.0-full`.
-2. Fetches the third-party runtime assets (typefaces, `<model-viewer>`) by
-   pinned version and SHA-256; see [Third-party assets](#third-party-assets).
-3. Runs a **smoke test**: it exports a two-LED board and fails the build if
-   the component models did not resolve or lost their colours. Every way this
-   has broken before was silent, producing a perfectly valid export of an
-   empty board, so the build refuses to ship one.
-
-The container runs as a non-root user and reports health to Compose. A `.env`
-file is picked up if present but is not required.
-
-### Serving more than one person
-
-The container serves through **gunicorn with 4 single-threaded worker
-processes** (`gunicorn.conf.py`), so simultaneous users get parallel workers
-rather than queueing behind one interpreter. Process isolation is also what
-makes concurrent exports safe by construction, since every request works in
-its own temp directory with its own kicad-cli. Tune per host via `.env`:
-
-- `WEB_CONCURRENCY`: worker count (default 4; ~100 MB each, 2 × cores is a
-  sane ceiling)
-- `WORKER_TIMEOUT`: per-request ceiling in seconds (default 300; the GLB
-  export and zone refill each carry a 120 s subprocess budget, and the
-  timeout doubles as the backstop that recycles a worker stuck on a
-  pathological upload)
-- `PORT`: bind port inside the container (default 8000)
-- `HOST`: bind address inside the container (default `0.0.0.0`, which is
-  the container's own namespace — what the outside world can reach is set
-  by the `ports` mapping above, not by this)
-- `MAX_REQUESTS`: requests a worker serves before it is recycled (default
-  `200`) — memory hygiene under the container's hard limit, not a leak fix
-- `EXPORT_BUDGET_S`: wall clock one `/gerbers` or `/model3d` request may spend
-  in subprocesses (default `240`). Keep it comfortably under `WORKER_TIMEOUT`,
-  or a slow export is killed before it can report that it was slow.
-- `FORWARDED_ALLOW_IPS`: which peer gunicorn accepts forwarded headers from
-  (default `127.0.0.1`, the reverse proxy on this host)
-
-The visitor's address comes from Cloudflare's `CF-Connecting-IP`, not from
-counting positions in `X-Forwarded-For`. Counting does not work here: the local
-proxy's two usual configurations either append its peer (making the rightmost
-entry Cloudflare's edge) or overwrite the header outright (losing the visitor
-entirely), and both were measured resolving to the edge address rather than the
-person. `CF-Connecting-IP` is a single value that Cloudflare overwrites on every
-request, so there is no chain to count.
-
-That is only sound while the app is unreachable except through Cloudflare, which
-is what the loopback-only `ports` mapping buys. **If the origin is ever exposed
-directly, the header becomes forgeable** and the check has to become "is the peer
-a Cloudflare address".
-
-### Logs
-
-Two records, for two questions.
-
-- **What is happening?** `docker compose logs -f`. Every request is one line on
-  stdout (client, request, status, bytes, duration in µs, user agent); gunicorn's
-  own events and the app's failures are on stderr. Docker keeps the last 5 × 20 MB
-  of it (`logging:` in `docker-compose.yml`), so a scanner cannot fill the disk.
-- **What went wrong?** `tail -f logs/errors.log` in the checkout, no Docker
-  needed. One line per refused (4xx, `WARNING`) or failed (5xx, `ERROR`) request:
-  the client, the endpoint, the status, the message the user saw, and where the
-  handler knew more than it said, the cause — the exception behind a "could not
-  process the board shape", or kicad-cli's full stderr behind a "KiCad could not
-  export this board". Worker timeouts and crashes from gunicorn land there too.
-  The HTML 404s bots generate are left out on purpose.
-
-The file lives in the checkout's own `logs/` by default because that directory
-exists wherever the code does and belongs to whoever cloned it. To put it
-somewhere else, set `LOG_DIR` in `.env` to a directory the container's uid 1000
-can write:
+If you'd rather run the Python directly:
 
 ```bash
-sudo mkdir -p /var/log/minibadge && sudo chown 1000 /var/log/minibadge
-echo LOG_DIR=/var/log/minibadge >> .env
-```
-
-If the directory turns out not to be writable, the container still starts: it
-says so once on stderr and keeps the errors on stderr only, so a wrong `LOG_DIR`
-costs the file, never the site. `LOG_LEVEL` (default `info`) sets both gunicorn's
-and the app's verbosity; the file itself only ever takes `WARNING` and up, so it
-grows by the incident, not by the request. Rotation is the host's job; a
-`logrotate` stanza that works with the shared append handler the workers use
-(no `copytruncate`, no restart):
-
-```
-/opt/minibadge-designer/logs/errors.log {
-    weekly
-    rotate 8
-    compress
-    missingok
-    notifempty
-}
-```
-
-The dev server (`python3 main.py`, `minibadge-designer`) writes the same failure
-lines to stderr and never to a file.
-
-### Limits on what one request can spend
-
-Every route is unauthenticated and decodes a file the caller chose, so each of
-these has a ceiling. All are documented in place with the measurement that set
-them; the numbers to know are:
-
-| Ceiling | Where | Refuses |
-| --- | --- | --- |
-| 24 megapixels per upload | `logo.MAX_INPUT_PIXELS` | Read off the header, before a row is decoded — the only place a memory guard can stand, since PNG decoding is all-or-nothing |
-| 4 megapixels working size | `logo.WORK_MAX_PIXELS` | The reduction happens before the RGBA conversion and the rotate, so peak memory tracks the badge and not the file |
-| 40 000 weighted SVG segments | `webapp.MAX_SVG_COMPLEXITY` | Scored on the *render tree* including `<use>` expansion, so a 1 KB file that expands to 130 000 shapes is priced as 130 000 |
-| 6 000 outline rectangles | `webapp.MAX_OUTLINE_RECTS` | One allowance shared by all twelve outline elements. Set at the measured knee: `/outline` runs on every edit |
-| 24 MiB per request | `webapp.MAX_UPLOAD` | Flask `MAX_CONTENT_LENGTH` |
-| 3 GB / 2 CPU / 512 pids | `docker-compose.yml` | The container, so the host is never the thing that runs out |
-
-The container also runs read-only (`/tmp`, `/dev/shm` and `/home/badge` are
-tmpfs — kicad-cli needs a writable `HOME`), as a non-root user, with
-`no-new-privileges`.
-
-Two things the app cannot do for itself, both at the edge: the
-`http://` → `https://` redirect and rate limiting. The security headers,
-including HSTS, are sent from the origin so they survive a change of provider.
-
-## Branches, CI, and deploying
-
-`dev` is the working branch; `main` is the deploy branch. Merging (or pushing)
-to `main` is what ships.
-
-| Workflow | Trigger | What it does |
-| --- | --- | --- |
-| `.github/workflows/ci.yml` | push to `dev`, PRs into `dev`/`main` | Builds the image (whose last stage smoke-tests the 3D pipeline) and runs the test suite *inside* it, so tests see the same kicad-cli and build-time assets the container serves with. |
-| `.github/workflows/deploy.yml` | push to `main`, manual dispatch | On the deploy host: fast-forwards `/opt/minibadge-designer` to the pushed commit, `docker compose up -d --build --wait`, and fails the job if the healthcheck never passes. |
-
-The two run on different machines, on purpose. **CI runs on a GitHub-hosted
-runner (`ubuntu-latest`); only the deploy runs on the self-hosted runner `badge`
-(`self-hosted, Linux, X64`), which is also the server.**
-
-Both used to run on `badge`, so that CI's build warmed the layer cache the
-deploy reuses. That was the sharpest edge in the setup: a self-hosted runner
-executes whatever the commit it checked out says to execute, on the machine that
-serves the site, and the runner user is in the `docker` group — which is
-root-equivalent on the host. Every commit that reached CI therefore had a route
-to the production box that did not go through `deploy.yml` at all. Splitting CI
-onto a disposable VM closes that route: the only thing that runs on `badge` now
-is a push to `main`.
-
-The cost is the warm cache. Deploys still reuse the layers left by the previous
-deploy, so it is only felt when a change lands early in the `Dockerfile` —
-`requirements.lock`, or either apt stage.
-
-CI is still gated to **same-repository commits only**: a pull request from a
-fork is skipped, not built (see the `if:` on the job in `ci.yml`). On a hosted
-runner that is no longer a security boundary — the VM is disposable, the token
-is read-only, and no secrets reach it — so it is now just a guard on runner
-minutes, and it can be dropped if you want fork PRs to test themselves.
-
-Two things CI deliberately does not cover: the **browser tier** (no Chromium in
-the image; run `pytest -m browser` locally) and the **visual tier**, which
-never gates anywhere because renders are not deterministic at the artifact
-level. Run the full local suite before merging to `main`.
-
-To roll back, point the deploy clone at the previous commit and bring it up:
-
-```bash
-cd /opt/minibadge-designer
-git reset --hard <previous-sha>
-docker compose up -d --build --wait
-```
-
-## Running it with local Python (development)
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-python3 scripts/fetch_assets.py     # one-time: typefaces + 3D viewer
-minibadge-designer                  # serves http://127.0.0.1:8000
-pytest
+python3 scripts/fetch_assets.py     # downloads the typefaces and 3D viewer, once
+minibadge-designer                  # http://127.0.0.1:8000
 ```
 
-Good for fast edit/reload cycles, but not feature-complete unless you also
-install **KiCad 9.x**: without it the 3D view returns an error pointing at the
-downloaded project, and the DRC tests skip instead of running. The app looks
-for `kicad-cli` in `$KICAD_CLI`, on `PATH`, and at the standard macOS and Linux
-install paths. Everything else (the editor, artwork, and project download)
-works with Python alone.
+Everything works this way except the 3D view and the Gerber export, which need
+KiCad 9 installed, and the app will find `kicad-cli` on your `PATH` or at the
+usual macOS and Linux install locations once it is.
 
-## Third-party assets
+## Designing a badge
 
-This repository contains no third-party files. The typefaces and the
-`<model-viewer>` web component belong to other projects under other licences,
-so they are downloaded on setup instead of being committed here:
+Every control has a "?" next to it with a short animation of what it does. A
+badge usually comes together in this order:
+
+1. Start with the board shape. The default is the standard 20 × 20 mm square.
+   Upload a picture and its dark pixels become the outline, up to about 120 mm
+   across. Basic shapes stack on top to add material or cut holes.
+
+2. Drop in the artwork. Flat-colour art splits by colour, and each colour becomes
+   a material: white silkscreen, exposed gold or silver copper, a see-through
+   window that glows from an LED behind it, or bare board. Photos use a
+   brightness threshold. When two areas share a colour, the magic wand retargets
+   just one connected region.
+
+3. Place the LEDs, on either side. Each one brings its own resistor and is wired
+   to the connector's power for you. SMD or through-hole, any colour. Put one
+   behind a window and the artwork lights up; any LED can run off the badge's
+   clock pin so it blinks.
+
+4. Add text, front or back, 0.8 to 5 mm tall, in KiCad's stroke font or one of a
+   dozen display typefaces, in any of the materials above.
+
+5. Download. The **⬇ Download** button gives you a KiCad project: the board, the
+   project file, a BOM, and a README with assembly notes. Tick **Gerber fab
+   package** for a zip you upload straight to JLCPCB or PCBWay. Either way the
+   board already passes KiCad's design rule check.
+
+Everything you place can be dragged, resized and rotated on either view, and
+parts on the far side show through as dashed ghosts so you can grab them from
+there too. Snap is on by default. Hold Alt to skip it for one move.
+
+## What's in the download
+
+- `<name>.kicad_pcb` and `<name>.kicad_pro`: open the project in KiCad 7 or
+  later. Press **B** once to refill the copper zones. The shipped fills already
+  pass the design checks; refilling only tidies the slits the file format forces.
+- `BOM.csv`: every LED and resistor with its value.
+- `README.txt`: fab settings and assembly steps for whoever builds it.
+
+The board sits on the official minibadge v2 connector footprint from
+[lukejenkins/minibadge](https://github.com/lukejenkins/minibadge), with VBATT
+and NC left unconnected as the standard asks, and CLK wired only when an LED
+uses it.
+
+## Running it for other people
+
+For a public or shared install, [docs/OPERATIONS.md](docs/OPERATIONS.md) covers
+the rest: the worker and memory settings in `.env`, the logs (every failed
+request lands in `logs/errors.log` with the reason), the ceilings on what one
+upload may cost, and how the site deploys from the `main` branch.
+
+## Development
 
 ```bash
-python3 scripts/fetch_assets.py            # fetch (Docker does this for you)
-python3 scripts/fetch_assets.py --check    # verify what is installed
+pytest                  # the fast suite
+pytest -m browser       # the Playwright UI tests, needs Chromium
 ```
 
-Every asset is pinned to an exact version and verified against a SHA-256, so a
-re-fetch cannot silently change a glyph; a mismatch aborts rather than
-installing. The script records what it fetched, and under which licence, in
-`minibadge_designer/fonts/THIRD-PARTY-NOTICE.txt`:
+`dev` is the working branch. Merging into `main` deploys.
 
-| Asset | Source | Licence |
-|---|---|---|
-| 11 display typefaces | [google/fonts](https://github.com/google/fonts) (pinned commit) | SIL Open Font License 1.1 |
-| Special Elite | [google/fonts](https://github.com/google/fonts) (pinned commit) | Apache License 2.0 |
-| `<model-viewer>` 4.0.0 | [google/model-viewer](https://github.com/google/model-viewer) | BSD 3-Clause |
+| File | What it does |
+|---|---|
+| `minibadge_designer/webapp.py` | Flask app: the routes, upload checks, and the zip |
+| `minibadge_designer/pcb.py` | Writes the `.kicad_pcb`, project file, and BOM |
+| `minibadge_designer/logo.py` | Turns images into silkscreen and window polygons |
+| `minibadge_designer/svgart.py` | Same, for SVG |
+| `minibadge_designer/templates/index.html` | The whole browser editor |
 
-KiCad's 3D model libraries are likewise never vendored: the Docker image
-installs them from Debian at build time (CC-BY-SA-4.0 with the KiCad library
-exception).
+## Credits and licences
 
-## CLI Reference
+The minibadge standard, spec, and connector footprint are by Luke Jenkins and
+contributors, [lukejenkins/minibadge](https://github.com/lukejenkins/minibadge)
+(Apache-2.0).
 
-```
-minibadge-designer [--host HOST] [--port PORT] [--debug]
-```
-
-## Credits
-
-Minibadge standard, spec, and connector footprint: Luke Jenkins and contributors,
-[lukejenkins/minibadge](https://github.com/lukejenkins/minibadge) (Apache-2.0).
+The typefaces and the `<model-viewer>` component are not in this repository,
+because they belong to other projects under other licences, so
+`scripts/fetch_assets.py` downloads them at pinned versions and records each
+licence in `minibadge_designer/fonts/THIRD-PARTY-NOTICE.txt`. KiCad's 3D model
+libraries come from Debian at image build time.
