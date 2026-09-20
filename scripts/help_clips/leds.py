@@ -3,17 +3,22 @@
     .venv/bin/python scripts/help_clips/leds.py [--workdir DIR] [--out minibadge_designer/static/help/leds.webp] [--fps 8] [--quality 70]
 
 Starts from scripts/help_fixtures/stage3-wand.json (helmet, visor already bare
-board, one red LED on the front) and shows only step 4 of the helmet story, in
-two clearly separate beats, as the tip text puts it ("Set Side to Back, then
-drag it under the visor"): open the LEDs panel; with the camera 1:1 on the LED
-card, set Side to Back and rest on it; pull back so the LED is seen arriving on
-the back board; then, 1:1 on the BACK board, drag the LED (Alt held: the spot
-is off SNAP's grid) to (10.36, 10.0) under the visor, and drag its D1 label a
-few millimetres to show labels move too. The app's own reconnect-trace status
-message is left as it is. Ends at the full window, held 1.5 s. One continuous
-take on the shared Recorder (scripts/help_recorder.py), 660 px wide, encoded as
-an animated webp of independent full frames; `--fps` thins the ~12 fps motion
-reel on disk without changing the choreographed time.
+board, one red LED on the front) with two setup moves before frame 0: the LED
+is parked on the FRONT at the forehead (11.5, 5.5), so the drag under the
+visor is a real ~4.6 mm travel rather than the ~1 mm sidestep the fixture's
+(11.5, 10) would give, and the LEDs panel is already open. Then it shows only
+step 4 of the helmet story, in two clearly separate beats, as the tip text
+puts it ("Set Side to Back, then, on the Back view, drag it under the visor"):
+with the camera 1:1 on the LED card, set Side to Back and rest on it; pull
+back so the LED is seen arriving on the back board; then, 1:1 on the BACK
+board, drag the LED down (Alt held: the spot is off SNAP's grid) to
+(10.36, 10.0) under the visor, and drag its D1 label a few millimetres to show
+labels move too; one 1:1 look at the FRONT board, where only the via dot and
+the dashed ghost show. The app's own reconnect-trace status message is left
+to run, then waited out in real time so the closing full-window hold is
+clean. One continuous take on the shared Recorder (scripts/help_recorder.py),
+660 px wide, encoded as an animated webp of independent full frames; `--fps`
+thins the ~12 fps motion reel on disk without changing the choreographed time.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from help_recorder import (
 )
 
 FIXTURE = "stage3-wand"
+LED_FROM = (11.5, 5.5)        # setup: front, at the forehead (legal on both faces)
 LED_TO = (10.3625, 10.0)      # back, behind the visor (stage4-led.json)
 LABEL_MOVES = [(0.0, 2.6), (0.0, -2.6), (-2.4, 0.0), (2.4, 0.0),
                (0.0, 3.2), (0.0, -3.2), (-3.0, 0.0), (3.0, 0.0)]
@@ -68,23 +74,31 @@ def record(rec: Recorder) -> dict:
     cap = rec.cap
     cap.load_fixture(FIXTURE)
     cap.wait_state("customActive() && boardCarved()")
+    # SETUP, before frame 0: the fixture's LED sits at (11.5, 10), already at
+    # visor height, so "drag it under the visor" would move it ~1 mm sideways
+    # and read as nothing. Park it on the FRONT at the forehead instead (the
+    # inline unit is a 10 mm strip, so the crown only has room right of the
+    # centre line; (11.5, 5.5) is legal on both faces and the straight path
+    # down to LED_TO crosses no illegal spot). The on-camera drag is then a
+    # real ~4.6 mm travel down behind the visor. The take refuses a start
+    # the app outlines red.
+    ok = cap.js("([x, y]) => { const L = state.leds[0]; L.x = x; L.y = y; L.side = 'front';"
+                " renderLedList(); draw();"
+                " return unitInsideBoard(L) && !padConflict(L) && blockingProblems().length === 0; }",
+                list(LED_FROM))
+    if not ok:
+        raise SystemExit(f"setup: the LED is not legal at {LED_FROM} on the front")
+    # The clip opens on the LEDs panel; the rail click is not its subject.
+    cap.show_panel("leds")
     # Loading the fixture posts the "bridges were added" status toast (6 s
-    # info). Let it expire before the first frame, as a person opening a saved
-    # design a moment later would see it; nothing is shown while we wait.
-    cap.wait_state("![...document.querySelectorAll('#toasts .toast')]"
-                   ".some(t => /Bridges were added/.test(t.textContent))", timeout=9_000)
-    rec.mark("stage3: visor bare, LED still on the front (full view)")
-    rec.hold(300)
+    # info). Let every toast expire before the first frame, as a person
+    # opening a saved design a moment later would see it; nothing is shown
+    # while we wait.
+    cap.wait_state("document.querySelectorAll('#toasts .toast').length === 0", timeout=9_000)
+    rec.mark("stage3 + LEDs panel: visor bare, LED on the FRONT forehead (full view)")
+    rec.hold(350)
 
-    # 1. The LEDs panel (a shorter reach than click()'s distance-scaled move;
-    # the first move in a clip should not eat a second of the budget).
-    rec.move_to(*rec.center("#tab-leds"), ms=650)
-    rec.hold(180)
-    rec.press()
-    cap.wait_state("activePanel === 'leds'")
-    rec.mark("LEDs panel")
-
-    # 2. Beat one: Side -> Back, the camera 1:1 on the LED card so the select
+    # 1. Beat one: Side -> Back, the camera 1:1 on the LED card so the select
     # and its value read at popover size. Then rest on it, so "set Side to
     # Back" and "drag it under the visor" are two things, not one blur.
     led = cap.js("() => ({x: state.leds[0].x, y: state.leds[0].y,"
@@ -95,30 +109,31 @@ def record(rec: Recorder) -> dict:
         cap.wait_state("state.leds[0].color === 'red'")
         rec.mark("colour: red")
     if led["side"] != "back":
-        rec.choose(SIDE_SELECT, "back", after_ms=600)
+        rec.choose(SIDE_SELECT, "back", after_ms=550)
         cap.wait_state("state.leds[0].side === 'back'")
         rec.mark("Side: Back (held on the card)")
 
-    # Result beat: pull back so the LED is seen arriving on the back board.
+    # Result beat: pull back so the LED is seen arriving on the back board,
+    # still at the forehead.
     rec.focus_full(ms=700)
     rec.settle_camera()
-    rec.mark("full view: LED now on the back board")
+    rec.mark("full view: LED now on the back board, at the forehead")
     rec.hold(300)
 
-    # 3. Beat two: on the BACK canvas, 1:1 on the board, drag the LED under
-    # the visor. Same-side items win the hit test, so a back LED is grabbed on
-    # the back view; Alt because the canonical spot is off SNAP's grid. The
-    # camera eases onto the board while the hand travels to the LED.
+    # 2. Beat two: on the BACK canvas, 1:1 on the board, drag the LED down
+    # under the visor. Same-side items win the hit test, so a back LED is
+    # grabbed on the back view; Alt because the canonical spot is off SNAP's
+    # grid. The camera eases onto the board while the hand travels to the LED.
     led = cap.js("() => ({x: state.leds[0].x, y: state.leds[0].y})")
     focus_board(rec, "back", pad=70, ms=800)
-    rec.mark("drag LED (back canvas, camera on the board)")
+    rec.mark("drag LED down (back canvas, camera on the board)")
     rec.drag_mm((led["x"], led["y"]), LED_TO, side="back", alt=True, ms=900)
     cap.wait_state(f"Math.abs(state.leds[0].x - {LED_TO[0]}) < 0.3"
                    f" && Math.abs(state.leds[0].y - {LED_TO[1]}) < 0.3")
     rec.mark("LED under the visor")
     rec.hold(400)
 
-    # 4. The D1 label moves too: pick a nearby spot the app will honour
+    # 3. The D1 label moves too: pick a nearby spot the app will honour
     # (refdesOkAt runs the real layout with the position in place) and drag
     # the ink there on the face it prints on, the camera staying on that board.
     lab = d1_label(cap)
@@ -134,23 +149,35 @@ def record(rec: Recorder) -> dict:
         if lab["face"] != "back":
             focus_board(rec, lab["face"], pad=70, ms=700)
         rec.mark(f"drag D1 label ({lab['face']} canvas)")
-        rec.drag_mm((lab["x"], lab["y"]), label_moved, side=lab["face"], ms=700)
+        rec.drag_mm((lab["x"], lab["y"]), label_moved, side=lab["face"], ms=650)
         cap.wait_state("!!state.leds[0].dlabel_at")
         after = d1_label(cap)
         rec.mark(f"D1 label at ({after['x']:.2f}, {after['y']:.2f}), hand={after['hand']}")
     else:
         rec.mark("no legal label spot found; label step skipped")
 
+    # 4. What the front shows of a back LED: 1:1 on the FRONT board, the via
+    # dot and the dashed ghost behind the visor (the hand rests off the board).
     cap.wait_state("customActive() && boardCarved()")
     cap.js("() => draw()")
     problems = cap.js("() => blockingProblems()")
-    # End: the whole window, the hand resting beside the board.
+    focus_board(rec, "front", pad=70, ms=700)
+    rec.settle_camera()
+    rec.mark("front board 1:1: via dot and dashed ghost")
+    rec.hold(500)
+
+    # End: the whole window. Landing behind the visor posts the app's own
+    # reconnect-trace status message (6 s info); it belongs in the take, but
+    # the last frame must be clean, so wait it out in real time (no frames
+    # are shot) before the closing pan and hold.
+    cap.wait_state("document.querySelectorAll('#toasts .toast').length === 0", timeout=16_000)
     rec.focus_full(ms=600)
     rec.settle_camera()
-    rec.mark("end: full view, LED behind the visor")
-    rec.hold(1500)
+    rec.mark("end: full view, LED behind the visor, no toast")
+    rec.hold(1250)
     return {"blocking_problems": problems, "label_moved": label_moved,
             "label_after": d1_label(cap),
+            "toasts_at_end": cap.js("() => document.querySelectorAll('#toasts .toast').length"),
             "led": cap.js("() => ({x: state.leds[0].x, y: state.leds[0].y,"
                           " side: state.leds[0].side, color: state.leds[0].color})")}
 

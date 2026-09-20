@@ -5,10 +5,10 @@
 Step 3 of the helmet story, on the shared Recorder (scripts/help_recorder.py).
 Starts from stage2-art (helmet, by-colour art, no overrides) with the Art
 panel scrolled to the Magic wand row and the camera at 1:1 on that row. The
-hand changes the wand material from Glow window to Bare board (the select is
-set to Glow before the first frame so the change is visible: it ships reading
-Bare board, and a press that changes nothing reads as a mis-click), presses
-Pick region, then the camera pulls back to the whole window and the hand
+hand rests on the wand material select so the viewer reads what the wand
+will paint (Bare board, the app's default; an earlier take staged Glow window
+to show a change, and the reviewer found that sent newcomers hunting for a
+switch already made), presses Pick region, then the camera pulls back to the whole window and the hand
 travels onto the FRONT canvas: over the crown first, where the whole body
 lights up as the region a click would grab, then down onto the visor lens,
 where only the lens lights up; it clicks and the visor turns bare (tan) while
@@ -52,7 +52,6 @@ FIXTURE = "stage2-art"
 VISOR_UV = (0.4988, 0.4891)   # the visor lens, in art image space (stage3-wand.json)
 BODY_UV = (0.5, 0.25)         # the crown: black body, above the grey rim
 WAND_MATERIAL = "bare"
-START_MATERIAL = "glow"       # what the select reads before the hand touches it
 
 
 def art_client(cap, uv, side="front"):
@@ -73,25 +72,25 @@ def record(rec: Recorder) -> dict:
     # scroll happens before the first frame so nothing jumps on screen.
     cap.js("() => document.querySelector('#artlist .wandb').scrollIntoView({block: 'center'})")
     cap.scroll_into_view("front")
-    # The select ships reading Bare board. Start it on Glow window so the
-    # on-camera choice is a visible change, not a press that alters nothing.
-    cap.js(f"() => {{ document.querySelector('#artlist select.wandm').value = '{START_MATERIAL}'; }}")
-    cap.wait_state(f"document.querySelector('#artlist select.wandm').value === '{START_MATERIAL}'")
+    # The select ships reading Bare board and the clip starts from the real
+    # default: the reviewer's second pass found that a staged Glow window made
+    # newcomers hunt for a switch the app has already made for them.
+    cap.wait_state(f"document.querySelector('#artlist select.wandm').value === '{WAND_MATERIAL}'")
     # Rest the hand near the panel, off every control.
     b = rec.box("#artlist .wandb")
     rec.mx, rec.my = b["x"] + b["width"] + 40, b["y"] - 60
     page.mouse.move(rec.mx, rec.my)
     # Open on the Magic wand row at 1:1, already framed (the camera is parked
     # there before the first frame; a single frame at full view would jump).
-    rec.focus_on("#artlist select.wandm", pad=70, ms=1, include=["#artlist .wandb"])
-    rec._cam_from = rec._cam_to
+    rec.start_focused("#artlist select.wandm", pad=70, include=["#artlist .wandb"])
     rec.mark("stage2-art: helmet with by-colour art, wand row at 1:1")
     rec.hold(400)
 
-    # 1. Material: Glow window -> Bare board.
-    rec.choose("#artlist select.wandm", WAND_MATERIAL, after_ms=350)
-    cap.wait_state(f"document.querySelector('#artlist select.wandm').value === '{WAND_MATERIAL}'")
-    rec.mark("wand material: Glow window -> Bare board")
+    # 1. The material select: the hand rests on it so the viewer reads what the
+    # wand will paint (Bare board, the default), without changing it.
+    rec.move_to(*rec.center("#artlist select.wandm"))
+    rec.hold(500)
+    rec.mark("wand material read: Bare board (default)")
 
     # 2. Pick region.
     rec.click("#artlist .wandb", after_ms=200)

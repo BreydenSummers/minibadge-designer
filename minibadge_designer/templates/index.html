@@ -9524,26 +9524,24 @@ const TIPS = {
     <li><b>SNAP</b> (top bar, on by default) pulls a drag onto the board's centre lines (a pink dashed line shows when it catches) and a 0.5 mm grid. Hold <b>Alt</b> to skip it for one move.</li>
   </ul>` },
   shape: { title: "Step 1: a helmet-shaped board", img: "parts.webp", html: `<ul>
-    <li><b>+ Silhouette&hellip;</b> opens a file picker. Dark pixels of the picture become board, so the badge IS the helmet. Raise <b>Threshold</b> if bright details get punched out (220 here; the default 128 loses the vents), then set <b>Width</b> to the real size, 18 mm.</li>
+    <li><b>+ Silhouette&hellip;</b> opens a file picker. Dark pixels of the picture become board, so the badge IS the helmet. Raise <b>Threshold</b> if bright details get punched out: at the default 128 the vents are holes and the LED has no solid board under it, so it is boxed red with a warning; at 220 (used here) the vents close and the box clears. Then set <b>Width</b> to the real size, 18 mm.</li>
     <li>The message about bridges means the helmet does not reach the corner pads, so small necks of board were added to them.</li>
-    <li>Parts stack into one board; switch one to <b>Cuts a hole</b> to punch openings. Remove every part and the 20 &times; 20 mm square comes back.</li>
   </ul>` },
   pins: { title: "Connector pins: keep only what you use", img: "pins.webp", html: `<ul>
-    <li>Each row of the connector carries 3V3 and GND. Untick the top row's four boxes (<b>VBAT, GND, 3V3, GND</b>) and the top corners stay clean; the bottom row (<b>CLK, NC, 3V3, GND</b>) still powers the badge. A note about bridges may pop up bottom-right while the shape updates.</li>
+    <li>Each row of the connector carries 3V3 and GND. Untick the top row's four boxes (<b>VBAT, GND, 3V3, GND</b>) and the top corners stay clean; the bottom row (<b>CLK, NC, 3V3, GND</b>) still powers the badge.</li>
     <li>Untick the last 3V3 or GND and downloads are blocked until you tick one again.</li>
-    <li><b>Pin labels</b> (Board characteristics, top of the panel; None by default) prints each pin's name in white on the back.</li>
   </ul>` },
   art: { title: "Step 2: paint it with materials", img: "art.webp", html: `<ul>
     <li><b>+ Image</b> opens a file picker. A flat-colour picture loads <b>By color</b>: each colour gets a row and a guessed material; hover a row to see the pixels it owns light up on the front view. Here white and the grey goggle frame are set to <i>Ignore</i>, so only the gold stripes print as copper; the dark body is plain soldermask, the board's paint.</li>
-    <li>Set <b>Width</b> to the board's 18 mm so the picture lands on itself. The card says when it runs past the edge; only the part over the board prints.</li>
+    <li>Set <b>Width</b> to the board's 18 mm so the picture lands on itself.</li>
   </ul>` },
   wand: { title: "Step 3: the visor, with the magic wand", img: "wand.webp", html: `<ul>
-    <li>The visor is the same black as the body, so no colour row can single it out. The select beside <b>Pick region</b> is what the wand paints (switch it to <b>Bare board</b>): press Pick region, move over the front view &mdash; the region under the cursor lights up, the whole body until the cursor is on the visor &mdash; and click the visor. <b>Esc</b> cancels.</li>
-    <li>Bare board opens a window right through, so the layer's Side switches to <b>Through</b>; set it back to Front or Back to open one side only.</li>
+    <li>The visor is the same black as the body, so no colour row can single it out. The select beside <b>Pick region</b> is what the wand paints; leave it on <b>Bare board</b>: press Pick region, move over the front view &mdash; the region under the cursor lights up, the whole body until the cursor is on the visor &mdash; and click the visor. <b>Esc</b> cancels.</li>
+    <li>Bare board opens a window right through, so the Front box at the top of the picture's card flips to <b>Through</b>; set it back to Front or Back to open one side only.</li>
     <li>Hover the wand chip under the layer to see its region; retarget or remove the pick there.</li>
   </ul>` },
   materials: { title: "What the helmet is made of", img: "materials.webp", html: `<ul>
-    <li>Rest the pointer on a colour row, or on the <b>wand &rarr;</b> chip, and the pixels it controls light up magenta on the board.</li>
+    <li>Hover a colour row or the <b>wand &rarr;</b> chip: its pixels light up magenta on the board.</li>
     <li><b>Silkscreen</b> &mdash; white print (the D1/R1 names, the name on the back).</li>
     <li><b>Exposed copper</b> &mdash; bare metal (the stripes); gold or silver follows <b>Finish</b> (Board characteristics), pads included.</li>
     <li><b>Bare board</b> &mdash; paint and metal both removed, down to the fibreglass (the visor): the brightest window for an LED behind it.</li>
@@ -9556,24 +9554,24 @@ const TIPS = {
     <li><b>In line</b> is a thin strip that fits behind the visor; 0805 is the minibadge standard size.</li>
   </ul>` },
   placement: { title: "When the standard layouts don't fit", img: "placement.webp", html: `<ul>
-    <li>Under the LED card's <b>Advanced</b> fold, <b>Move parts freely</b> unlocks the LED, resistor and via (the plated hole that carries power through the board) to drag one by one on the LED's own side; the card warns if a spot would short copper. With <b>SNAP</b> on, each part lines up on the LED it belongs to or on its siblings.</li>
+    <li>Under the LED card's <b>Advanced</b> fold, <b>Move parts freely</b> unlocks the LED, resistor and via (the plated hole that carries power through the board) to drag one by one on the LED's own side; the card warns if a spot would touch other copper and short-circuit. With <b>SNAP</b> on, each part lines up on the LED it belongs to or on its siblings.</li>
     <li>The other Advanced boxes (<b>No power via</b>, <b>Reverse mount</b>, <b>LED on the other side</b>) explain themselves on the card as you tick them.</li>
     <li>Grabbing a part on the board opens its card. The helmet itself keeps the standard layout: untick the box and the parts snap back.</li>
   </ul>` },
   clk: { title: "Blinking with the host badge", img: "clk.webp", html: `<ul>
-    <li>Tick <b>Blink with the badge clock (CLK)</b> on an LED's card (it needs pin 9, CLK, kept under <b>Connector pins</b> in the Shape panel). The LED is then fed from the host badge's clock instead of steady power, and a <b>CLK hookup</b> card appears.</li>
+    <li>Tick <b>Blink with the badge clock (CLK)</b> on an LED's card (it needs pin 9, CLK, kept under <b>Connector pins</b> in the Shape panel). The LED is then fed from the host badge's clock instead of steady power, and a <b>CLK hookup</b> card appears. Untick it to remove the jumper again.</li>
     <li><b>Solder jumper</b> leaves the choice to whoever solders it: bridge its centre pad to the 3V3 side for steady light, the CLK side to blink. Unbridged, the LED stays dark. <b>Direct trace to pin 9</b> (the CLK pin) always blinks.</li>
-    <li>The app parks the jumper on the nearest clear spot (on the helmet, the chin) and says so. Drag it like a part &mdash; its traces follow; the card's <b>Rotation</b> dial turns it.</li>
+    <li>The app parks the jumper on the nearest clear spot (on the helmet, the chin) and says so. Drag it like a part &mdash; its traces (the copper lines) follow; the card's <b>Rotation</b> dial turns it.</li>
   </ul>` },
   text: { title: "Step 5: your handle on the back", img: "text.webp", html: `<ul>
-    <li><b>+ Add text</b>, type it, pick a font, set <b>Side</b> to <b>Back</b> and a size (2 mm here), then drag it on the back board down past the LED to the chin; a warning flashes while the word crosses the LED and clears once it sits clear.</li>
+    <li><b>+ Add text</b>, type it, pick a font, set the Front box beside Size to <b>Back</b> and a size (2 mm here), then drag it on the back board down past the LED to the chin; a warning flashes while the word crosses the LED and clears once it sits clear.</li>
     <li>Typed text lands on a clear spot by itself; text dragged past the board edge blocks downloads until it is fully back on.</li>
     <li>Keep decorative fonts <b>&ge; 1.2 mm</b> so thin strokes survive fabrication.</li>
   </ul>` },
   download: { title: "Step 6: the finished board", img: "final.webp", html: `<ul>
-    <li><b>&#11015; Download</b> asks what to include. <b>Gerber fab package</b> is a zip you upload as-is to JLCPCB or PCBWay: order 1.6 mm, 2 layers, your mask colour and finish. With it ticked, Download first shows the board house caveat; read it and press <b>I understand</b>. Tick more than one and you get a single bundle zip with the fab package inside it as its own zip; the status line confirms when it has arrived.</li>
+    <li><b>&#11015; Download</b> asks what to include. <b>Gerber fab package</b> is a zip you upload as-is to JLCPCB or PCBWay: order 1.6 mm, 2 layers, your mask colour and finish. With it ticked, Download first shows the board house caveat; read it and press <b>I understand</b>. The status line confirms when the zip has arrived.</li>
     <li>Prefer KiCad? The project zip (board, parts list, a README with ordering notes) opens in KiCad 7 or later.</li>
-    <li><b>Design file</b> is the only piece you can open here again: tick it to keep editing later, or drop the saved file anywhere on the page. A board zip is not a design.</li>
+    <li>Drop a saved <b>Design file</b> anywhere on the page to keep editing it later.</li>
     <li>The <b>3D</b> tab builds the populated board (a few seconds); drag to turn it over (the LED and &ldquo;half&rdquo; are on the underside), scroll to zoom. The <b>Soldermask</b> slider fades the board's paint away so you can see the copper under it.</li>
   </ul>` },
 };
