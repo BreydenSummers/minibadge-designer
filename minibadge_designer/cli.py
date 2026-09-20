@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 
 
 def main() -> None:
@@ -14,6 +16,13 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8000, help="port (default: %(default)s)")
     parser.add_argument("--debug", action="store_true", help="Flask debug mode with auto-reload")
     args = parser.parse_args()
+
+    # Same record the container keeps (see gunicorn.conf.py): one line per
+    # refused or failed request, on stderr. Set before the app import so Flask
+    # does not add a second handler of its own.
+    logging.basicConfig(
+        level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
     from .webapp import app
 

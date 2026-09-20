@@ -148,6 +148,53 @@ is what the loopback-only `ports` mapping buys. **If the origin is ever exposed
 directly, the header becomes forgeable** and the check has to become "is the peer
 a Cloudflare address".
 
+### Logs
+
+Two records, for two questions.
+
+- **What is happening?** `docker compose logs -f`. Every request is one line on
+  stdout (client, request, status, bytes, duration in µs, user agent); gunicorn's
+  own events and the app's failures are on stderr. Docker keeps the last 5 × 20 MB
+  of it (`logging:` in `docker-compose.yml`), so a scanner cannot fill the disk.
+- **What went wrong?** `tail -f logs/errors.log` in the checkout, no Docker
+  needed. One line per refused (4xx, `WARNING`) or failed (5xx, `ERROR`) request:
+  the client, the endpoint, the status, the message the user saw, and where the
+  handler knew more than it said, the cause — the exception behind a "could not
+  process the board shape", or kicad-cli's full stderr behind a "KiCad could not
+  export this board". Worker timeouts and crashes from gunicorn land there too.
+  The HTML 404s bots generate are left out on purpose.
+
+The file lives in the checkout's own `logs/` by default because that directory
+exists wherever the code does and belongs to whoever cloned it. To put it
+somewhere else, set `LOG_DIR` in `.env` to a directory the container's uid 1000
+can write:
+
+```bash
+sudo mkdir -p /var/log/minibadge && sudo chown 1000 /var/log/minibadge
+echo LOG_DIR=/var/log/minibadge >> .env
+```
+
+If the directory turns out not to be writable, the container still starts: it
+says so once on stderr and keeps the errors on stderr only, so a wrong `LOG_DIR`
+costs the file, never the site. `LOG_LEVEL` (default `info`) sets both gunicorn's
+and the app's verbosity; the file itself only ever takes `WARNING` and up, so it
+grows by the incident, not by the request. Rotation is the host's job; a
+`logrotate` stanza that works with the shared append handler the workers use
+(no `copytruncate`, no restart):
+
+```
+/opt/minibadge-designer/logs/errors.log {
+    weekly
+    rotate 8
+    compress
+    missingok
+    notifempty
+}
+```
+
+The dev server (`python3 main.py`, `minibadge-designer`) writes the same failure
+lines to stderr and never to a file.
+
 ### Limits on what one request can spend
 
 Every route is unauthenticated and decodes a file the caller chose, so each of

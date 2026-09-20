@@ -6,7 +6,15 @@ one at a time per thread and two users exporting at once would queue.
 Kept for `python3 main.py` quick runs where that trade-off is fine.
 """
 
+import logging
 import os
+
+# Before the app import: Flask attaches its own stderr handler to the app
+# logger only if nothing above it has one, and this is what gives the dev
+# server the same one-line-per-failure record the container writes.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 from minibadge_designer.webapp import app
 

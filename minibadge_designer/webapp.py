@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import os
 import re
+import sys
 import unicodedata
 import time
 import zipfile
 
-from flask import Flask, jsonify, render_template, request, send_file
+from flask import Flask, g, jsonify, render_template, request, send_file
 from PIL import Image
 from shapely.errors import ShapelyError
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -525,6 +527,77 @@ def _add_security_headers(resp):
     # these for its own response keeps it.
     for name, value in _SECURITY_HEADERS.items():
         resp.headers.setdefault(name, value)
+    return resp
+
+
+# ---- Server-side record of every refusal and failure -----------------------
+# Every handler answers a bad request with `{"error": ...}, 4xx/5xx`, and until
+# this existed that JSON was the *only* record: the user saw a message, the
+# access log saw a status code, and nothing on the server said why. The three
+# pieces below turn each failed response into one log line carrying the client,
+# the endpoint, the status, the message the user got, and -- when the handler
+# was swallowing an exception or a kicad-cli stderr -- the cause it never
+# showed the user. One line per failure, at WARNING for refusals (4xx) and
+# ERROR for failures (5xx), so a WARNING-level file on the host holds exactly
+# these and nothing else. Where the lines go is gunicorn.conf.py's business.
+log = logging.getLogger(__name__)
+
+#: Longest cause recorded per line. kicad-cli's stderr for a broken board is
+#: a page of Qt and OpenCascade chatter; the tail is where the reason is.
+_CAUSE_CHARS = 2000
+
+
+def _cause(text: str) -> None:
+    """Attach a server-only cause to the failure this request is about to
+    return; the after_request hook writes it into that response's log line.
+    Handlers call this where the message they give the user is deliberately
+    shorter than what they know (kicad-cli's stderr, a missing-file list)."""
+    text = (text or "").strip()
+    if text:
+        g.failure_cause = text[-_CAUSE_CHARS:]
+
+
+def _refuse(message: str, status: int = 400):
+    """The JSON refusal every handler returns, remembering *why* when called
+    from an except block. The user-facing message stays generic on purpose
+    ("could not process the board shape" rather than a shapely traceback);
+    this keeps the exception that produced it for the server log, since it is
+    the only thing that will explain the refusal later."""
+    exc = sys.exc_info()[1]
+    if exc is not None:
+        _cause(f"{type(exc).__name__}: {exc}")
+    return {"error": message}, status
+
+
+@app.after_request
+def _log_failed_responses(resp):
+    """One WARNING (4xx) or ERROR (5xx) line per failed response.
+
+    Only the app's own answers are logged: JSON bodies, plus any 5xx and the
+    413 werkzeug produces for an oversized upload. The HTML 404/405 pages are
+    left out on purpose -- on a public host those are bots probing for
+    /wp-login.php all day, the access log already has them, and they would
+    bury the lines this exists for. An unhandled exception is not here either:
+    Flask logs that itself, with the traceback, through this same logger.
+    """
+    status = resp.status_code
+    if status < 400:
+        return resp
+    if not (resp.is_json or status >= 500 or status == 413):
+        return resp
+    message = ""
+    if resp.is_json and not resp.direct_passthrough:
+        body = resp.get_json(silent=True)
+        if isinstance(body, dict):
+            message = str(body.get("error", ""))
+    cause = getattr(g, "failure_cause", None)
+    log.log(
+        logging.ERROR if status >= 500 else logging.WARNING,
+        "%s %s %s -> %d: %s%s",
+        request.remote_addr, request.method, request.full_path.rstrip("?"),
+        status, message or resp.status,
+        f"\n  cause: {cause}" if cause else "",
+    )
     return resp
 
 
@@ -1688,16 +1761,23 @@ def _refill_zones(board_path: str, deadline: "_Deadline | None" = None) -> bool:
     # can only fail (each miss costs a full interpreter start).
     if _refill_zones.exe is not None:
         candidates = [_refill_zones.exe]
+    why = []
     for exe in candidates:
         try:
             run = subprocess.run(
                 [exe, "-c", script, board_path], capture_output=True,
                 timeout=deadline.left() if deadline else 120)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as exc:
+            why.append(f"{exe}: {type(exc).__name__}: {exc}")
             continue
         if run.returncode == 0:
             _refill_zones.exe = exe
             return True
+        err = run.stderr.decode("utf-8", "replace").strip().splitlines()
+        why.append(f"{exe}: exit {run.returncode}: {err[-1] if err else ''}")
+    # Best-effort for the 3D view, a refusal for the Gerbers; either way the
+    # user's message cannot say which interpreter failed how, and this can.
+    log.warning("zone refill failed; %s", "; ".join(why))
     return False
 
 
@@ -1764,7 +1844,9 @@ def _model_glb(spec: "pcb.BadgeSpec", slug: str):
         # writes the whole board; the honest answer there is the board the
         # user can actually look at, with a warning, not a 500 that hides it.
         if _glb_meshes(raw) == 0:
-            note = run.stderr.decode("utf-8", "replace").strip().splitlines()
+            stderr = run.stderr.decode("utf-8", "replace")
+            _cause(f"kicad-cli exit {run.returncode}; stderr:\n{stderr}")
+            note = stderr.strip().splitlines()
             return {"error": "KiCad could not export this board"
                              + (f": {note[-1][:200]}" if note else "")}, 500
         data = _tag_glb_layers(raw)
@@ -1773,6 +1855,11 @@ def _model_glb(spec: "pcb.BadgeSpec", slug: str):
     if run.returncode != 0:
         # The viewer gets a real model; say plainly that it may be incomplete
         # rather than presenting a part-less board as the finished article.
+        # A 200 never reaches the failure hook, so the complaint is logged
+        # here: a missing 3D model is a broken image, not a broken board.
+        log.warning("GLB export of %r exited %d but produced a model; stderr: %s",
+                    slug, run.returncode,
+                    run.stderr.decode("utf-8", "replace").strip()[-_CAUSE_CHARS:])
         resp.headers["X-Minibadge-Export-Warning"] = (
             "kicad-cli reported problems exporting this board; a component "
             "model may be missing from the 3D view. The downloaded KiCad "
@@ -1891,6 +1978,8 @@ def _plot_gerbers(spec: "pcb.BadgeSpec", slug: str):
         missing = _FAB_EXTENSIONS - {p.suffix.lstrip(".").lower() for p in files}
         if missing:
             note = (plot.stderr + drill.stderr).decode("utf-8", "replace")
+            _cause(f"missing {sorted(missing)}; plot exit {plot.returncode}, "
+                   f"drill exit {drill.returncode}; stderr:\n{note}")
             note = note.strip().splitlines()
             return {"error": "KiCad could not plot this board"
                              + (f": {note[-1][:200]}" if note else "")}, 500
@@ -1945,7 +2034,7 @@ def _generate_impl(render: bool):
     except _UPLOAD_REFUSALS as exc:
         return {"error": f"board shape: {exc}"}, 400
     except _GEOMETRY_ERRORS:
-        return {"error": "could not process the board shape"}, 400
+        return _refuse("could not process the board shape")
     if outline_rings:
         from shapely.geometry import Polygon as _Poly
 
@@ -1981,7 +2070,7 @@ def _generate_impl(render: bool):
     except _UPLOAD_REFUSALS as exc:
         return {"error": f"artwork: {exc}"}, 400
     except _GEOMETRY_ERRORS:
-        return {"error": "could not process an artwork image"}, 400
+        return _refuse("could not process an artwork image")
     if cut_geom is not None:
         try:
             outline_rings, _bridged = _compute_outline(
@@ -1995,7 +2084,7 @@ def _generate_impl(render: bool):
         except _UPLOAD_REFUSALS as exc:
             return {"error": f"artwork: {exc}"}, 400
         except _GEOMETRY_ERRORS:
-            return {"error": "could not process the board shape"}, 400
+            return _refuse("could not process the board shape")
         outline_poly = None
         if outline_rings:
             from shapely.geometry import Polygon as _Poly
@@ -2186,9 +2275,9 @@ def _generate_impl(render: bool):
                              "move it, remove it, or enlarge the shape"
                 }, 400
     except _GEOMETRY_ERRORS:
-        return {"error": "could not place the LEDs on this board; check for "
-                          "missing or out-of-range x/y, rotation or advanced "
-                          "offset values"}, 400
+        return _refuse("could not place the LEDs on this board; check for "
+                       "missing or out-of-range x/y, rotation or advanced "
+                       "offset values")
 
     # Board-level CLK hookup: the 3-pad solder jumper (with a position the
     # user may have dragged) or a direct trace to pin 9. Shape-checked here;
@@ -2343,7 +2432,7 @@ def _generate_impl(render: bool):
                             jumper_v3via_at=jv3via_at)
             clk_i = pcb.clk_info(spec_clk)
     except _GEOMETRY_ERRORS:
-        return {"error": "could not place the CLK jumper; check its x/y"}, 400
+        return _refuse("could not place the CLK jumper; check its x/y")
 
     texts = []
     try:
@@ -2602,8 +2691,8 @@ def _generate_impl(render: bool):
         }
         decor_of = {s: decor_base[s] + carve_rects[s] for s in ("front", "back")}
     except _GEOMETRY_ERRORS:
-        return {"error": "could not work out where the artwork may go; check "
-                          "the LED and text positions, rotations and sizes"}, 400
+        return _refuse("could not work out where the artwork may go; check "
+                       "the LED and text positions, rotations and sizes")
 
     text_keepouts = carve_rects["front"]
     # `classified` was built up front (art uploads read exactly once).
@@ -2728,7 +2817,7 @@ def _generate_impl(render: bool):
     except _UPLOAD_REFUSALS as exc:
         return {"error": f"artwork: {exc}"}, 400
     except _GEOMETRY_ERRORS:
-        return {"error": "could not process an artwork image"}, 400
+        return _refuse("could not process an artwork image")
     art_layers = [layer for i in sorted(parts) for layer in parts[i]]
 
     spec = pcb.BadgeSpec(

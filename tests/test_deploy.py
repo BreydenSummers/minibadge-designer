@@ -70,8 +70,16 @@ def test_the_container_serve_command_answers_simultaneous_users(tmp_path):
     # absent or stale, which means on a fresh clone, in CI, and once for
     # everybody after any edit to gunicorn.conf.py. The subprocess gets a
     # curated env, so it has to be named explicitly.
+    # LOG_DIR is what docker-compose.yml sets: gunicorn.conf.py turns it into
+    # the host-readable errors.log. A typo in that logconfig_dict is a
+    # RuntimeError at startup, which is the 502-for-everyone this test exists
+    # to catch, and a file that never receives the line is the operator
+    # tailing an empty file while users fail.
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
     env = {"PORT": str(port), "WEB_CONCURRENCY": "2",
            "PATH": "/usr/bin:/bin", "HOME": str(tmp_path),
+           "LOG_DIR": str(log_dir),
            "PYTHONDONTWRITEBYTECODE": "1"}
     with subprocess.Popen(
         [sys.executable, "-m", "gunicorn", "-c", str(REPO / "gunicorn.conf.py"),
@@ -109,6 +117,23 @@ def test_the_container_serve_command_answers_simultaneous_users(tmp_path):
                 f"bob received someone else's project: {b[1]}")
             assert elapsed <= REQUEST_BUDGET_S, (
                 f"simultaneous downloads took {elapsed:.1f}s; users are queueing")
+
+            # A refused request from a *worker process* lands in the host
+            # file, and the two good downloads above did not. The file handler
+            # is created in the master and inherited across fork; this is the
+            # only place that path is exercised for real.
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            conn.request("POST", "/generate", b'--BB\r\nContent-Disposition: '
+                         b'form-data; name="params"\r\n\r\n{\r\n--BB--\r\n',
+                         {"Content-Type": "multipart/form-data; boundary=BB"})
+            refused = conn.getresponse()
+            refused.read()
+            assert refused.status == 400, refused.status
+            errors = (log_dir / "errors.log").read_text()
+            assert errors.count("POST /generate") == 1, (
+                f"errors.log should hold the one refusal and neither download:\n"
+                f"{errors}")
+            assert "[WARNING]" in errors and " 400" in errors, errors
         finally:
             srv.terminate()
 
