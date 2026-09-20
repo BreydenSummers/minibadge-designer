@@ -4,7 +4,12 @@
 
 This is the README's hero image: one continuous take of the real app, driven
 the way a person would drive it, from the blank square board to the finished
-badge in the 3D view. It reuses the help-example harness (scripts/help_capture.py:
+badge in the 3D view: black mask, the helmet silhouette as the board shape
+(threshold 220, 18 mm), the top row of connector pins unticked, the same
+picture as by-colour artwork (gold stripes copper, goggles silkscreen, one
+colour over lens and rim, no window), the red LED on the back, the stencil
+text on the back, then the 3D view. The stage fixtures' magic-wand glow visor
+is deliberately NOT part of this take. It reuses the help-example harness (scripts/help_capture.py:
 private server, Chromium, the 1320x1150 dark viewport, mm->client conversion)
 and adds two things the harness does not have.
 
@@ -134,12 +139,12 @@ WAIT_SHOWN_MS = 1500          # a server wait is shown as at most this long
 SHAPE_THRESHOLD = 220         # 128 punches the vents out of the outline
 SHAPE_W = 18.0
 ART_W = 18.0
-LED_TO = (10.3625, 10.0)      # back, behind the visor (stage4-led.json)
+LED_TO = (10.3625, 10.0)      # back, behind the goggles (stage4-led.json)
 TEXT = "made by half"
 TEXT_FONT = "blackops"
 TEXT_SIZE = 1.3
 TEXT_TO = (10.16, 14.9)       # stage5-text.json; warning-free under all gates
-VISOR_UV = (0.4988, 0.4891)   # stage3-wand.json override, in art image space
+TOP_PINS = ("1", "2", "7", "8")  # the row the stage fixtures untick
 
 
 class Recorder:
@@ -374,6 +379,15 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
     rec.wait_outline_shown()
     rec.mark("board width 18 mm")
     rec.hold(500)
+    # Only the bottom row of connector pins is kept (stage fixtures: 9, 10, 15,
+    # 16). The bottom row carries 3V3 + GND, so the badge stays powered.
+    for n in TOP_PINS:
+        rec.click(f"#pingrid input[data-pin='{n}']", settle_ms=180, after_ms=250)
+        cap.wait_state(f"!(state.pins || []).includes('{n}')")
+    rec.wait_outline_shown()
+    cap.wait_state("state.pins.length === 4 && ['9','10','15','16'].every(n => state.pins.includes(n))")
+    rec.mark("top-row pins unticked")
+    rec.hold(700)
     if stop_after <= 1:
         return finish(rec, problems=cap.js("() => blockingProblems()"))
 
@@ -391,24 +405,11 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
     rec.set_number("#artlist input.wdn", f"{ART_W:g}")
     cap.wait_state(f"Math.abs(state.art[0].wmm - {ART_W}) < 0.01")
     rec.mark("art width 18 mm, white ignored")
-    rec.hold(500)
-    # The visor becomes a glow window: wand, one connected region.
-    rec.choose("#artlist select.wandm", "glow", after_ms=250)
-    rec.click("#artlist .wandb", after_ms=250)
-    cap.wait_state("!!picking")
-    a = cap.js("() => ({cx: state.art[0].cx, cy: state.art[0].cy, w: state.art[0].wmm,"
-               " h: state.art[0].wmm * state.art[0].ih / state.art[0].iw})")
-    vx = a["cx"] + (VISOR_UV[0] - 0.5) * a["w"]
-    vy = a["cy"] + (VISOR_UV[1] - 0.5) * a["h"]
-    cap.scroll_into_view("front")
-    rec.click_at(*cap.board_to_client(vx, vy, "front"), after_ms=200)
-    rec.wait_shown("state.art[0].overrides.length === 1 && state.art[0].overrides[0].material === 'glow'", 15_000)
-    rec.mark("visor picked as glow window")
     rec.hold(900)
     if stop_after <= 2:
         return finish(rec, problems=cap.js("() => blockingProblems()"))
 
-    # 3. The red LED goes behind the visor, on the back.
+    # 3. The red LED goes on the back, behind the goggles.
     rec.click("#tab-leds", after_ms=250)
     cap.wait_state("activePanel === 'leds'")
     led = cap.js("() => ({x: state.leds[0].x, y: state.leds[0].y, side: state.leds[0].side, color: state.leds[0].color})")
@@ -420,7 +421,7 @@ def record(rec: Recorder, from_design: dict | None = None, stop_after: int = 99)
         cap.wait_state("state.leds[0].color === 'red'")
     rec.drag_mm((led["x"], led["y"]), LED_TO, side="back", alt=True)
     cap.wait_state(f"Math.abs(state.leds[0].x - {LED_TO[0]}) < 0.3 && Math.abs(state.leds[0].y - {LED_TO[1]}) < 0.3")
-    rec.mark("LED behind the visor (back)")
+    rec.mark("LED behind the goggles (back)")
     rec.hold(800)
     if stop_after <= 3:
         return finish(rec, problems=cap.js("() => blockingProblems()"))
