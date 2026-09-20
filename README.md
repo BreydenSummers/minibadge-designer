@@ -5,7 +5,9 @@ the small add-on boards that clip onto a conference badge and light up from its
 power. You draw the badge in the browser, and the app hands you a KiCad project,
 or a Gerber zip that a board house can make as-is.
 
-<img src="docs/helmet-build.gif" width="720" alt="Designing a helmet-shaped minibadge start to finish: shaping the board from a picture, painting it with materials, placing an LED and text, and opening the 3D view">
+<p align="center">
+  <img src="docs/helmet-build.gif" width="720" alt="Designing a helmet-shaped minibadge start to finish: shaping the board from a picture, painting it with materials, placing an LED and text, and opening the 3D view">
+</p>
 
 You don't need to know PCB design. Upload a logo, put LEDs where you want
 light, type some text, download. The connector, the resistors, the copper and
