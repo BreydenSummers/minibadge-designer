@@ -7,9 +7,10 @@ stage1-shape fixture (helmet board, black mask, bottom pins only) with the Art
 panel open. The cursor presses **+ Image**, the helmet PNG lands as artwork in
 By color mode and the per-colour rows appear; the cursor hovers the gold row
 and then the grey row so their pixels light up on the front canvas, switches
-the white row to Ignore (the cheek pads go; the grey goggle frame and
+sets the white background to Ignore (the grey cheek panels and goggle frame
+print as silkscreen, the stripes as copper; the grey goggle frame and
 frame vanish; the goggles are mask only, the stripes stay copper), sets the
-width to 18 mm, and rests on the painted helmet. 8-11 s, 660 px wide, animated webp.
+width to 19.6 mm (bleeding past the edge), and rests on the painted helmet. 8-11 s, 660 px wide, animated webp.
 
 The camera (see the skill's "The camera"): 1:1 on the + Image button for the
 press; the whole window while the picture lands on the front board and for
@@ -45,7 +46,7 @@ from help_recorder import (
     contact_sheet,
 )
 
-ART_W = 18.0
+ART_W = 19.6                  # a little over the board, so the drawing runs to the edges
 FIXTURE = "stage1-shape"
 ROWS = "#artlist .swrow"
 ROW_PAD = 70         # around the four colour rows: chips, names and selects readable
@@ -121,6 +122,41 @@ def record(rec: Recorder) -> dict:
     rec.mark("hover: grey row lit")
     rec.hold(300)
 
+    # 3. White is the picture's background, not ink: Ignore it, or it prints
+    # over the feet under the pins. The camera closes in on the rows over the
+    # move so the chips, names and selects read at 1:1.
+    _focus_rows(rec, n_rows)
+    rec.choose("#artlist select.pm[data-j='1']", "ignore", after_ms=250)
+    cap.wait_state("state.art[0].palette[1].material === 'ignore'")
+    rec.mark("white background -> Ignore")
+    # Result beat: pull back so the picture is seen landing on the front board.
+    rec.focus_full(ms=700)
+    rec.settle_camera()
+    rec.mark("artwork on the board, colour rows shown")
+    rec.hold(500)
+
+    palette = cap.js("() => state.art[0].palette.map(p => ({rgb: p.rgb, material: p.material}))")
+    gold = next((j for j, p in enumerate(palette) if _is_gold(p["rgb"])), None)
+    grey = next((j for j, p in enumerate(palette) if _is_grey(p["rgb"])), None)
+    white = next((j for j, p in enumerate(palette) if _is_white(p["rgb"])), None)
+    if white != 1:
+        raise AssertionError(f"white row expected at data-j=1, palette is {palette}")
+    if gold is None or grey is None:
+        raise AssertionError(f"no gold/grey row found in palette {palette}")
+    n_rows = len(palette)
+
+    # 2. Hover the gold row, then the grey row: the pixels each controls light
+    # up on the front canvas. Short dwells (~0.6 s each), at the whole window
+    # so the lit pixels are on screen (the row itself shows nothing).
+    rec.move_to(*rec.center(f"{ROWS} >> nth={gold}", fx=0.35), ms=650)
+    cap.wait_state(f"!!artHL && artHL.type === 'palette' && artHL.j === {gold}")
+    rec.mark("hover: gold row lit")
+    rec.hold(300)
+    rec.move_to(*rec.center(f"{ROWS} >> nth={grey}", fx=0.35), ms=300)
+    cap.wait_state(f"!!artHL && artHL.type === 'palette' && artHL.j === {grey}")
+    rec.mark("hover: grey row lit")
+    rec.hold(300)
+
     # 3. White is background, not ink. The camera closes in on the four rows
     # over the move so the chips, names and selects read at 1:1.
     _focus_rows(rec, n_rows)
@@ -136,14 +172,14 @@ def record(rec: Recorder) -> dict:
     rec.move_to(*rec.center("#artlist .sub:has-text('Width')", fx=0.3), ms=450)
     cap.wait_state("artHL === null")
     rec.settle_camera(250)
-    rec.mark("white gone, stripes copper, grey silk")
+    rec.mark("background gone: stripes copper, grey panels silkscreen")
     rec.hold(600)
 
-    # 4. Width 18 mm, same as the board.
+    # 4. Width 19.6 mm: a little over the board, so the drawing runs to the edges.
     rec.focus_on("#artlist input.wdn", pad=120)
     rec.set_number("#artlist input.wdn", f"{ART_W:g}")
     cap.wait_state(f"Math.abs(state.art[0].wmm - {ART_W}) < 0.01")
-    rec.mark("width 18 mm")
+    rec.mark("width 19.6 mm")
     # Pull back to the whole window and park the hand off the card so the last
     # frames show the painted helmet, not a focused field.
     rec.focus_full(ms=700)

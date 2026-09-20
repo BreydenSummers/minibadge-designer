@@ -154,6 +154,8 @@ def record(rec: Recorder) -> dict:
     cap.wait_state(f"Math.abs(state.shape.elements[0].w - {SHAPE_W}) < 0.01")
     rec.wait_outline_shown()
     rec.mark("board width 18 mm")
+    rec.hold(400)
+
 
     # The gates before believing the board: carved outline, then legality.
     cap.wait_state("customActive() && boardCarved()")
@@ -163,8 +165,7 @@ def record(rec: Recorder) -> dict:
     n_el = cap.js("() => state.shape.elements.length")
     # Pull back to the whole window for the result, the hand drifting off the
     # panel onto the board as a person's would.
-    rec.focus_full(ms=800)
-    rec.move_to(*cap.board_to_client(10.16, 4.0, "front"), ms=800)
+    rec.move_to(*cap.board_to_client(10.16, 4.0, "front"), ms=500)
     rec.hold(1300)
     rec.mark("end")
     toasts = cap.js("() => window.__toastLog")
