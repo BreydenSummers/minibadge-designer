@@ -73,6 +73,11 @@ jobs:
           cd "$DEPLOY_DIR" || exit 0
           docker compose ps || true
           docker compose logs --tail 200 || true
+          # The errors file lives in ./logs unless .env moved it.
+          log_dir=$(sed -n 's/^LOG_DIR=//p' .env 2>/dev/null | tail -1)
+          errors="${log_dir:-./logs}/errors.log"
+          echo "--- $errors (last 50) ---"
+          tail -n 50 "$errors" 2>/dev/null || true
 
       - name: Reclaim disk from the previous image
         if: always()
