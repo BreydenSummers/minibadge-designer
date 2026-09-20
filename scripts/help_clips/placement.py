@@ -1,24 +1,34 @@
 """Record the "?" tip clip for `placement`: "Move parts freely" lets the
-resistor and the via be dragged one by one.
+resistor and the via be dragged one by one, and unticking it puts them back.
 
     .venv/bin/python scripts/help_clips/placement.py [--workdir DIR] [--out minibadge_designer/static/help/placement.webp]
-                                                    [--no-nudge] [--fps 6] [--quality 82]
+                                                    [--no-nudge] [--fps 8] [--quality 70]
 
 Starts from scripts/help_fixtures/stage4-led.json (helmet, visor bare board,
 one red LED on the BACK behind the visor at (10.36, 10.0)) and shows one
-thing: the LEDs panel comes up (grabbing the LED opens it; see the nudge
-below), the LED card's Advanced fold is opened, **Move parts freely** is
-ticked, then on the BACK canvas R1 is dragged 1.5 mm sideways and held, then
-the via 1 mm down and held. Every destination is probed first with the checks
-the card's own warning uses (advConflict, unitInsideBoard, padConflict,
-blockingProblems) after the real snap (snapXY) and clamp (clampAdvParts), and
-the whole drag path is probed for pour bridges (a bridge posts a 6 s toast),
-so the landing is legal, the card never warns and no toast sits over the
-ending. Ends held on the back view with blockingProblems() empty. One
-continuous take on the shared Recorder (scripts/help_recorder.py), 660 px
-wide, an animated webp of independent full frames; motion frames are folded
-to 6 fps on disk (measured 2026-09-20: 12 fps = 312 KB, 6 fps = 207 KB for
-the same 9.8 s take; the 300 KB soft target rules).
+thing, with the recorder's camera on it: the LED card's Advanced fold is
+opened and **Move parts freely** ticked (1:1 on the fold, so the label
+reads), then on the BACK canvas R1 is dragged 1.5 mm sideways and the via
+1 mm (1:1 on the back board, so the parts are large), then the box is
+unticked (1:1 on the fold again) and the parts snap back to the standard
+layout; the clip pulls back to the whole window for the 1.5 s end hold.
+Every destination is probed first with the checks the card's own warning
+uses (advConflict, unitInsideBoard, padConflict, blockingProblems) after the
+real snap (snapXY) and clamp (clampAdvParts), and the whole drag path is
+probed for pour bridges (a bridge posts a 6 s toast), so the landing is
+legal, the card never warns and no toast sits over the ending. Ends with the
+LED where it was after the nudge, no `adv` on it and blockingProblems()
+empty. One continuous take on the shared Recorder (scripts/help_recorder.py),
+660 px wide, an animated webp of independent full frames; motion frames are
+folded to 8 fps on disk (the camera's 1:1 crops make frames distinct, so the
+budget is the 500 KB of the other camera clips, not the old 300 KB).
+
+**The camera.** The clip opens on the whole window (its first beat is on the
+board, not a panel), eases 1:1 onto the back board for the LED nudge, onto
+the card's Advanced fold (`#ledlist .item details.advbox`, its summary
+inside it) for the tick, back onto the back board for the two drags, onto
+the fold for the untick, and pulls out for the ending. focus_* is called
+right before a hand move so the camera eases over that move's frames.
 
 **The nudge (default on; `--no-nudge` records the storyboard literally).**
 Measured 2026-09-20 on this fixture: the standard-layout unit polygon spans
@@ -152,6 +162,18 @@ def pick_move(cap, kind: str, moves, path_samples: int = 8) -> tuple | None:
     return None
 
 
+ADV = "#ledlist .item details.advbox"           # the LED card's Advanced fold
+ADV_SUMMARY = ADV + " > summary"
+ADV_BOX = "#ledlist input.adv"                    # "Move parts freely"
+
+
+def focus_back_board(rec: Recorder, ms: int = 600) -> None:
+    """1:1 on the BACK canvas, centred on the board's centre (the helmet
+    sits inside the 20 mm board), recomputed from the live canvas rect."""
+    cx, cy = rec.cap.board_to_client(10.0, 10.0, "back")
+    rec.focus_centre(cx, cy, ms=ms)
+
+
 def record(rec: Recorder, nudge: bool = True) -> dict:
     cap = rec.cap
     cap.load_fixture(FIXTURE)
@@ -170,88 +192,123 @@ def record(rec: Recorder, nudge: bool = True) -> dict:
     for sel in ("#tab-leds",):
         if not _in_view(rec, sel):
             raise AssertionError(f"{sel} is off screen at the start")
-    rec.mark("stage4-led: LED on the back behind the visor, standard layout")
+    # The hand rests just above the back board so the first move is short.
+    rec.mx, rec.my = cap.board_to_client(13.0, 4.0, "back")
+    rec.page.mouse.move(rec.mx, rec.my)
+    rec.mark("stage4-led: LED on the back behind the visor, standard layout (full view)")
     rec.hold(150)
 
     # 1. The LEDs panel. With the nudge, grabbing the LED is what opens it
     # (pointerdown runs showPanel for the part's kind); the 0.64 mm Alt-drag
     # to (11.0, 10.0) keeps the free-placement envelope on the board (see the
-    # docstring). Without it, the panel tab is clicked.
+    # docstring). Without it, the panel tab is clicked. The camera closes in
+    # on the back board over the hand's move to the LED.
     if nudge:
-        rec.mark("grab the LED on the back canvas, nudge to (11.0, 10.0) with Alt; its panel opens")
+        rec.mark("camera 1:1 on the back board; grab the LED, nudge to (11.0, 10.0) with Alt; its panel opens")
+        focus_back_board(rec, ms=500)
         rec.drag_mm((led0["x"], led0["y"]), LED_NUDGE_TO, side="back", alt=True, ms=400)
         cap.wait_state(f"Math.abs(state.leds[0].x - {LED_NUDGE_TO[0]}) < 0.05"
                        f" && Math.abs(state.leds[0].y - {LED_NUDGE_TO[1]}) < 0.05")
         cap.wait_state("activePanel === 'leds'")
-        rec.hold(100)
     else:
         rec.move_to(*rec.center("#tab-leds"), ms=550)
         rec.hold(160)
         rec.press()
         rec.hold(160)
         cap.wait_state("activePanel === 'leds'")
-    if not _in_view(rec, "#ledlist details.advbox summary"):
+    if not _in_view(rec, ADV_SUMMARY):
         raise AssertionError("the LED card's Advanced fold is off screen")
+    nudged = cap.js(STATE_JS)
     rec.mark("LEDs panel")
 
     # 2. Open the card's Advanced fold (its summary; not the "?" button in it).
-    if cap.js("() => document.querySelector('#ledlist details.advbox').open"):
+    # Camera: 1:1 on the fold, framed so the checkbox that appears when it
+    # opens is in the crop too (the fold grows downward by ~160 px).
+    if cap.js(f"() => document.querySelector('{ADV}').open"):
         raise AssertionError("Advanced is already open on this fixture; the clip needs to open it")
-    rec.move_to(*rec.center("#ledlist details.advbox summary", fx=0.12), ms=700)
-    rec.hold(160)
+    b = rec.box(ADV)
+    rec.focus_centre(b["x"] + b["width"] / 2, b["y"] + b["height"] / 2 + 70, ms=600)
+    rec.move_to(*rec.center(ADV_SUMMARY, fx=0.12), ms=700)
+    rec.hold(140)
     rec.press()
-    cap.wait_state("document.querySelector('#ledlist details.advbox').open === true")
+    cap.wait_state(f"document.querySelector('{ADV}').open === true")
     rec.mark("Advanced fold open")
-    rec.hold(150)
 
-    # 4. Tick "Move parts freely".
+    # 3. Tick "Move parts freely".
     pre_tick = cap.js(STATE_JS)
-    rec.move_to(*rec.center("#ledlist input.adv"), ms=450)
-    rec.hold(160)
+    rec.move_to(*rec.center(ADV_BOX), ms=450)
+    rec.hold(140)
     rec.press()
-    cap.wait_state("!!state.leds[0].adv && document.querySelector('#ledlist input.adv').checked")
+    cap.wait_state(f"!!state.leds[0].adv && document.querySelector('{ADV_BOX}').checked")
     post_tick = cap.js(STATE_JS)
     jumped = abs(post_tick["x"] - pre_tick["x"]) > 0.05 or abs(post_tick["y"] - pre_tick["y"]) > 0.05
     rec.mark(f"Move parts freely ticked; LED {'JUMPED to' if jumped else 'stayed at'}"
              f" ({post_tick['x']:.2f}, {post_tick['y']:.2f})")
-    rec.hold(300)
+    rec.hold(250)
 
-    # 5. Drag R1 sideways on the BACK canvas to a spot the card accepts.
+    # 4. Drag R1 sideways on the BACK canvas to a spot the card accepts.
+    # Camera: 1:1 on the back board, eased over the hand's trip to R1.
     res_move = pick_move(cap, "ledres", RES_MOVES)
     if res_move:
         target, landed, (dx, dy) = res_move
         frm = tuple(cap.js(PART_JS, "ledres"))
-        rec.mark(f"drag R1 by ({dx:+.2f}, {dy:+.2f}) mm -> lands ({landed[0]:.2f}, {landed[1]:.2f})")
+        rec.mark(f"camera 1:1 on the back board; drag R1 by ({dx:+.2f}, {dy:+.2f}) mm"
+                 f" -> lands ({landed[0]:.2f}, {landed[1]:.2f})")
+        focus_back_board(rec, ms=600)
         rec.drag_mm(frm, target, side="back", ms=500)
         cap.wait_state(f"Math.abs(unitPoint(state.leds[0], geomOf(state.leds[0]).res[0], geomOf(state.leds[0]).res[1])[0] - {landed[0]}) < 0.06"
                        f" && Math.abs(unitPoint(state.leds[0], geomOf(state.leds[0]).res[0], geomOf(state.leds[0]).res[1])[1] - {landed[1]}) < 0.06")
-        rec.hold(250)
     else:
         rec.mark("no legal spot for R1 within the probes; R1 not moved")
 
-    # 6. Drag the via a little.
+    # 5. Drag the via a little.
     via_move = pick_move(cap, "ledvia", VIA_MOVES)
     if via_move:
         target, landed, (dx, dy) = via_move
         frm = tuple(cap.js(PART_JS, "ledvia"))
         rec.mark(f"drag via by ({dx:+.2f}, {dy:+.2f}) mm -> lands ({landed[0]:.2f}, {landed[1]:.2f})")
+        if not res_move:
+            focus_back_board(rec, ms=600)
         rec.drag_mm(frm, target, side="back", ms=450)
         cap.wait_state(f"Math.abs(unitPoint(state.leds[0], geomOf(state.leds[0]).viaF[0], geomOf(state.leds[0]).viaF[1])[0] - {landed[0]}) < 0.06"
                        f" && Math.abs(unitPoint(state.leds[0], geomOf(state.leds[0]).viaF[0], geomOf(state.leds[0]).viaF[1])[1] - {landed[1]}) < 0.06")
     else:
         rec.mark("no legal spot for the via within the probes; via not moved")
+    moved = cap.js(STATE_JS)
+    moved["bridges"] = cap.js(BRIDGES_JS)
+    moved["toasts"] = cap.js("() => [...document.querySelectorAll('#toasts .toast')].map(t => t.textContent.slice(0, 80))")
 
+    # 6. Untick "Move parts freely": the parts snap back to the standard
+    # layout around the LED, which has not moved. Camera: 1:1 on the fold,
+    # framed on the checkbox and the summary together, because the card
+    # re-renders on the untick with the fold CLOSED (it is open only while
+    # one of its boxes is on), so the summary is what stays on screen.
+    if not cap.js(f"() => document.querySelector('{ADV}').open"):
+        raise AssertionError("the Advanced fold closed on its own after the drags")
+    rec.mark("camera 1:1 on the fold; untick Move parts freely -> parts snap back, fold closes")
+    rec.focus_on(ADV_BOX, pad=40, ms=600, include=[ADV_SUMMARY])
+    rec.move_to(*rec.center(ADV_BOX), ms=650)
+    rec.hold(140)
+    rec.press()
+    cap.wait_state(f"!state.leds[0].adv && !document.querySelector('{ADV_BOX}').checked")
+    rec.hold(250)
+
+    # 7. Pull back to the whole window for the ending.
     cap.wait_state("customActive() && boardCarved()")
     cap.js("() => draw()")
     end = cap.js(STATE_JS)
     end["bridges"] = cap.js(BRIDGES_JS)
     end["toasts"] = cap.js("() => [...document.querySelectorAll('#toasts .toast')].map(t => t.textContent.slice(0, 80))")
-    rec.mark("end: back view, parts moved, card clean")
+    rec.focus_full(ms=650)
+    rec.settle_camera()
+    rec.mark("end: full view, standard layout again, LED where the nudge left it")
     rec.hold(1500)
-    return {"blocking_problems": end["problems"], "conflict": end["conflict"],
-            "inside": end["inside"], "pad": end["pad"], "warn_shown": end["warn"],
-            "led_jumped_on_tick": jumped, "pre_tick": pre_tick, "post_tick": post_tick,
-            "res_move": res_move, "via_move": via_move, "end": end, "nudge": nudge}
+    return {"blocking_problems": end["problems"], "conflict": moved["conflict"],
+            "inside": moved["inside"] and end["inside"], "pad": moved["pad"] or end["pad"],
+            "warn_shown": moved["warn"] or end["warn"],
+            "led_jumped_on_tick": jumped, "nudged": nudged, "pre_tick": pre_tick,
+            "post_tick": post_tick, "res_move": res_move, "via_move": via_move,
+            "moved": moved, "end": end, "nudge": nudge}
 
 
 def thin(frames: list[tuple[Path, int]], fps: int) -> list[tuple[Path, int]]:
@@ -297,9 +354,9 @@ def main() -> None:
     ap.add_argument("--out", default=str(HELP_DIR / "placement.webp"))
     ap.add_argument("--no-nudge", action="store_true",
                     help="record the storyboard literally (the tick relocates the LED; see the docstring)")
-    ap.add_argument("--fps", type=int, default=6,
-                    help="motion frame rate on disk (12 = as shot; 6 is what fits the 300 KB target)")
-    ap.add_argument("--quality", type=int, default=82)
+    ap.add_argument("--fps", type=int, default=8,
+                    help="motion frame rate on disk (12 = as shot; 8 is the camera clips' house rate)")
+    ap.add_argument("--quality", type=int, default=70)
     args = ap.parse_args()
     import tempfile
     workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="tip-placement-"))
@@ -333,9 +390,17 @@ def main() -> None:
     if result["blocking_problems"]:
         raise SystemExit(f"blocking problems: {result['blocking_problems']}")
     if result["conflict"] or not result["inside"] or result["pad"]:
-        raise SystemExit(f"the card would warn at the end: {result['end']}")
-    if result["end"].get("toasts"):
-        raise SystemExit(f"a toast is up over the ending: {result['end']['toasts']}")
+        raise SystemExit(f"the card would warn: {result['moved']} / {result['end']}")
+    if result["moved"].get("toasts") or result["end"].get("toasts"):
+        raise SystemExit(f"a toast is up over the drags or the ending: {result['moved']['toasts']} {result['end']['toasts']}")
+    end, start = result["end"], result["nudged"]
+    if end["adv"] is not None:
+        raise SystemExit(f"Move parts freely is still on at the end: {end}")
+    if abs(end["x"] - start["x"]) > 0.02 or abs(end["y"] - start["y"]) > 0.02:
+        raise SystemExit(f"the LED moved between the tick and the end: {start} -> {end}")
+    for k in ("res", "via"):
+        if any(abs(a - b) > 0.02 for a, b in zip(end[k], start[k])):
+            raise SystemExit(f"{k} did not snap back to the standard layout: {start[k]} -> {end[k]}")
     if not result["res_move"] and not result["via_move"]:
         raise SystemExit("neither R1 nor the via found a legal spot; nothing was demonstrated")
     if not result["nudge"] and not result["led_jumped_on_tick"]:

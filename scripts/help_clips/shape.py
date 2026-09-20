@@ -47,9 +47,12 @@ def record(rec: Recorder) -> dict:
     cap, page = rec.cap, rec.page
     # Setup, before the first frame: black mask (the story's), Shape panel.
     cap.show_panel("shape")
+    # The LED starts on the FRONT, as in the stage fixtures every later tip
+    # opens on, so the part does not jump sides between Step 1 and the pins tip.
     page.evaluate("() => { $('mask').value = 'black'; state.mask = 'black';"
-                  " rebuildAllArt(); renderLegend(); draw(); }")
-    cap.wait_state("state.mask === 'black' && activePanel === 'shape'")
+                  " state.leds.forEach(L => { L.side = 'front'; });"
+                  " rebuildAllArt(); renderLegend(); renderLedList(); draw(); }")
+    cap.wait_state("state.mask === 'black' && activePanel === 'shape' && state.leds.every(L => L.side === 'front')")
     # Start the hand near the panel so the first move is short and readable.
     rec.mx, rec.my = rec.center("#eladdimg", fx=0.5, fy=2.6)
     page.mouse.move(rec.mx, rec.my)
@@ -57,14 +60,21 @@ def record(rec: Recorder) -> dict:
     rec.hold(600)
 
     # 1. Silhouette: the click is required or the upload is a silent no-op.
+    # The camera closes in on the Board shape card for the panel beats; the
+    # crop still reaches the front board, so the result lands in frame too.
+    rec.focus_on("#eladdimg", pad=90)
     rec.click("#eladdimg", after_ms=150)
     page.set_input_files("#shapefile", str(HELMET))
     cap.wait_state("state.shape.mode === 'custom' && state.shape.elements.length === 1", timeout=20_000)
     rec.wait_outline_shown()
+    # Result beat: pull back so both boards are in frame as the helmet lands.
+    rec.focus_full(ms=700)
+    rec.settle_camera()
     rec.mark("helmet silhouette uploaded")
-    rec.hold(600)
+    rec.hold(700)
 
     # 2. Threshold 220: dragged along the live track, then landed exactly.
+    rec.focus_on("#shapeopts input.eth", pad=120)
     rec.drag_slider("#shapeopts input.eth", SHAPE_THRESHOLD)
     cap.wait_state(f"state.shape.elements[0].threshold >= {SHAPE_THRESHOLD - 6}"
                    f" && state.shape.elements[0].threshold <= {SHAPE_THRESHOLD + 6}")
@@ -72,10 +82,14 @@ def record(rec: Recorder) -> dict:
                   f" e.threshold = {SHAPE_THRESHOLD}; const s = document.querySelector('#shapeopts input.eth');"
                   f" s.value = {SHAPE_THRESHOLD}; s.dispatchEvent(new Event('input')); }} }}")
     rec.wait_outline_shown()
+    # Result beat: the vents close on the board.
+    rec.focus_full(ms=700)
+    rec.settle_camera()
     rec.mark("threshold 220")
-    rec.hold(500)
+    rec.hold(600)
 
     # 3. Width 18 mm, typed.
+    rec.focus_on("#shapeopts input.ewdn", pad=120)
     rec.set_number("#shapeopts input.ewdn", f"{SHAPE_W:g}")
     cap.wait_state(f"Math.abs(state.shape.elements[0].w - {SHAPE_W}) < 0.01")
     rec.wait_outline_shown()
@@ -86,6 +100,10 @@ def record(rec: Recorder) -> dict:
     cap.js("() => draw()")
     problems = cap.js("() => blockingProblems()")
     n_el = cap.js("() => state.shape.elements.length")
+    # Pull back to the whole window for the result, the hand drifting off the
+    # panel onto the board as a person's would.
+    rec.focus_full(ms=800)
+    rec.move_to(*cap.board_to_client(10.16, 4.0, "front"), ms=800)
     rec.hold(1500)
     rec.mark("end")
     return {"blocking_problems": problems, "elements": n_el,
@@ -137,8 +155,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default=None)
     ap.add_argument("--out", default=str(HELP_DIR / "parts.webp"))
-    ap.add_argument("--fps", type=int, default=12, help="motion frame rate on disk (12 = as shot)")
-    ap.add_argument("--quality", type=int, default=82)
+    ap.add_argument("--fps", type=int, default=8, help="motion frame rate on disk (12 = as shot)")
+    ap.add_argument("--quality", type=int, default=70)
     args = ap.parse_args()
     import tempfile
     workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="tip-shape-"))

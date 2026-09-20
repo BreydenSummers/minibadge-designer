@@ -5,12 +5,19 @@
 A tour by hovering, on the shared Recorder (scripts/help_recorder.py). Starts
 from stage3-wand (helmet; by-colour art with the gold stripes as exposed
 copper, the white and the grey goggle frame Ignore; the visor lens bare board
-through the wand override), Art panel open with the palette rows and the
-override chip in view. The hand rests on the gold row so the copper stripes
-light up on the canvas, then on the wand chip so the bare visor lights up.
-It then goes to the Board panel and flips Finish from Gold ENIG to Silver
-HASL: the stripes and the connector pads turn silver on the canvas. It sets
-the finish back to gold and holds, so the design is left exactly as loaded.
+through the wand override), Art panel open. The helmet has NO silkscreen row:
+its palette reads Ignore / Ignore / Exposed copper / Ignore, so only the gold
+row and the wand chip are hovered.
+
+The camera alternates card -> board -> card -> board (see "The camera" in the
+skill): it opens 1:1 on the palette rows and the wand chip so the row labels
+read at the popover's size; the hand rests on the gold row, then the camera
+pulls back to the whole window so the magenta highlight on the copper stripes
+is seen on the board; back 1:1 for the wand chip, then full again so the bare
+visor lights up on screen. Then 1:1 on the Board characteristics card, Finish
+flipped from Gold ENIG to Silver HASL, and full so the stripes and the
+connector pads turn silver on the canvas; then Finish back to gold (1:1) and
+a full-window end hold, so the design is left exactly as loaded.
 
 Nothing is dragged, uploaded or typed: hovering is the gesture, and the
 highlight on the canvas is the outcome. The hover selectors are the ones the
@@ -18,9 +25,9 @@ app binds (renderArtList: `.swrow` rows set artHL.type 'palette', `.ovchips
 .chip2` sets 'override'); the take waits on artHL before each hold so a frame
 never claims a highlight the app has not drawn.
 
-Timing: a tip clip runs 4-10 s and renders at 360 px in the popover, so
-660 px frames. `--fps 6` halves the motion reel on disk if the webp needs to
-come in under the ~300 KB soft target; frame count, not choreography, changes.
+Timing: a tip clip runs 7-10 s and renders at 360 px in the popover, so
+660 px frames. `--fps 8 --quality 70` are the camera-clip defaults (~500 KB);
+frame count, not choreography, changes with `--fps`.
 """
 
 from __future__ import annotations
@@ -46,15 +53,33 @@ from help_recorder import (
 
 FIXTURE = "stage3-wand"
 GOLD_J = 2                 # palette index of the gold stripes (copper) in the fixture
-GOLD_ROW = f"#artlist .swrow >> nth={GOLD_J}"
+ROWS = "#artlist .swrow"
+GOLD_ROW = f"{ROWS} >> nth={GOLD_J}"
 OVERRIDE_CHIP = "#artlist .ovchips .chip2"
 SILVER = "hasl"            # the Finish option that is not gold
+RESULT_HOLD_MS = 650       # every highlight / finish result stays on the board this long
 
 
 def _in_view(rec: Recorder, selector: str) -> bool:
     b = rec.box(selector)
     vh = rec.page.viewport_size["height"]
     return b["y"] >= 0 and b["y"] + b["height"] <= vh
+
+
+def _show_result(rec: Recorder, hold_ms: int = RESULT_HOLD_MS) -> None:
+    """Pull back to the whole window and keep the board on screen: a result
+    that happens off-camera did not happen for the viewer."""
+    rec.focus_full(ms=500)
+    rec.settle_camera()
+    rec.hold(hold_ms)
+
+
+def _press_here(rec: Recorder, settle_ms: int = 180, after_ms: int = 100) -> None:
+    """Click where the hand already rests (a settle, the press, a beat)."""
+    rec.hold(settle_ms)
+    rec.press()
+    if after_ms:
+        rec.hold(after_ms)
 
 
 def record(rec: Recorder) -> dict:
@@ -66,54 +91,85 @@ def record(rec: Recorder) -> dict:
     finish0 = cap.js("() => state.finish")
     if finish0 == SILVER:
         raise AssertionError(f"fixture finish is already {SILVER}; the clip needs to start on gold")
+    mats = cap.js("() => state.art[0].palette.map(p => p.material)")
+    if "silk" in mats:
+        raise AssertionError(f"the helmet story has no silkscreen row, but the palette is {mats}")
     # Palette rows and the override chip must both be on screen before the
     # first frame so nothing jumps; the front canvas too, for the highlights.
     cap.js("(s) => document.querySelector(s).scrollIntoView({block: 'center'})", OVERRIDE_CHIP)
     cap.scroll_into_view("front")
-    for sel in (GOLD_ROW, OVERRIDE_CHIP):
+    for sel in (f"{ROWS} >> nth=0", OVERRIDE_CHIP):
         if not _in_view(rec, sel):
             raise AssertionError(f"{sel} is off screen at the start")
-    # Rest the hand beside the layer card, off every control.
+    # Loading the fixture posts the bridges status toast (6 s, bottom right,
+    # over the back board's pads). It is the shape tip's subject, not this
+    # one's: let it expire before the first frame rather than record it.
+    cap.wait_state("!document.querySelector('#toasts .toast.info')", timeout=10_000)
+    # Rest the hand beside the layer card, off every control, and open the
+    # clip already framed 1:1 on the palette rows and the wand chip.
     b = rec.box(OVERRIDE_CHIP)
     rec.mx, rec.my = b["x"] + b["width"] + 60, b["y"] + 70
     page.mouse.move(rec.mx, rec.my)
-    rec.mark("stage3-wand: Art panel, palette rows + wand chip in view")
-    rec.hold(250)
+    rec.start_focused(f"{ROWS} >> nth=0", pad=36, include=[OVERRIDE_CHIP])
+    rec.mark("stage3-wand: Art panel, 1:1 on palette rows + wand chip")
+    rec.hold(200)
 
-    # 1. Hover the gold row: the copper stripes light up on the canvas.
-    rec.move_to(*rec.center(GOLD_ROW, fx=0.12))
+    # 1. Hover the gold row (1:1, the label reads), then the board: the copper
+    # stripes light up magenta.
+    rec.move_to(*rec.center(GOLD_ROW, fx=0.12), ms=600)
     cap.wait_state(f"artHL !== null && artHL.type === 'palette' && artHL.j === {GOLD_J}")
-    rec.mark("hover gold row -> copper stripes highlighted")
-    rec.hold(900)
+    rec.mark("hover gold row (Exposed copper)")
+    rec.hold(320)
+    _show_result(rec)
+    rec.mark("full: copper stripes highlighted on the board")
 
-    # 2. Hover the wand chip: the bare visor lights up.
-    rec.move_to(*rec.center(OVERRIDE_CHIP, fx=0.3))
+    # 2. Hover the wand chip (1:1 on the way in), then the board: the bare
+    # visor lights up.
+    rec.focus_on(OVERRIDE_CHIP, pad=36, include=[f"{ROWS} >> nth=0"])
+    rec.move_to(*rec.center(OVERRIDE_CHIP, fx=0.3), ms=600)
     cap.wait_state("artHL !== null && artHL.type === 'override' && artHL.j === 0")
-    rec.mark("hover wand chip -> bare visor highlighted")
-    rec.hold(900)
+    rec.mark("hover wand chip (bare board)")
+    rec.hold(320)
+    _show_result(rec)
+    rec.mark("full: bare visor highlighted on the board")
 
-    # 3. Board panel, Finish -> silver: stripes and pads turn silver.
-    rec.click("#tab-shape", after_ms=200)
+    # 3. Board characteristics card, Finish -> silver: stripes and pads turn silver.
+    rec.move_to(*rec.center("#tab-shape"), ms=600)
+    _press_here(rec)
     cap.wait_state("activePanel === 'shape'")
     if not _in_view(rec, "#finish"):
         cap.js("() => document.querySelector('#finish').scrollIntoView({block: 'center'})")
         rec.frame(STEP_MS)
-    rec.mark("Board panel")
-    rec.choose("#finish", SILVER, after_ms=1000)
+    rec.focus_on("#finish", pad=60)
+    rec.mark("Board characteristics, 1:1 on Finish")
+    rec.move_to(*rec.center("#finish"), ms=600)
+    _press_here(rec)                       # a native <select> popup never renders headless
+    page.select_option("#finish", SILVER)
     cap.wait_state(f"state.finish === '{SILVER}'")
-    rec.mark(f"Finish -> {SILVER}: metal turns silver")
+    rec.mark(f"Finish -> Silver HASL ({SILVER})")
+    rec.hold(320)
+    _show_result(rec)
+    rec.mark("full: stripes and pads silver")
 
-    # 4. And back to gold, leaving the design as it was loaded.
-    rec.choose("#finish", finish0, after_ms=200)
+    # 4. And back to gold, leaving the design as it was loaded. The hand is
+    # still on the select, so it presses again where it rests.
+    rec.focus_on("#finish", pad=60, ms=300)
+    rec.settle_camera()
+    _press_here(rec, settle_ms=100, after_ms=0)
+    page.select_option("#finish", finish0)
     cap.wait_state(f"state.finish === '{finish0}'")
     rec.mark(f"Finish -> {finish0} again")
-    rec.hold(1500)
+    rec.hold(300)                          # the select reads Gold ENIG again, 1:1
+    rec.focus_full(ms=500)
+    rec.settle_camera()
+    rec.hold(750)
     rec.mark("end")
 
     return {"blocking_problems": cap.js("() => blockingProblems()"),
             "finish_start": finish0,
             "finish_end": cap.js("() => state.finish"),
             "finish_select": cap.js("() => $('finish').value"),
+            "palette_materials": mats,
             "gold_material": cap.js(f"() => state.art[0].palette[{GOLD_J}].material"),
             "override": cap.js("() => state.art[0].overrides[0]"),
             "mask": cap.js("() => state.mask")}
@@ -162,8 +218,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default=None)
     ap.add_argument("--out", default=str(HELP_DIR / "materials.webp"))
-    ap.add_argument("--fps", type=int, default=12, help="motion frame rate on disk (12 = as shot)")
-    ap.add_argument("--quality", type=int, default=82)
+    ap.add_argument("--fps", type=int, default=8, help="motion frame rate on disk (12 = as shot)")
+    ap.add_argument("--quality", type=int, default=70)
     args = ap.parse_args()
     import tempfile
     workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="tip-materials-"))

@@ -5,25 +5,47 @@
 Starts from scripts/help_fixtures/stage5-text.json (the finished helmet: bare
 visor, red LED on the back, "half" on the back at 2 mm) in Both view and shows
 the canvas gestures every later tip assumes, on the real app, driven the way a
-person drives it: click "half" on the BACK canvas to select it (corner squares
-and the round knob appear), Alt-drag it 1.5 mm up and back to its spot at
-(10.16, 14.9), grab the knob and turn it to 30 deg and back in one gesture
-(SNAP is on, so the turn steps 15 deg), nudge it up 1 mm with Shift+Up and
-back with Shift+Down, then cross to the FRONT canvas, rest on the LED's dashed
-ghost and click it: a back part is grabbable from the front, and its handles
-appear around the ghost. Ends held with everything where it started.
+person drives it. The camera frames the BACK board at 1:1 for the canvas
+beats, so the corner squares, the round knob and the snap guide read at the
+popover's size; it pulls back to the whole window only to cross to the front.
+
+  1. click "half" on the BACK canvas: it selects, corner squares and knob shown;
+  2. a SNAP drag: up and off the board's vertical centre line, then back across
+     it, so the pink centre-line guide the tip text names is on screen while
+     the text is held on it (the guide lives and dies with the drag);
+  3. an Alt-drag back to the story's spot (10.16, 14.9), off SNAP's grid;
+  4. double-click "half": +90 deg, held; then three more double-clicks walk
+     it round through 180 and 270 back to 0;
+  5. Shift+Up nudges 1 mm, Shift+Down brings it home;
+  6. cross to the FRONT canvas, rest on the LED's dashed ghost and click it: a
+     back part is grabbable from the front, and its handles appear there.
+
+The round knob is on screen from the first click on (SNAP turns it in 15 deg
+steps), but it is not turned in this clip: bringing the text back from 90 with
+the knob does not work in the app today. handleAt's rotate pickup
+(index.html, `let rot0 = (a ? a.rot : L ? L.rot : el ? el.rot : 0)`) never
+reads a text's own rot, so grabbing the knob of a text at 90 deg restarts the
+angle from 0 and the text jumps (measured: a -90 deg sweep from rot 90 landed
+on 270, via 345/330/.../285). That is a dogfood finding, reported with the
+clip; the double-clicks do the return instead, and the clip stays inside 11 s.
+
+Ends held with everything where it started and blockingProblems() empty.
 
 Measured while planning this clip (probe over the fixture):
-- "half" at (10.16, 14.9): grab box y 13.69-15.9, knob at (10.16, 12.90),
-  pivot at the anchor (10.16, 14.9). textWarnings() is empty for every centre
-  y >= 13.0 and for rot 15/30/345, so the 1.5 mm hop and the 30 deg turn
-  never raise a toast; y <= 12.5 overlaps the D1/R1 unit.
+- outlineBounds() is [0.16, 0.02, 20.16, 20.3], so the board's vertical centre
+  line is x = 10.16: "half" at (10.16, 14.9) already sits on it. A SNAP drag
+  that stays within 7 px (0.35 mm) of it keeps the pink guide; the hop to
+  x = 8.9 lets go of it, the sweep back re-catches it.
+- textWarnings() is empty for "half" at rot 0/15/30/90/180/270 and for every
+  centre y >= 13.0 near x = 10.16, so nothing here raises a toast.
 - In Both view both canvases fit the 1320x1150 viewport (front y 128-574,
-  back y 664-1110), so nothing here scrolls; the shared drag_mm() would
+  back y 664-1110), so nothing scrolls; the shared drag_mm() would
   scrollIntoView() the back canvas and jump the frame, hence the local drag.
-- The text knob is drawn at the top of the text's axis-aligned box, so it
-  does not swing with the text mid-turn; the angle is read from the pointer,
-  so turning and returning inside one press lands on rot 0 exactly.
+- The text's grab box at rot 90/180/270 still contains the anchor (10.16,
+  14.9), so a hand resting there double-clicks the text at every angle.
+- Playwright's mouse.down() sends clickCount 1; Chromium only fires dblclick
+  for a press with clickCount 2, so the double-click is press, then
+  down/up with click_count=2.
 - Loading the fixture posts a 6 s "Bridges were added" info toast at the
   bottom-right, over the back canvas; it is left to expire before the first
   frame, as in leds.py.
@@ -55,16 +77,32 @@ from help_recorder import (
 
 FIXTURE = "stage5-text"
 TEXT_AT = (10.16, 14.9)       # the story's spot; legal for "half" at 1.3-2.2 mm
-TEXT_UP = (10.16, 13.4)       # 1.5 mm up: still clear of the D1/R1 unit
+SNAP_OFF = (8.9, 13.5)        # up and 1.26 mm left: the centre guide lets go
+SNAP_ON = (10.16, 13.5)       # back across the centre line: the guide re-catches
 LED_AT = (10.3625, 10.0)      # back, behind the visor; ghosted on the front
-TURN_DEG = 30                 # two SNAP steps; visible on "half" at 2 mm
+BOARD_CENTRE = (10.16, 10.16) # outlineBounds() midpoint: where the camera looks
 
 
-def drag_board(rec: Recorder, frm, to, side: str, alt: bool, ms: int) -> None:
-    """rec.drag_mm without its scrollIntoView (both canvases are already in
-    view; a scroll would jump the frame). Destination recomputed each step."""
+def canvas_rect(cap, side: str) -> dict:
+    return cap.js("(s) => { const r = (s === 'back' ? cvB : cvF).getBoundingClientRect();"
+                  " return {x: r.x, y: r.y, w: r.width, h: r.height}; }", side)
+
+
+def frame_board(rec: Recorder, side: str, ms: int) -> None:
+    """Camera on one canvas's board at 1:1 (the crop grows to the output size)."""
+    cx, cy = rec.cap.board_to_client(*BOARD_CENTRE, side)
+    r = canvas_rect(rec.cap, side)
+    rec.focus_centre(cx, cy, r["w"], r["h"], ms=ms)
+
+
+def drag_path(rec: Recorder, points, side: str, alt: bool, seg_ms: int,
+              hold_pressed_ms: int = 0):
+    """Press at points[0] and drag the cursor through the rest, eased per
+    segment, without rec.drag_mm's scrollIntoView (both canvases are already
+    in view; a scroll would jump the frame). Returns the snap guides seen
+    while the pointer rested pressed at the end."""
     cap, page = rec.cap, rec.page
-    x0, y0 = cap.board_to_client(*frm, side)
+    x0, y0 = cap.board_to_client(*points[0], side)
     if math.hypot(x0 - rec.mx, y0 - rec.my) > 2:  # move_to costs 450 ms even for 0 px
         rec.move_to(x0, y0)
     rec.hold(180)
@@ -73,34 +111,38 @@ def drag_board(rec: Recorder, frm, to, side: str, alt: bool, ms: int) -> None:
     page.mouse.down()
     rec.down_ms = rec.clock_ms
     rec.frame(90)
-    steps = max(6, round(ms / STEP_MS))
-    for i in range(1, steps + 1):
-        u = (1 - math.cos(math.pi * i / steps)) / 2
-        x1, y1 = cap.board_to_client(*to, side)
-        rec.mx, rec.my = x0 + (x1 - x0) * u, y0 + (y1 - y0) * u
-        page.mouse.move(rec.mx, rec.my)
-        rec.frame(STEP_MS)
+    steps = max(6, round(seg_ms / STEP_MS))
+    for to in points[1:]:
+        sx, sy = rec.mx, rec.my
+        for i in range(1, steps + 1):
+            u = (1 - math.cos(math.pi * i / steps)) / 2
+            x1, y1 = cap.board_to_client(*to, side)   # live canvas rect each step
+            rec.mx, rec.my = sx + (x1 - sx) * u, sy + (y1 - sy) * u
+            page.mouse.move(rec.mx, rec.my)
+            rec.frame(STEP_MS)
+    guides = cap.js("() => JSON.parse(JSON.stringify(snapGuides))")
+    if hold_pressed_ms:
+        rec.hold(hold_pressed_ms)
     page.mouse.up()
     if alt:
         page.keyboard.up("Alt")
+    return guides
 
 
-def arc(rec: Recorder, pivot, start_deg: float, sweep_deg: float, radius: float,
-        side: str, ms: int) -> float:
-    """Sweep the held pointer around `pivot` (board mm) from start_deg by
-    sweep_deg, eased; returns the angle it ended on. Angles are in board
-    coordinates (the mirror of the back view is board_to_client's business)."""
-    steps = max(6, round(ms / STEP_MS))
-    a = start_deg
-    for i in range(1, steps + 1):
-        u = (1 - math.cos(math.pi * i / steps)) / 2
-        a = start_deg + sweep_deg * u
-        mx = pivot[0] + radius * math.cos(math.radians(a))
-        my = pivot[1] + radius * math.sin(math.radians(a))
-        rec.mx, rec.my = rec.cap.board_to_client(mx, my, side)
-        rec.page.mouse.move(rec.mx, rec.my)
-        rec.frame(STEP_MS)
-    return a
+def double_click(rec: Recorder) -> None:
+    """Two presses where the hand is; the second carries clickCount 2, which
+    is what makes Chromium fire dblclick on the canvas."""
+    page = rec.page
+    page.mouse.down()
+    rec.down_ms = rec.clock_ms
+    rec.frame(70)
+    page.mouse.up()
+    rec.frame(70)
+    page.mouse.down(click_count=2)
+    rec.down_ms = rec.clock_ms
+    rec.frame(70)
+    page.mouse.up(click_count=2)
+    rec.frame(80)
 
 
 def text_state(cap) -> dict:
@@ -115,6 +157,7 @@ def record(rec: Recorder) -> dict:
     cap.wait_state("!!FONT_INK['blackops']")
     page.evaluate("() => document.fonts.load('16px bm-blackops')")
     cap.wait_state("[...document.fonts].some(f => f.family === 'bm-blackops' && f.status === 'loaded')")
+    cap.wait_state("snapOn === true")
     cap.js("() => draw()")
     # The fixture's "bridges were added" info toast (6 s) sits over the back
     # canvas; let it expire before the first frame, as leds.py does.
@@ -122,10 +165,13 @@ def record(rec: Recorder) -> dict:
                    ".some(t => /Bridges were added/.test(t.textContent))", timeout=9_000)
     scroll = cap.js("() => ({y: window.scrollY, doc: document.documentElement.scrollHeight,"
                     " win: window.innerHeight})")
+    start = text_state(cap)
     rec.mark("stage 5: the finished helmet, Both view")
-    rec.hold(250)
+    rec.hold(200)
 
-    # 1. Click "half" on the BACK canvas: it selects, handles appear.
+    # 1. Camera onto the BACK board at 1:1 while the hand goes to "half";
+    # click it: it selects, corner squares and the round knob appear.
+    frame_board(rec, "back", ms=550)
     rec.move_to(*cap.board_to_client(*TEXT_AT, "back"), ms=550)
     rec.hold(200)
     rec.press()
@@ -133,54 +179,64 @@ def record(rec: Recorder) -> dict:
     rec.mark("click 'half' on the back: selected, handles shown")
     rec.hold(300)
 
-    # 2. Alt-drag it 1.5 mm up, then back to its spot (both off SNAP's grid).
-    rec.mark("Alt-drag up 1.5 mm")
-    drag_board(rec, TEXT_AT, TEXT_UP, "back", alt=True, ms=400)
-    cap.wait_state(f"Math.abs(state.texts[0].y - {TEXT_UP[1]}) < 0.15")
-    rec.hold(250)
-    rec.mark("Alt-drag back down")
-    drag_board(rec, TEXT_UP, TEXT_AT, "back", alt=True, ms=400)
-    cap.wait_state(f"Math.abs(state.texts[0].x - {TEXT_AT[0]}) < 0.15"
-                   f" && Math.abs(state.texts[0].y - {TEXT_AT[1]}) < 0.15")
+    # 2. A SNAP drag (no Alt): up and off the centre line, then back across it.
+    # The text is held on the line for a beat so the pink guide is on screen.
+    rec.mark("SNAP drag: off the centre line and back onto it (pink guide)")
+    guides = drag_path(rec, [TEXT_AT, SNAP_OFF, SNAP_ON], "back", alt=False,
+                       seg_ms=420, hold_pressed_ms=380)
+    snapped = text_state(cap)
+    rec.hold(220)
+
+    # 3. Alt-drag it home: the story's spot is off SNAP's grid. The cursor is
+    # still at SNAP_ON; the anchor sits wherever the snap put it, so the
+    # cursor's destination is offset by the same amount.
+    rec.mark("Alt-drag back to (10.16, 14.9)")
+    back_to = (SNAP_ON[0] + TEXT_AT[0] - snapped["x"], SNAP_ON[1] + TEXT_AT[1] - snapped["y"])
+    drag_path(rec, [SNAP_ON, back_to], "back", alt=True, seg_ms=420)
+    cap.wait_state(f"Math.abs(state.texts[0].x - {TEXT_AT[0]}) < 0.1"
+                   f" && Math.abs(state.texts[0].y - {TEXT_AT[1]}) < 0.1")
     rec.hold(300)
 
-    # 3. The round knob: one press, turn to 30 deg and back. SNAP is on, so
-    # the angle steps 15 deg under the hand, exactly as the tip text says.
-    si = cap.js("() => JSON.parse(JSON.stringify(selectionInfo()))")
-    pivot, knob = si["pivot"], si["knob"]
-    radius = math.hypot(knob[0] - pivot[0], knob[1] - pivot[1])
-    a0 = math.degrees(math.atan2(knob[1] - pivot[1], knob[0] - pivot[0]))
-    rec.move_to(*cap.board_to_client(*knob, "back"), ms=450)
-    rec.hold(200)
-    page.mouse.down()
-    rec.down_ms = rec.clock_ms
-    rec.frame(90)
-    rec.mark(f"grab the knob, turn {TURN_DEG} deg")
-    a1 = arc(rec, pivot, a0, TURN_DEG, radius, "back", ms=450)
-    rot_mid = text_state(cap)["rot"]
-    rec.hold(250)
-    rec.mark("turn back to 0")
-    arc(rec, pivot, a1, -TURN_DEG, radius, "back", ms=450)
-    page.mouse.up()
-    cap.wait_state("(state.texts[0].rot || 0) === 0")
-    rec.hold(300)
+    # 4. Double-click: +90 deg. The hand is already on the text (the Alt-drag
+    # released it there); hold so the quarter turn reads, then three more
+    # double-clicks walk it round to 0 again.
+    rec.hold(150)
+    rec.mark("double-click: +90 deg")
+    double_click(rec)
+    cap.wait_state("(state.texts[0].rot || 0) === 90")
+    rot_dbl = text_state(cap)["rot"]
+    rec.hold(420)
+    rots_seen: list[int] = [rot_dbl]
+    rec.mark("three more double-clicks: 180, 270, back to 0")
+    for want in (180, 270, 0):
+        double_click(rec)
+        cap.wait_state(f"(state.texts[0].rot || 0) === {want}")
+        rots_seen.append(text_state(cap)["rot"])
+        rec.hold(230)
+    rec.hold(150)
 
-    # 4. Arrow-key nudge: Shift+Up is 1 mm (a bare arrow is 0.2 mm, two frame
+    # 5. Arrow-key nudge: Shift+Up is 1 mm (a bare arrow is 0.2 mm, two frame
     # pixels at this scale), then Shift+Down brings it home.
+    y_before = text_state(cap)["y"]
     rec.mark("Shift+Up nudges 1 mm")
     page.keyboard.press("Shift+ArrowUp")
-    cap.wait_state(f"Math.abs(state.texts[0].y - {TEXT_AT[1] - 1.0}) < 0.05")
+    cap.wait_state(f"Math.abs(state.texts[0].y - {y_before - 1.0}) < 0.05")
     rec.hold(400)
     rec.mark("Shift+Down brings it back")
     page.keyboard.press("Shift+ArrowDown")
-    cap.wait_state(f"Math.abs(state.texts[0].y - {TEXT_AT[1]}) < 0.05")
+    cap.wait_state(f"Math.abs(state.texts[0].y - {y_before}) < 0.05")
     rec.hold(400)
 
-    # 5. Cross to the FRONT canvas: the back LED is a dashed ghost there.
-    # Rest on it, then click it: it selects, handles around the ghost.
+    # 6. Cross to the FRONT canvas: the camera pulls back to the whole window
+    # for the crossing, then closes on the front board. The back LED is a
+    # dashed ghost there; rest on it, then click it: it selects, handles
+    # around the ghost.
     rec.mark("to the front: rest on the LED's ghost")
+    rec.focus_full(ms=650)
     rec.move_to(*cap.board_to_client(*LED_AT, "front"), ms=750)
-    rec.hold(700)
+    rec.hold(250)
+    frame_board(rec, "front", ms=450)
+    rec.settle_camera()
     ghost_cursor = cap.js("() => cvF.style.cursor")
     rec.mark("click the ghost: it selects from here too")
     rec.press()
@@ -193,9 +249,11 @@ def record(rec: Recorder) -> dict:
     toasts = cap.js("() => [...document.querySelectorAll('#toasts .toast')]"
                     ".map(e => e.className + ': ' + e.textContent.slice(0, 80))")
     rec.mark("end: everything where it started")
-    rec.hold(1500)
+    rec.hold(1200)
     return {"blocking_problems": problems, "toasts_at_end": toasts, "scroll": scroll,
-            "rot_mid_turn": rot_mid, "ghost_cursor": ghost_cursor,
+            "start": start, "snap_guides_held": guides, "snapped_to": snapped,
+            "rot_after_dblclick": rot_dbl, "rots_by_dblclick": rots_seen,
+            "ghost_cursor": ghost_cursor,
             "text": text_state(cap),
             "led": cap.js("() => ({x: state.leds[0].x, y: state.leds[0].y,"
                           " side: state.leds[0].side, rot: state.leds[0].rot || 0})"),
@@ -244,8 +302,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default=None)
     ap.add_argument("--out", default=str(HELP_DIR / "rotate.webp"))
-    ap.add_argument("--fps", type=int, default=12, help="motion frame rate on disk (12 = as shot)")
-    ap.add_argument("--quality", type=int, default=82)
+    ap.add_argument("--fps", type=int, default=8, help="motion frame rate on disk (12 = as shot)")
+    ap.add_argument("--quality", type=int, default=70)
     args = ap.parse_args()
     import tempfile
     workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="tip-basics-"))
@@ -267,20 +325,25 @@ def main() -> None:
     if result is None:
         raise SystemExit("the take did not finish; nothing written")
     t = result["text"]
+    pink = any(g.get("axis") == "x" and g.get("center") for g in result["snap_guides_held"])
     ok = (not result["blocking_problems"]
-          and abs(t["x"] - TEXT_AT[0]) < 0.3 and abs(t["y"] - TEXT_AT[1]) < 0.3
-          and t["rot"] == 0)
+          and abs(t["x"] - TEXT_AT[0]) < 0.1 and abs(t["y"] - TEXT_AT[1]) < 0.1
+          and t["rot"] == 0 and result["rot_after_dblclick"] == 90 and pink)
     if not ok:  # keep the evidence, never ship it over the current asset
         out = workdir / out.name
     frames = thin(rec.frames, args.fps)
     stats = assemble_webp(frames, out, quality=args.quality)
     sheet = contact_sheet(rec.frames, workdir / "contact.png")
     n, total = webp_duration_ms(out)
+    (workdir / "result.json").write_text(json.dumps(
+        {"result": result, "stats": stats, "anmf": [n, total], "marks": rec.marks,
+         "frames": [(p.name, d) for p, d in rec.frames]}, default=str, indent=1))
     print("result:", json.dumps(result, default=str))
     print("webp:", out, stats, f"ANMF frames {n}, {total} ms")
     print("contact sheet:", sheet)
     if not ok:
-        raise SystemExit(f"end state is wrong: problems={result['blocking_problems']} text={t}")
+        raise SystemExit(f"take rejected: problems={result['blocking_problems']} text={t}"
+                         f" rot_after_dblclick={result['rot_after_dblclick']} pink_guide={pink}")
 
 
 if __name__ == "__main__":

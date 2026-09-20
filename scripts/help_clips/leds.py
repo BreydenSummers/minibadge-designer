@@ -1,15 +1,19 @@
 """Record the "?" tip clip for `leds`: a red LED goes on the BACK, behind the visor.
 
-    .venv/bin/python scripts/help_clips/leds.py [--workdir DIR] [--out minibadge_designer/static/help/leds.webp]
+    .venv/bin/python scripts/help_clips/leds.py [--workdir DIR] [--out minibadge_designer/static/help/leds.webp] [--fps 8] [--quality 70]
 
 Starts from scripts/help_fixtures/stage3-wand.json (helmet, visor already bare
-board, one red LED on the front) and shows only step 4 of the helmet story:
-open the LEDs panel, set the LED's Side to Back, drag it on the BACK canvas to
-(10.36, 10.0) behind the visor with Alt held (the spot is off SNAP's grid),
-then drag its D1 label a few millimetres to show labels move too. Ends held on
-the back view with the LED behind the visor. One continuous take on the shared
-Recorder (scripts/help_recorder.py), 660 px wide, encoded as an animated webp
-of independent full frames.
+board, one red LED on the front) and shows only step 4 of the helmet story, in
+two clearly separate beats, as the tip text puts it ("Set Side to Back, then
+drag it under the visor"): open the LEDs panel; with the camera 1:1 on the LED
+card, set Side to Back and rest on it; pull back so the LED is seen arriving on
+the back board; then, 1:1 on the BACK board, drag the LED (Alt held: the spot
+is off SNAP's grid) to (10.36, 10.0) under the visor, and drag its D1 label a
+few millimetres to show labels move too. The app's own reconnect-trace status
+message is left as it is. Ends at the full window, held 1.5 s. One continuous
+take on the shared Recorder (scripts/help_recorder.py), 660 px wide, encoded as
+an animated webp of independent full frames; `--fps` thins the ~12 fps motion
+reel on disk without changing the choreographed time.
 """
 
 from __future__ import annotations
@@ -23,6 +27,7 @@ REPO = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(REPO / "scripts"))
 
 from help_recorder import (
+    STEP_MS,
     TIP_H,
     TIP_W,
     GifCapture,
@@ -35,12 +40,28 @@ FIXTURE = "stage3-wand"
 LED_TO = (10.3625, 10.0)      # back, behind the visor (stage4-led.json)
 LABEL_MOVES = [(0.0, 2.6), (0.0, -2.6), (-2.4, 0.0), (2.4, 0.0),
                (0.0, 3.2), (0.0, -3.2), (-3.0, 0.0), (3.0, 0.0)]
+LED_CARD = "#ledlist .item"
+SIDE_SELECT = f"{LED_CARD} select.s"
+COLOR_SELECT = f"{LED_CARD} select.c"
 
 
 def d1_label(cap) -> dict:
     """Where the app currently prints D1 (unit 0's LED label), and on which face."""
     return cap.js("() => { const l = refdesLayout().find(l => l.unit === 0 && l.which === 'led');"
                   " return l ? {x: l.at[0], y: l.at[1], face: l.face, hand: !!l.hand} : null; }")
+
+
+def focus_board(rec: Recorder, side: str, pad: float = 70, ms: int = 700) -> None:
+    """Camera 1:1 on one canvas's board: the outline's mm bounds mapped through
+    the live canvas rect (the back view is mirrored, so take min/max), grown by
+    `pad` px so the LED, its ghost and the label have room around the helmet."""
+    rec.cap.scroll_into_view(side)
+    ob = rec.cap.js("() => outlineBounds()")
+    pts = [rec.cap.board_to_client(x, y, side)
+           for x in (ob[0], ob[2]) for y in (ob[1], ob[3])]
+    x0, x1 = min(p[0] for p in pts) - pad, max(p[0] for p in pts) + pad
+    y0, y1 = min(p[1] for p in pts) - pad, max(p[1] for p in pts) + pad
+    rec.focus_centre((x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0, ms)
 
 
 def record(rec: Recorder) -> dict:
@@ -52,44 +73,54 @@ def record(rec: Recorder) -> dict:
     # design a moment later would see it; nothing is shown while we wait.
     cap.wait_state("![...document.querySelectorAll('#toasts .toast')]"
                    ".some(t => /Bridges were added/.test(t.textContent))", timeout=9_000)
-    rec.mark("stage3: visor bare, LED still on the front")
-    rec.hold(400)
+    rec.mark("stage3: visor bare, LED still on the front (full view)")
+    rec.hold(300)
 
     # 1. The LEDs panel (a shorter reach than click()'s distance-scaled move;
     # the first move in a clip should not eat a second of the budget).
-    rec.move_to(*rec.center("#tab-leds"), ms=700)
-    rec.hold(200)
+    rec.move_to(*rec.center("#tab-leds"), ms=650)
+    rec.hold(180)
     rec.press()
-    rec.hold(200)
     cap.wait_state("activePanel === 'leds'")
     rec.mark("LEDs panel")
 
-    # 2. Side -> Back (and red, if the fixture ever changes).
+    # 2. Beat one: Side -> Back, the camera 1:1 on the LED card so the select
+    # and its value read at popover size. Then rest on it, so "set Side to
+    # Back" and "drag it under the visor" are two things, not one blur.
     led = cap.js("() => ({x: state.leds[0].x, y: state.leds[0].y,"
                  " side: state.leds[0].side, color: state.leds[0].color})")
-    if led["side"] != "back":
-        rec.choose("#ledlist .item select.s", "back", after_ms=400)
-        cap.wait_state("state.leds[0].side === 'back'")
-        rec.mark("side: Back")
+    rec.focus_on(LED_CARD, pad=40, ms=600)
     if led["color"] != "red":
-        rec.choose("#ledlist .item select.c", "red", after_ms=400)
+        rec.choose(COLOR_SELECT, "red", after_ms=400)
         cap.wait_state("state.leds[0].color === 'red'")
         rec.mark("colour: red")
+    if led["side"] != "back":
+        rec.choose(SIDE_SELECT, "back", after_ms=600)
+        cap.wait_state("state.leds[0].side === 'back'")
+        rec.mark("Side: Back (held on the card)")
 
-    # 3. Drag it on the BACK canvas behind the visor. Same-side items win the
-    # hit test, so a back LED is grabbed on the back view; Alt because the
-    # canonical spot is off SNAP's grid.
+    # Result beat: pull back so the LED is seen arriving on the back board.
+    rec.focus_full(ms=700)
+    rec.settle_camera()
+    rec.mark("full view: LED now on the back board")
+    rec.hold(300)
+
+    # 3. Beat two: on the BACK canvas, 1:1 on the board, drag the LED under
+    # the visor. Same-side items win the hit test, so a back LED is grabbed on
+    # the back view; Alt because the canonical spot is off SNAP's grid. The
+    # camera eases onto the board while the hand travels to the LED.
     led = cap.js("() => ({x: state.leds[0].x, y: state.leds[0].y})")
-    rec.mark("drag LED (back canvas)")
+    focus_board(rec, "back", pad=70, ms=800)
+    rec.mark("drag LED (back canvas, camera on the board)")
     rec.drag_mm((led["x"], led["y"]), LED_TO, side="back", alt=True, ms=900)
     cap.wait_state(f"Math.abs(state.leds[0].x - {LED_TO[0]}) < 0.3"
                    f" && Math.abs(state.leds[0].y - {LED_TO[1]}) < 0.3")
-    rec.mark("LED behind the visor")
-    rec.hold(600)
+    rec.mark("LED under the visor")
+    rec.hold(400)
 
     # 4. The D1 label moves too: pick a nearby spot the app will honour
     # (refdesOkAt runs the real layout with the position in place) and drag
-    # the ink there on the face it prints on.
+    # the ink there on the face it prints on, the camera staying on that board.
     lab = d1_label(cap)
     label_moved = None
     if lab:
@@ -100,8 +131,10 @@ def record(rec: Recorder) -> dict:
                 label_moved = (tx, ty)
                 break
     if label_moved:
-        rec.mark("drag D1 label")
-        rec.drag_mm((lab["x"], lab["y"]), label_moved, side=lab["face"], ms=800)
+        if lab["face"] != "back":
+            focus_board(rec, lab["face"], pad=70, ms=700)
+        rec.mark(f"drag D1 label ({lab['face']} canvas)")
+        rec.drag_mm((lab["x"], lab["y"]), label_moved, side=lab["face"], ms=700)
         cap.wait_state("!!state.leds[0].dlabel_at")
         after = d1_label(cap)
         rec.mark(f"D1 label at ({after['x']:.2f}, {after['y']:.2f}), hand={after['hand']}")
@@ -111,7 +144,10 @@ def record(rec: Recorder) -> dict:
     cap.wait_state("customActive() && boardCarved()")
     cap.js("() => draw()")
     problems = cap.js("() => blockingProblems()")
-    rec.mark("end: back view, LED behind the visor")
+    # End: the whole window, the hand resting beside the board.
+    rec.focus_full(ms=600)
+    rec.settle_camera()
+    rec.mark("end: full view, LED behind the visor")
     rec.hold(1500)
     return {"blocking_problems": problems, "label_moved": label_moved,
             "label_after": d1_label(cap),
@@ -119,10 +155,51 @@ def record(rec: Recorder) -> dict:
                           " side: state.leds[0].side, color: state.leds[0].color})")}
 
 
+def thin(frames: list[tuple[Path, int]], fps: int) -> list[tuple[Path, int]]:
+    """Fold motion frames (STEP_MS holds) into their neighbour to hit `fps`.
+
+    Holds longer than a motion step are kept as they are; only the ~12 fps
+    motion reel is decimated, so the choreographed time is unchanged."""
+    if fps >= round(1000 / STEP_MS):
+        return frames
+    keep_every = max(1, round((1000 / STEP_MS) / fps))
+    out: list[tuple[Path, int]] = []
+    run = 0  # position inside the current run of motion frames
+    for p, d in frames:
+        if d <= STEP_MS + 1:
+            if run % keep_every and out:
+                out[-1] = (out[-1][0], out[-1][1] + d)   # fold into the kept one
+            else:
+                out.append((p, d))
+            run += 1
+        else:
+            run = 0
+            out.append((p, d))
+    return out
+
+
+def webp_duration_ms(path: Path) -> tuple[int, int]:
+    """(frames, total ms) read from the ANMF chunks. Pillow reports 0 ms per
+    frame when it reads an animated webp back, so assemble_webp's duration_ms
+    cannot be trusted; the container's own frame headers can."""
+    import struct
+    b = path.read_bytes()
+    i, n, total = 12, 0, 0
+    while i + 8 <= len(b):
+        tag, size = b[i:i + 4], struct.unpack("<I", b[i + 4:i + 8])[0]
+        if tag == b"ANMF":
+            n += 1
+            total += struct.unpack("<I", b[i + 20:i + 23] + b"\0")[0]
+        i += 8 + size + (size & 1)
+    return n, total
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--workdir", default=None)
     ap.add_argument("--out", default=str(REPO / "minibadge_designer" / "static" / "help" / "leds.webp"))
+    ap.add_argument("--fps", type=int, default=8, help="motion frame rate on disk (12 = as shot)")
+    ap.add_argument("--quality", type=int, default=70)
     args = ap.parse_args()
     import tempfile
     workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="leds-clip-"))
@@ -139,15 +216,25 @@ def main() -> None:
         finally:
             print("marks:")
             for ms, label in rec.marks:
-                print(f"  {ms / 1000:5.1f}s  {label}")
+                print(f"  {ms / 1000:5.2f}s  {label}")
             print("frames shot:", len(rec.frames), "page events:", rec.events)
     if result is None:
         raise SystemExit("the take did not finish; nothing written")
-    stats = assemble_webp(rec.frames, out)
+    frames = thin(rec.frames, args.fps)
+    stats = assemble_webp(frames, out, quality=args.quality)
+    stats["frames_in_file"], stats["duration_ms"] = webp_duration_ms(out)
     sheet = contact_sheet(rec.frames, workdir / "contact.png")
+    (workdir / "result.json").write_text(json.dumps(
+        {"result": result, "stats": stats, "marks": rec.marks,
+         "frames": [(p.name, d) for p, d in rec.frames]}, default=str, indent=1))
     print("result:", json.dumps({k: v for k, v in result.items()}, default=str))
     print("webp:", out, stats)
     print("contact sheet:", sheet)
+    if result["blocking_problems"]:
+        raise SystemExit(f"blocking problems: {result['blocking_problems']}")
+    led = result["led"]
+    if led["side"] != "back" or abs(led["x"] - LED_TO[0]) > 0.3 or abs(led["y"] - LED_TO[1]) > 0.3:
+        raise SystemExit(f"LED did not land behind the visor: {led}")
 
 
 if __name__ == "__main__":

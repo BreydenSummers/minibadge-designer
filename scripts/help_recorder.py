@@ -129,6 +129,14 @@ class Recorder:
         self.rng = random.Random(seed)
         self.marks: list[tuple[int, str]] = []
         self.events: list[str] = []
+        # The camera: the viewport rect each frame is cropped to before the
+        # resize to out_w x out_h. Full viewport by default (a 2:1 downscale);
+        # focus_on() narrows it to a control's neighbourhood at 1:1 so panel
+        # text is legible in the 560 px popover, and the move between two
+        # rects is eased over a few frames like the hand is.
+        self._cam_from = self._cam_to = (0.0, 0.0, float(VIEW_W), float(VIEW_H))
+        self._cam_t0 = 0
+        self._cam_ms = 1
         self.page.on("crash", lambda: self.events.append("PAGE CRASH"))
         self.page.on("pageerror", lambda e: self.events.append(f"pageerror: {str(e)[:160]}"))
         self.page.on("close", lambda: self.events.append("PAGE CLOSED"))
@@ -141,11 +149,70 @@ class Recorder:
     def mark(self, label: str) -> None:
         self.marks.append((self.clock_ms, label))
 
+    # -- the camera --------------------------------------------------------------
+    def _cam_now(self):
+        u = min(1.0, (self.clock_ms - self._cam_t0) / max(1, self._cam_ms))
+        e = (1 - math.cos(math.pi * u)) / 2
+        return tuple(a + (b - a) * e for a, b in zip(self._cam_from, self._cam_to))
+
+    def focus_rect(self, x: float, y: float, w: float, h: float, ms: int = 600) -> None:
+        """Frame a viewport rect (grown to the output aspect, at least 1:1)."""
+        self.focus_centre(x + w / 2, y + h / 2, w, h, ms)
+
+    def _focus_box(self, x, y, w, h, ms):
+        w = min(w, VIEW_W); h = min(h, VIEW_H)
+        x = min(max(0.0, x), VIEW_W - w); y = min(max(0.0, y), VIEW_H - h)
+        self._cam_from = self._cam_now()
+        self._cam_to = (float(x), float(y), float(w), float(h))
+        self._cam_t0 = self.clock_ms
+        self._cam_ms = max(1, ms)
+
+    def focus_on(self, selector: str, pad: float = 40, ms: int = 600,
+                 include=None) -> None:
+        """Frame a control (plus optional other selectors) at 1:1, padded."""
+        boxes = [self.box(selector)] + [self.box(s) for s in (include or [])]
+        x0 = min(b["x"] for b in boxes) - pad
+        y0 = min(b["y"] for b in boxes) - pad
+        x1 = max(b["x"] + b["width"] for b in boxes) + pad
+        y1 = max(b["y"] + b["height"] for b in boxes) + pad
+        self.focus_centre((x0 + x1) / 2, (y0 + y1) / 2, x1 - x0, y1 - y0, ms)
+
+    def focus_centre(self, cx: float, cy: float, w: float = 0, h: float = 0,
+                     ms: int = 600) -> None:
+        """Frame a point: the crop is at least out_w x out_h (1:1), grown to
+        cover w x h at the output aspect, centred on (cx, cy), clamped."""
+        aspect = self.out_w / self.out_h
+        w = max(w, self.out_w); h = max(h, self.out_h)
+        if w / h > aspect:
+            h = w / aspect
+        else:
+            w = h * aspect
+        self._focus_box(cx - w / 2, cy - h / 2, w, h, ms)
+
+    def focus_full(self, ms: int = 700) -> None:
+        self._focus_box(0, 0, VIEW_W, VIEW_H, ms)
+
+    def start_focused(self, selector: str, pad: float = 40, include=None) -> None:
+        """Open the clip already framed on a control (no establishing pan)."""
+        self.focus_on(selector, pad=pad, ms=1, include=include)
+        self._cam_from = self._cam_to
+
+    def settle_camera(self, ms: int | None = None) -> None:
+        """Shoot frames while the camera finishes its move and the hand rests.
+        The camera only advances on frames, so a focus change followed by a
+        single hold would jump; this gives it the frames to ease over."""
+        ms = self._cam_ms if ms is None else ms
+        for _ in range(max(2, round(ms / STEP_MS))):
+            self.frame(STEP_MS)
+
     def frame(self, dur_ms: int) -> None:
         png = self.page.screenshot()
         im = Image.open(BytesIO(png)).convert("RGB")
+        rx, ry, rw, rh = self._cam_now()
+        if (rx, ry, rw, rh) != (0.0, 0.0, float(VIEW_W), float(VIEW_H)):
+            im = im.crop((round(rx), round(ry), round(rx + rw), round(ry + rh)))
         im = im.resize((self.out_w, self.out_h), Image.LANCZOS)
-        self._paint_cursor(im)
+        self._paint_cursor(im, rx, ry, self.out_w / rw)
         path = self.workdir / f"f{len(self.frames):04d}.png"
         im.save(path, compress_level=1)
         self.frames.append((path, dur_ms))
@@ -153,8 +220,10 @@ class Recorder:
         if self.down_ms is not None and self.clock_ms - self.down_ms > 260:
             self.down_ms = None
 
-    def _paint_cursor(self, im: Image.Image) -> None:
-        x, y = self.mx * self.scale, self.my * self.scale
+    def _paint_cursor(self, im: Image.Image, rx: float = 0, ry: float = 0,
+                      scale: float | None = None) -> None:
+        sc = self.scale if scale is None else scale
+        x, y = (self.mx - rx) * sc, (self.my - ry) * sc
         d = ImageDraw.Draw(im, "RGBA")
         if self.down_ms is not None:
             age = (self.clock_ms - self.down_ms) / 260
