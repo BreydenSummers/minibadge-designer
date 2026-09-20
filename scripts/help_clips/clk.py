@@ -1,0 +1,266 @@
+"""Record the "?" tip clip for `clk`: the LED blinks with the host badge's clock.
+
+    .venv/bin/python scripts/help_clips/clk.py [--workdir DIR] [--out minibadge_designer/static/help/clk.webp]
+                                               [--fps 8] [--quality 70]
+
+Starts from scripts/help_fixtures/stage4-led.json (helmet, bare visor, the red
+LED on the back; pins 9/10/15/16 kept, so pin 9 CLK is available) with the LEDs
+panel already open, and shows only the CLK hookup: tick "Blink with the badge
+clock (CLK)" on the LED card, so the CLK hookup card appears under it and the
+three-pad solder jumper appears on the front canvas (its home beside pin 10
+is off the helmet, so the app parks it on the chin and says so in a toast);
+switch the hookup to "Direct trace to pin 9" and back, so the jumper leaves and
+returns; then drag the jumper a few millimetres up the chin with Alt held (the
+spot is off SNAP's centre lines) to a place jumperOkAt() accepts, its traces
+following. Ends held with blockingProblems() empty. One continuous take on the
+shared Recorder (scripts/help_recorder.py), 660 px wide, encoded as an animated
+webp of independent full frames.
+
+The camera (see the skill's "The camera"): the clip opens already framed 1:1
+on the LED card's CLK row (start_focused, so frame 0 does not jump), pulls back
+to the whole window for every result on the board (the jumper appearing on the
+chin, leaving, returning), closes to 1:1 on the CLK hookup card for each radio
+press so its notes ("Always blinks." / "Bridge one side: 3V3 steady, CLK
+blinks.") can be read, frames the chin of the FRONT board at 1:1 for the drag,
+and ends on the whole window with the toast expired.
+
+Timing: a tip clip runs 8-11 s and renders at 360 px in the popover, so
+660 px frames. The Recorder shoots ~12 fps during motion; `--fps 8` (the
+default) folds every third motion frame into its neighbour on disk so the
+1:1 crops and pans come in near 500 KB. Frame count, not choreography, is
+what changes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(REPO / "scripts"))
+
+from help_recorder import (
+    STEP_MS,
+    TIP_H,
+    TIP_W,
+    GifCapture,
+    Recorder,
+    assemble_webp,
+    contact_sheet,
+)
+
+LENGTH_MS = (8_000, 11_000)   # a tip clip: one control, one gesture, one outcome
+
+FIXTURE = "stage4-led"
+# Offsets (mm) tried in order for the drag; the first jumperOkAt() accepts wins.
+# On the helmet the jumper lands at ~(9.77, 17.06) and the legal room is up
+# the chin, not sideways (measured 2026-09-20).
+JUMPER_MOVES = [(0.0, -2.5), (0.0, -2.0), (-2.0, -2.5), (2.0, -2.5),
+                (-1.5, -2.0), (1.5, -2.0), (0.0, -1.5), (0.0, -3.0)]
+TOAST_GONE = "!document.querySelector('#toasts .toast')"
+CLK_BOX = "#ledlist .item input.clk"
+CLK_LABEL = "#ledlist .item label[for^=clk]"
+HOOKUP = "#clkopts .item"
+
+
+def jumper(cap) -> dict | None:
+    """Where the app draws the CLK jumper now, and on which face."""
+    return cap.js("() => { const ci = clkActive() ? clkInfo() : null;"
+                  " return ci && ci.jumper ? {x: ci.jumper[0], y: ci.jumper[1],"
+                  " rot: ci.jumper[2], side: ci.side, ok: !jumperConflict()} : null; }")
+
+
+def record(rec: Recorder) -> dict:
+    cap, page = rec.cap, rec.page
+    cap.load_fixture(FIXTURE)
+    cap.wait_state("customActive() && boardCarved()")
+    # Loading the fixture posts the "bridges were added" status toast (6 s
+    # info). Let it expire before the first frame, as a person opening a saved
+    # design a moment later would see it; nothing is shown while we wait.
+    cap.wait_state(TOAST_GONE, timeout=9_000)
+    # The previous step (the LED) ended on this panel; start there.
+    cap.show_panel("leds")
+    if cap.js("() => !pinOn('9')"):
+        raise AssertionError("pin 9 is unticked in the fixture; CLK is disabled")
+    # The first beat is a panel beat, so open already framed 1:1 on the LED
+    # card's CLK row (label included, so the words are what the viewer reads),
+    # with the hand resting just below it.
+    rec.mx, rec.my = rec.center(CLK_BOX, fx=0.5, fy=4.5)
+    page.mouse.move(rec.mx, rec.my)
+    rec.start_focused(CLK_BOX, pad=90, include=[CLK_LABEL])
+    rec.mark("stage4: LED on the back, LEDs panel open, camera on the CLK row")
+    rec.hold(200)
+
+    # 1. Tick "Blink with the badge clock (CLK)" on the LED card. The jumper's
+    # home beside pin 10 is off the helmet, so the app parks it on the chin
+    # and posts a 6 s toast (bottom-right, clear of the board) saying so.
+    rec.move_to(*rec.center(CLK_BOX), ms=550)
+    rec.hold(220)
+    rec.press()
+    cap.wait_state("state.leds[0].clk === true && !!document.querySelector('#clkopts .item')")
+    j0 = jumper(cap)
+    rec.mark(f"CLK ticked; jumper at ({j0['x']:.2f}, {j0['y']:.2f}) {j0['side']}")
+    rec.hold(300)
+    # Result beat: pull back so the jumper is seen appearing on the chin.
+    rec.focus_full(ms=600)
+    rec.settle_camera()
+    rec.mark("full view: jumper parked on the chin")
+    rec.hold(400)
+
+    # 2. The hookup card at 1:1: Direct trace to pin 9 (the jumper leaves, a
+    # trace runs to pin 9), then back to the solder jumper. Each press is
+    # read on the card; each outcome is read on the board.
+    rec.focus_on(HOOKUP, pad=30)
+    rec.move_to(*rec.center("#clkopts label[for=clktrace]", fx=0.3), ms=600)
+    rec.hold(200)
+    rec.press()
+    cap.wait_state("state.clk.jumper === false")
+    rec.mark("Direct trace to pin 9 (card: 'Always blinks.')")
+    rec.hold(350)
+    rec.focus_full(ms=500)
+    rec.settle_camera()
+    rec.mark("full view: jumper gone, trace to pin 9")
+    rec.hold(250)
+    rec.focus_on(HOOKUP, pad=30)
+    rec.move_to(*rec.center("#clkopts label[for=clkjump]", fx=0.3), ms=600)
+    rec.hold(200)
+    rec.press()
+    cap.wait_state("state.clk.jumper === true")
+    j1 = jumper(cap)
+    rec.mark(f"Solder jumper again; at ({j1['x']:.2f}, {j1['y']:.2f}) (card: 'Bridge one side')")
+    rec.hold(350)
+    rec.focus_full(ms=500)
+    rec.settle_camera()
+    rec.mark("full view: jumper back on the chin")
+
+    # 3. Drag the jumper a few millimetres on its own face. The canvas slides
+    # a drag along illegal room rather than entering it, so the drop is legal
+    # by construction; the destination is still probed first so the gesture
+    # goes where it is meant to. Alt: the spot is off SNAP's centre lines.
+    dest = None
+    for dx, dy in JUMPER_MOVES:
+        tx, ty = j1["x"] + dx, j1["y"] + dy
+        if cap.js("([x, y]) => jumperOkAt(x, y)", [tx, ty]):
+            dest = (tx, ty)
+            break
+    if dest is None:
+        raise AssertionError("no legal jumper destination within a few mm")
+    # The hand drifts from the card toward the chin while the board is in full
+    # view, then the camera closes to 1:1 on the chin of the FRONT board so
+    # the three pads and their traces are large for the drag.
+    cap.scroll_into_view(j1["side"])
+    bx, by = cap.board_to_client(j1["x"], j1["y"], j1["side"])
+    rec.move_to(bx + 70, by + 60, ms=600)
+    mid = cap.board_to_client(j1["x"], (j1["y"] + dest[1]) / 2, j1["side"])
+    rec.focus_centre(*mid, ms=600)
+    rec.mark("drag jumper")
+    rec.drag_mm((j1["x"], j1["y"]), dest, side=j1["side"], alt=True, ms=800)
+    cap.wait_state(f"Math.abs(clkInfo().jumper[0] - {dest[0]}) < 0.3"
+                   f" && Math.abs(clkInfo().jumper[1] - {dest[1]}) < 0.3")
+    j2 = jumper(cap)
+    rec.mark(f"jumper at ({j2['x']:.2f}, {j2['y']:.2f}), legal={j2['ok']}")
+
+    # The relocation toast (6 s from the tick) must not sit in the closing
+    # hold; wait it out silently, then pull back to the whole window.
+    cap.wait_state(TOAST_GONE, timeout=9_000)
+    cap.wait_state("customActive() && boardCarved()")
+    cap.js("() => draw()")
+    problems = cap.js("() => blockingProblems()")
+    rec.focus_full(ms=500)
+    rec.settle_camera()
+    rec.mark("end: jumper on the chin, traces following")
+    rec.hold(1500)
+    return {"blocking_problems": problems, "jumper_after_tick": j0,
+            "jumper_dest": dest, "jumper_after": j2,
+            "clk": cap.js("() => state.clk"),
+            "led": cap.js("() => ({x: state.leds[0].x, y: state.leds[0].y,"
+                          " side: state.leds[0].side, clk: !!state.leds[0].clk})")}
+
+
+def thin(frames: list[tuple[Path, int]], fps: int) -> list[tuple[Path, int]]:
+    """Fold motion frames (STEP_MS holds) into their neighbour to hit `fps`.
+
+    Holds longer than a motion step are kept as they are; only the ~12 fps
+    motion reel is decimated, so the choreographed time is unchanged."""
+    if fps >= round(1000 / STEP_MS):
+        return frames
+    keep_every = max(1, round((1000 / STEP_MS) / fps))
+    out: list[tuple[Path, int]] = []
+    run = 0  # position inside the current run of motion frames
+    for p, d in frames:
+        if d <= STEP_MS + 1:
+            if run % keep_every and out:
+                out[-1] = (out[-1][0], out[-1][1] + d)   # fold into the kept one
+            else:
+                out.append((p, d))
+            run += 1
+        else:
+            run = 0
+            out.append((p, d))
+    return out
+
+
+def webp_duration_ms(path: Path) -> tuple[int, int]:
+    """(frames, total ms) read from the ANMF chunks. Pillow reports 0 ms per
+    frame when it reads an animated webp back, so assemble_webp's duration_ms
+    cannot be trusted; the container's own frame headers can."""
+    import struct
+    b = path.read_bytes()
+    i, n, total = 12, 0, 0
+    while i + 8 <= len(b):
+        tag, size = b[i:i + 4], struct.unpack("<I", b[i + 4:i + 8])[0]
+        if tag == b"ANMF":
+            n += 1
+            total += struct.unpack("<I", b[i + 20:i + 23] + b"\0")[0]
+        i += 8 + size + (size & 1)
+    return n, total
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--workdir", default=None)
+    ap.add_argument("--out", default=str(REPO / "minibadge_designer" / "static" / "help" / "clk.webp"))
+    ap.add_argument("--fps", type=int, default=8, help="motion frame rate on disk (12 = as shot)")
+    ap.add_argument("--quality", type=int, default=70)
+    args = ap.parse_args()
+    import tempfile
+    workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="clk-clip-"))
+    workdir.mkdir(parents=True, exist_ok=True)
+    for old in workdir.glob("f*.png"):
+        old.unlink()
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    result = None
+    with GifCapture(workdir=workdir) as cap:
+        rec = Recorder(cap, workdir, out_w=TIP_W, out_h=TIP_H)
+        try:
+            result = record(rec)
+        finally:
+            print("marks:")
+            for ms, label in rec.marks:
+                print(f"  {ms / 1000:5.2f}s  {label}")
+            print("frames shot:", len(rec.frames), "page events:", rec.events)
+    if result is None:
+        raise SystemExit("the take did not finish; nothing written")
+    frames = thin(rec.frames, args.fps)
+    stats = assemble_webp(frames, out, quality=args.quality)
+    stats["frames_in_file"], stats["duration_ms"] = webp_duration_ms(out)
+    sheet = contact_sheet(rec.frames, workdir / "contact.png")
+    (workdir / "result.json").write_text(json.dumps(
+        {"result": result, "stats": stats, "marks": rec.marks,
+         "frames": [(p.name, d) for p, d in rec.frames]}, default=str, indent=1))
+    print("result:", json.dumps({k: v for k, v in result.items()}, default=str))
+    print("webp:", out, stats)
+    print("contact sheet:", sheet)
+    if result["blocking_problems"]:
+        raise SystemExit(f"blocking problems at the end: {result['blocking_problems']}")
+    if not result["jumper_after"] or not result["jumper_after"]["ok"]:
+        raise SystemExit(f"the jumper did not end on a legal spot: {result['jumper_after']}")
+    if not LENGTH_MS[0] <= stats["duration_ms"] <= LENGTH_MS[1]:
+        raise SystemExit(f"clip runs {stats['duration_ms']} ms; a tip clip is {LENGTH_MS[0]}-{LENGTH_MS[1]} ms")
+
+
+if __name__ == "__main__":
+    main()

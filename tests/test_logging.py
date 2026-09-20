@@ -104,3 +104,52 @@ def test_a_generic_refusal_carries_the_swallowed_exception_as_its_cause(
                   "could not process the board shape",
                   "KeyError", "window_ring"):
         assert piece in msg, f"log line lacks {piece!r}: {msg}"
+
+
+@pytest.mark.webapp
+def test_a_slow_request_is_logged_even_when_it_succeeds(
+        client, monkeypatch, caplog):
+    """An address that keeps sending the heaviest possible boards gets 200s,
+    so the failure hook never sees it; the slow-request line is what puts it
+    on the operator's watch list. The threshold is dropped to zero so the
+    cheapest request in the app (the index page) crosses it -- the rule under
+    test is "over the threshold means a WARNING", not the threshold's value.
+    """
+    monkeypatch.setattr(webapp, "SLOW_REQUEST_S", 0.0)
+    with caplog.at_level(logging.INFO, logger=APP_LOGGER):
+        resp = client.get("/", environ_base={"REMOTE_ADDR": CLIENT})
+    assert resp.status_code == 200
+    slow = [r for r in caplog.records
+            if r.name == APP_LOGGER and "slow request" in r.getMessage()]
+    assert len(slow) == 1, [r.getMessage() for r in caplog.records]
+    assert slow[0].levelno == logging.WARNING
+    for piece in (CLIENT, "GET", "/", "200"):
+        assert piece in slow[0].getMessage(), slow[0].getMessage()
+
+
+@pytest.mark.webapp
+def test_the_request_in_flight_is_named_while_it_runs_and_gone_afterwards(
+        flask_app):
+    """When gunicorn kills a worker on its timeout, the request being served
+    gets no access line and no failure line; the worker_abort hook asks the
+    app what was in flight. So the record has to exist *during* the request
+    and be cleared by teardown, or a later timeout would blame the previous
+    request. Driven through Flask's own before/teardown machinery, the same
+    path a real request takes, with an upload size and a query string so both
+    show up in the report."""
+    with flask_app.test_request_context(
+            "/gerbers?fmt=zip", method="POST", data=b"x" * 1234,
+            content_type="application/octet-stream",
+            environ_base={"REMOTE_ADDR": CLIENT},
+            headers={"User-Agent": "Mozilla/5.0 (probe)"}):
+        assert webapp.in_flight_report() is None, "nothing has started yet"
+        flask_app.preprocess_request()
+        report = webapp.in_flight_report()
+        assert report is not None
+        for piece in (CLIENT, "POST", "/gerbers?fmt=zip", "1234 bytes",
+                      "Mozilla/5.0 (probe)"):
+            assert piece in report, report
+        flask_app.do_teardown_request()
+    assert webapp.in_flight_report() is None, (
+        "the record outlived its request; the next worker timeout would be "
+        "blamed on this one")
