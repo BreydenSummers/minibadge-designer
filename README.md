@@ -1,16 +1,13 @@
 # minibadge designer
 
-A web app for designing [minibadges](https://github.com/lukejenkins/minibadge),
-the small add-on boards that clip onto a conference badge and light up from its
-power. You draw the badge in the browser, and the app hands you a KiCad project,
+A web app for designing [minibadges](https://github.com/lukejenkins/minibadge). You draw the badge in the browser, and the app hands you a KiCad project,
 or a Gerber zip that a board house can make as-is.
 
 <p align="center">
   <img src="docs/helmet-build.gif" width="720" alt="Designing a helmet-shaped minibadge start to finish: shaping the board from a picture, painting it with materials, placing an LED and text, and opening the 3D view">
 </p>
 
-You don't need to know PCB design. Upload a logo, put LEDs where you want
-light, type some text, download. The connector, the resistors, the copper and
+Upload a logo, put LEDs where you want, type some text, download. The connector, the resistors, the copper and
 the design-rule checks are done for you. If you do know KiCad, the download
 opens there and you can take it as far as you like.
 
@@ -60,10 +57,10 @@ badge usually comes together in this order:
    and if you upload a picture its dark pixels become the outline instead, up to
    about 120 mm across.
 
-2. Drop in the artwork, and each colour becomes a material: white silkscreen,
+2. Drop in the artwork, and each color becomes a material: white silkscreen,
    exposed gold or silver copper, a see-through window that glows from an LED
    behind it, or bare board. The magic wand retargets one region when two areas
-   share a colour.
+   share a color.
 
 3. Place the LEDs on either side, and each one brings its own resistor and is
    wired to the connector's power for you, so putting one behind a window is all
@@ -95,8 +92,6 @@ cost, and how the site deploys.
 pytest                  # the fast suite
 pytest -m browser       # the Playwright UI tests, needs Chromium
 ```
-
-`dev` is the working branch. Merging into `main` deploys.
 
 ## Credits
 
